@@ -40,6 +40,7 @@ namespace EntityFrameworkCore.Jet.Data.JetStoreSchemaDefinition
                     new DataColumn("VALIDATION_TEXT", typeof(string)),
                     new DataColumn("IDENTITY_SEED", typeof(int)),
                     new DataColumn("IDENTITY_INCREMENT", typeof(int)),
+                    new DataColumn("COMPUTED_EXPRESSION", typeof(string)),
                     // TODO: Add ALLOW_ZERO_LENGTH_STRING
                 });
             

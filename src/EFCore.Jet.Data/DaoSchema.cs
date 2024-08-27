@@ -242,6 +242,11 @@ namespace EntityFrameworkCore.Jet.Data
                                 ? null
                                 : validationText;
 
+                            var computedExpression = (string)field.Expression;
+                            computedExpression = string.IsNullOrEmpty(computedExpression)
+                                ? null
+                                : computedExpression;
+
                             dataTable.Rows.Add(
                                 tableName,
                                 columnName,
@@ -255,7 +260,8 @@ namespace EntityFrameworkCore.Jet.Data
                                 validationRule,
                                 validationText,
                                 seed,
-                                increment);
+                                increment,
+                                computedExpression);
                         }
                     }
                 }

@@ -247,7 +247,7 @@ namespace EntityFrameworkCore.Jet.Scaffolding.Internal
                     var validationText = reader.GetValueOrDefault<string>("VALIDATION_TEXT");
                     var identitySeed = reader.GetValueOrDefault<int?>("IDENTITY_SEED");
                     var identityIncrement = reader.GetValueOrDefault<int?>("IDENTITY_INCREMENT");
-                    var computedValue = (string?)null; // TODO: Implement support for expressions
+                    var computedValue = reader.GetValueOrDefault<string?>("COMPUTED_EXPRESSION"); ; // TODO: Implement support for expressions
                                                        // (DAO Field2 (though not mentioned)).
                                                        // Might have no equivalent in ADOX.
                     var computedIsPersisted = false;
@@ -277,7 +277,7 @@ namespace EntityFrameworkCore.Jet.Scaffolding.Internal
                         IsNullable = nullable,
                         DefaultValue = defaultValueobj,
                         DefaultValueSql = defaultValue,
-                        ComputedColumnSql = null,
+                        ComputedColumnSql = computedValue,
                         ValueGenerated = identitySeed.HasValue
                             ? ValueGenerated.OnAdd
                             : storeType == "timestamp"

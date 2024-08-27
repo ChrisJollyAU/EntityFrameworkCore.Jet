@@ -875,19 +875,6 @@ namespace Microsoft.EntityFrameworkCore.Migrations
             IModel? model,
             MigrationCommandListBuilder builder)
         {
-            if (operation.ComputedColumnSql != null)
-            {
-                if (decimal.TryParse(operation.ComputedColumnSql, out decimal result))
-                {
-                    operation.DefaultValue = result;
-                }
-                else
-                {
-                    ComputedColumnDefinition(schema, table, name, operation, model, builder);
-                    return;
-                }
-            }
-
             var columnType = GetColumnType(schema, table, name, operation, model);
             //int has no size - ignore
             if (columnType != null && columnType.StartsWith("int("))
@@ -901,7 +888,43 @@ namespace Microsoft.EntityFrameworkCore.Migrations
 
             builder.Append(operation.IsNullable ? " NULL" : " NOT NULL");
 
+            if (operation.ComputedColumnSql != null)
+            {
+                if (decimal.TryParse(operation.ComputedColumnSql, out decimal result))
+                {
+                    operation.DefaultValue = result;
+                }
+                else
+                {
+                    ComputedColumnDefinition(schema, table, name, operation, model, builder);
+                    return;
+                }
+            }
             DefaultValue(operation.DefaultValue, operation.DefaultValueSql, columnType, builder);
+        }
+
+        /// <summary>
+        ///     Generates a SQL fragment for a computed column definition for the given column metadata.
+        /// </summary>
+        /// <param name="schema">The schema that contains the table, or <see langword="null" /> to use the default schema.</param>
+        /// <param name="table">The table that contains the column.</param>
+        /// <param name="name">The column name.</param>
+        /// <param name="operation">The column metadata.</param>
+        /// <param name="model">The target model which may be <see langword="null" /> if the operations exist without a model.</param>
+        /// <param name="builder">The command builder to use to add the SQL fragment.</param>
+        protected override void ComputedColumnDefinition(
+            string? schema,
+            string table,
+            string name,
+            ColumnOperation operation,
+            IModel? model,
+            MigrationCommandListBuilder builder)
+        {
+            builder.Append(" JETCOMPUTEDSQL ```");
+
+            builder.Append(operation.ComputedColumnSql!);
+
+            builder.Append("```");
         }
 
         protected override string? GetColumnType(
