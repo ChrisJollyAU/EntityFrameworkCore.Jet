@@ -109,7 +109,7 @@ namespace EntityFrameworkCore.Jet.Query.ExpressionTranslators.Internal
                             false,
                             new[] { false },
                             returnType)),
-                    nameof(DateTime.TimeOfDay) => _sqlExpressionFactory.NullChecked(
+                    nameof(DateTime.TimeOfDay) => TimeSpanNullChecked(
                         instance!,
                         _sqlExpressionFactory.Function(
                             "TIMEVALUE",
@@ -136,7 +136,21 @@ namespace EntityFrameworkCore.Jet.Query.ExpressionTranslators.Internal
                         _sqlExpressionFactory.IsNull(checkSqlExpression),
                         _sqlExpressionFactory.Constant(
                             null,
-                            checkSqlExpression.TypeMapping))
+                            notNullSqlExpression.TypeMapping))
+                },
+                notNullSqlExpression);
+
+        public CaseExpression TimeSpanNullChecked(
+            SqlExpression checkSqlExpression,
+            SqlExpression notNullSqlExpression)
+            => _sqlExpressionFactory.Case(
+                new[]
+                {
+                    new CaseWhenClause(
+                        _sqlExpressionFactory.IsNull(checkSqlExpression),
+                        _sqlExpressionFactory.Constant(
+                            null,
+                            notNullSqlExpression.TypeMapping))
                 },
                 notNullSqlExpression);
     }

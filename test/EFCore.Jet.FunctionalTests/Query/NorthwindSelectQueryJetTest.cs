@@ -2249,9 +2249,9 @@ FROM `Orders` AS `o`
             await base.Select_datetime_TimeOfDay_component(async);
 
             AssertSql(
-    """
-SELECT CONVERT(time, [o].[OrderDate])
-FROM [Orders] AS [o]
+                """
+SELECT `o`.`OrderDate`
+FROM `Orders` AS `o`
 """);
         }
 

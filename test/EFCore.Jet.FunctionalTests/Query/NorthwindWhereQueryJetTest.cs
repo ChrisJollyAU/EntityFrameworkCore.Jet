@@ -1816,8 +1816,10 @@ WHERE (
             await base.Time_of_day_datetime(isAsync);
 
             AssertSql(
-                $@"SELECT CAST(`o`.`OrderDate` AS time)
-FROM `Orders` AS `o`");
+                """
+SELECT `o`.`OrderDate`
+FROM `Orders` AS `o`
+""");
         }
 
         public override async Task TypeBinary_short_circuit(bool isAsync)
