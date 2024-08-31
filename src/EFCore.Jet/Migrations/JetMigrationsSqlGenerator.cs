@@ -411,35 +411,28 @@ namespace Microsoft.EntityFrameworkCore.Migrations
             Check.NotNull(operation, nameof(operation));
             Check.NotNull(builder, nameof(builder));
 
-            builder.Append("CREATE ");
-
-            if (operation.IsUnique)
-            {
-                builder.Append("UNIQUE ");
-            }
-
-            IndexTraits(operation, model, builder);
-
-            builder
-                .Append("INDEX ")
-                .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name))
-                .Append(" ON ")
-                .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Table))
-                .Append(" (")
-                .Append(ColumnList(operation.Columns))
-                .Append(")");
-
-            if (!string.IsNullOrEmpty(operation.Filter))
-            {
-                builder
-                    .Append(" WITH ")
-                    .Append(operation.Filter);
-            }
+            base.Generate(operation, model, builder, terminate: false);
 
             if (terminate)
             {
                 builder.AppendLine(Dependencies.SqlGenerationHelper.StatementTerminator);
                 EndStatement(builder);
+            }
+        }
+
+        /// <summary>
+        ///     Generates a SQL fragment for extras (filter, included columns, options) of an index from a <see cref="CreateIndexOperation" />.
+        /// </summary>
+        /// <param name="operation">The operation.</param>
+        /// <param name="model">The target model which may be <see langword="null" /> if the operations exist without a model.</param>
+        /// <param name="builder">The command builder to use to add the SQL fragment.</param>
+        protected override void IndexOptions(CreateIndexOperation operation, IModel? model, MigrationCommandListBuilder builder)
+        {
+            if (operation.Filter != null)
+            {
+                builder
+                    .Append(" WITH ")
+                    .Append(operation.Filter);
             }
         }
 
@@ -796,7 +789,7 @@ namespace Microsoft.EntityFrameworkCore.Migrations
             var storeType = operation.ColumnType;
 
             if (IsIdentity(operation) &&
-                (storeType == null || Dependencies.TypeMappingSource.FindMapping(storeType) is JetIntTypeMapping))
+                (storeType == null || Dependencies.TypeMappingSource.FindMapping(storeType) is JetIntTypeMapping or ShortTypeMapping))
             {
                 // This column represents the actual identity.
                 storeType = "counter";

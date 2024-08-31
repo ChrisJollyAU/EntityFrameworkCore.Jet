@@ -44,11 +44,11 @@ public class MigrationsJetTest : MigrationsTestBase<MigrationsJetTest.Migrations
         await base.Create_table();
 
         AssertSql(
-"""
-CREATE TABLE [People] (
-    [Id] int NOT NULL IDENTITY,
-    [Name] nvarchar(max) NULL,
-    CONSTRAINT [PK_People] PRIMARY KEY ([Id])
+            """
+CREATE TABLE `People` (
+    `Id` counter NOT NULL,
+    `Name` varchar(255) NULL,
+    CONSTRAINT `PK_People` PRIMARY KEY (`Id`)
 );
 """);
     }
@@ -89,9 +89,9 @@ CREATE INDEX [IX_People_EmployerId] ON [dbo2].[People] ([EmployerId]);
         await base.Create_table_no_key();
 
         AssertSql(
-"""
-CREATE TABLE [Anonymous] (
-    [SomeColumn] int NOT NULL
+            """
+CREATE TABLE `Anonymous` (
+    `SomeColumn` integer NOT NULL
 );
 """);
     }
@@ -171,9 +171,9 @@ CREATE TABLE [People] (
             });
 
         AssertSql(
-"""
-CREATE TABLE [People] (
-    [IdentityColumn] smallint NOT NULL IDENTITY
+            """
+CREATE TABLE `People` (
+    `IdentityColumn` counter NOT NULL
 );
 """);
     }
@@ -183,8 +183,8 @@ CREATE TABLE [People] (
         await base.Drop_table();
 
         AssertSql(
-"""
-DROP TABLE [People];
+            """
+DROP TABLE `People`;
 """);
     }
 
@@ -234,12 +234,7 @@ EXEC sp_addextendedproperty 'MS_Description', @description, 'SCHEMA', @defaultSc
         await base.Alter_table_remove_comment();
 
         AssertSql(
-"""
-DECLARE @defaultSchema AS sysname;
-SET @defaultSchema = SCHEMA_NAME();
-DECLARE @description AS sql_variant;
-EXEC sp_dropextendedproperty 'MS_Description', 'SCHEMA', @defaultSchema, 'TABLE', N'People';
-""");
+);
     }
 
     public override async Task Rename_table()
@@ -356,8 +351,8 @@ CREATE TABLE [dbo].[People] (
         await base.Add_column_with_defaultValue_string();
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD [Name] nvarchar(max) NOT NULL DEFAULT N'John Doe';
+            """
+ALTER TABLE `People` ADD `Name` varchar(255) NOT NULL DEFAULT 'John Doe';
 """);
     }
 
@@ -366,8 +361,8 @@ ALTER TABLE [People] ADD [Name] nvarchar(max) NOT NULL DEFAULT N'John Doe';
         await base.Add_column_with_defaultValue_datetime();
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD [Birthday] datetime2 NOT NULL DEFAULT '2015-04-12T17:05:00.0000000';
+            """
+ALTER TABLE `People` ADD `Birthday` datetime NOT NULL DEFAULT '2015-04-12 17:05:00';
 """);
     }
 
@@ -397,8 +392,8 @@ ALTER TABLE [People] ADD [Birthday] datetime2 NOT NULL DEFAULT '2015-04-12T17:05
             });
 
         AssertSql(
-$"""
-ALTER TABLE [People] ADD [Birthday] datetime2({precision}) NOT NULL DEFAULT '2015-04-12T17:05:00{fractionalSeconds}';
+            """
+ALTER TABLE `People` ADD `Birthday` datetime NOT NULL DEFAULT '2015-04-12 17:05:00';
 """);
     }
 
@@ -431,8 +426,8 @@ ALTER TABLE [People] ADD [Birthday] datetime2({precision}) NOT NULL DEFAULT '201
             });
 
         AssertSql(
-$"""
-ALTER TABLE [People] ADD [Birthday] datetimeoffset({precision}) NOT NULL DEFAULT '2015-04-12T17:05:00{fractionalSeconds}+10:00';
+            """
+ALTER TABLE `People` ADD `Birthday` datetime NOT NULL DEFAULT CDATE('2015-04-12 07:05:00');
 """);
     }
 
@@ -463,8 +458,8 @@ ALTER TABLE [People] ADD [Birthday] datetimeoffset({precision}) NOT NULL DEFAULT
             });
 
         AssertSql(
-$"""
-ALTER TABLE [People] ADD [Age] time({precision}) NOT NULL DEFAULT '12:34:56{fractionalSeconds}';
+            """
+ALTER TABLE `People` ADD `Age` datetime NOT NULL DEFAULT TIMEVALUE('12:34:56');
 """);
     }
 
@@ -485,8 +480,8 @@ ALTER TABLE [People] ADD [Age] time({precision}) NOT NULL DEFAULT '12:34:56{frac
             });
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD [Birthday] datetime NOT NULL DEFAULT '2019-01-01T00:00:00.000';
+            """
+ALTER TABLE `People` ADD `Birthday` datetime NOT NULL DEFAULT '2019-01-01';
 """);
     }
 
@@ -507,8 +502,8 @@ ALTER TABLE [People] ADD [Birthday] datetime NOT NULL DEFAULT '2019-01-01T00:00:
             });
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD [Birthday] smalldatetime NOT NULL DEFAULT '2019-01-01T00:00:00';
+            """
+ALTER TABLE `People` ADD `Birthday` smalldatetime NOT NULL DEFAULT '2019-01-01';
 """);
     }
 
@@ -605,8 +600,8 @@ EXEC(N'ALTER TABLE [People] ADD [IdPlusOne] AS [Id] + 1');
         await base.Add_column_with_required();
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD [Name] nvarchar(max) NOT NULL DEFAULT N'';
+            """
+ALTER TABLE `People` ADD `Name` varchar(255) NOT NULL DEFAULT '';
 """);
     }
 
@@ -615,8 +610,8 @@ ALTER TABLE [People] ADD [Name] nvarchar(max) NOT NULL DEFAULT N'';
         await base.Add_column_with_ansi();
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD [Name] varchar(max) NULL;
+            """
+ALTER TABLE `People` ADD `Name` varchar(255) NULL;
 """);
     }
 
@@ -625,8 +620,8 @@ ALTER TABLE [People] ADD [Name] varchar(max) NULL;
         await base.Add_column_with_max_length();
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD [Name] nvarchar(30) NULL;
+            """
+ALTER TABLE `People` ADD `Name` varchar(30) NULL;
 """);
     }
 
@@ -642,8 +637,8 @@ ALTER TABLE [People] ADD [Name] nvarchar(30) NULL;
         await base.Add_column_with_fixed_length();
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD [Name] nchar(100) NULL;
+            """
+ALTER TABLE `People` ADD `Name` char(100) NULL;
 """);
     }
 
@@ -694,12 +689,12 @@ ALTER TABLE [People] ADD [Name] nvarchar(max) COLLATE German_PhoneBook_CI_AS NUL
         await base.Add_column_with_check_constraint();
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD [DriverLicense] int NOT NULL DEFAULT 0;
+            """
+ALTER TABLE `People` ADD `DriverLicense` integer NOT NULL DEFAULT 0;
 """,
-//
-"""
-ALTER TABLE [People] ADD CONSTRAINT [CK_People_Foo] CHECK ([DriverLicense] > 0);
+            //
+            """
+ALTER TABLE `People` ADD CONSTRAINT `CK_People_Foo` CHECK (`DriverLicense` > 0);
 """);
     }
 
@@ -718,8 +713,8 @@ ALTER TABLE [People] ADD CONSTRAINT [CK_People_Foo] CHECK ([DriverLicense] > 0);
             });
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD [IdentityColumn] int NOT NULL IDENTITY;
+            """
+ALTER TABLE `People` ADD `IdentityColumn` counter NOT NULL;
 """);
     }
 
@@ -741,8 +736,8 @@ ALTER TABLE [People] ADD [IdentityColumn] int NOT NULL IDENTITY;
             });
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD [IdentityColumn] int NOT NULL IDENTITY(100, 5);
+            """
+ALTER TABLE `People` ADD `IdentityColumn` counter(100, 5) NOT NULL;
 """);
     }
 
@@ -795,16 +790,16 @@ ALTER TABLE [People] ADD [IdentityColumn] int NOT NULL IDENTITY(100, 5);
             });
 
         AssertSql(
-"""
-ALTER TABLE [Dogs] ADD [IdentityColumn] int NOT NULL IDENTITY(2, 2);
+            """
+ALTER TABLE `Dogs` ADD `IdentityColumn` counter(2, 2) NOT NULL;
 """,
-//
-"""
-ALTER TABLE [Cats] ADD [IdentityColumn] int NOT NULL IDENTITY(1, 2);
+            //
+            """
+ALTER TABLE `Cats` ADD `IdentityColumn` counter(1, 2) NOT NULL;
 """,
-//
-"""
-ALTER TABLE [Animal] ADD [IdentityColumn] int NOT NULL DEFAULT 0;
+            //
+            """
+ALTER TABLE `Animal` ADD `IdentityColumn` integer NOT NULL DEFAULT 0;
 """);
     }
 
@@ -813,14 +808,9 @@ ALTER TABLE [Animal] ADD [IdentityColumn] int NOT NULL DEFAULT 0;
         await base.Alter_column_change_type();
 
         AssertSql(
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'SomeColumn');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [People] ALTER COLUMN [SomeColumn] bigint NOT NULL;
+            """
+ALTER TABLE `People` ALTER COLUMN `SomeColumn` DROP DEFAULT;
+ALTER TABLE `People` ALTER COLUMN `SomeColumn` decimal(20,0) NOT NULL;
 """);
     }
 
@@ -1046,11 +1036,9 @@ EXEC sp_addextendedproperty 'MS_Description', @description, 'SCHEMA', @defaultSc
         await base.Alter_column_remove_comment();
 
         AssertSql(
-"""
-DECLARE @defaultSchema AS sysname;
-SET @defaultSchema = SCHEMA_NAME();
-DECLARE @description AS sql_variant;
-EXEC sp_dropextendedproperty 'MS_Description', 'SCHEMA', @defaultSchema, 'TABLE', N'People', 'COLUMN', N'Id';
+            """
+ALTER TABLE `People` ALTER COLUMN `Id` DROP DEFAULT;
+ALTER TABLE `People` ALTER COLUMN `Id` integer NOT NULL;
 """);
     }
 
@@ -1122,48 +1110,6 @@ ALTER TABLE [People] ALTER COLUMN [Name] nvarchar(max) NULL;
     }
 
     [ConditionalFact]
-    public virtual async Task Alter_column_make_required_with_index_with_included_properties()
-    {
-        await Test(
-            builder => builder.Entity(
-                "People", e =>
-                {
-                    e.Property<int>("Id");
-                    e.Property<string>("SomeColumn");
-                    e.Property<string>("SomeOtherColumn");
-                    e.HasIndex("SomeColumn").IncludeProperties("SomeOtherColumn");
-                }),
-            builder => { },
-            builder => builder.Entity("People").Property<string>("SomeColumn").IsRequired(),
-            model =>
-            {
-                var table = Assert.Single(model.Tables);
-                var column = Assert.Single(table.Columns, c => c.Name == "SomeColumn");
-                Assert.False(column.IsNullable);
-                var index = Assert.Single(table.Indexes);
-                Assert.Equal(1, index.Columns.Count);
-                Assert.Contains(table.Columns.Single(c => c.Name == "SomeColumn"), index.Columns);
-                var includedColumns = (IReadOnlyList<string>?)index[JetAnnotationNames.Include];
-                Assert.Null(includedColumns);
-            });
-
-        AssertSql(
-"""
-DROP INDEX [IX_People_SomeColumn] ON [People];
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'SomeColumn');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-UPDATE [People] SET [SomeColumn] = N'' WHERE [SomeColumn] IS NULL;
-ALTER TABLE [People] ALTER COLUMN [SomeColumn] nvarchar(450) NOT NULL;
-ALTER TABLE [People] ADD DEFAULT N'' FOR [SomeColumn];
-CREATE INDEX [IX_People_SomeColumn] ON [People] ([SomeColumn]) INCLUDE ([SomeOtherColumn]);
-""");
-    }
-
-    [ConditionalFact]
     public virtual async Task Alter_column_with_index_no_narrowing()
     {
         await Test(
@@ -1192,46 +1138,6 @@ INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [
 WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'Name');
 IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
 ALTER TABLE [People] ALTER COLUMN [Name] nvarchar(450) NULL;
-""");
-    }
-
-    [ConditionalFact]
-    public virtual async Task Alter_column_with_index_included_column()
-    {
-        await Test(
-            builder => builder.Entity(
-                "People", e =>
-                {
-                    e.Property<int>("Id");
-                    e.Property<string>("Name");
-                    e.Property<string>("FirstName");
-                    e.Property<string>("LastName");
-                    e.HasIndex("FirstName", "LastName").IncludeProperties("Name");
-                }),
-            builder => { },
-            builder => builder.Entity("People").Property<string>("Name").HasMaxLength(30),
-            model =>
-            {
-                var table = Assert.Single(model.Tables);
-                var index = Assert.Single(table.Indexes);
-                Assert.Equal(2, index.Columns.Count);
-                Assert.Contains(table.Columns.Single(c => c.Name == "FirstName"), index.Columns);
-                Assert.Contains(table.Columns.Single(c => c.Name == "LastName"), index.Columns);
-                var includedColumns = (IReadOnlyList<string>?)index[JetAnnotationNames.Include];
-                Assert.Null(includedColumns);
-            });
-
-        AssertSql(
-"""
-DROP INDEX [IX_People_FirstName_LastName] ON [People];
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'Name');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [People] ALTER COLUMN [Name] nvarchar(30) NULL;
-CREATE INDEX [IX_People_FirstName_LastName] ON [People] ([FirstName], [LastName]) INCLUDE ([Name]);
 """);
     }
 
@@ -1275,7 +1181,7 @@ CREATE INDEX [IX_People_FirstName_LastName] ON [People] ([FirstName], [LastName]
             {
                 var table = Assert.Single(model.Tables);
                 var column = Assert.Single(table.Columns, c => c.Name == "IdentityColumn");
-                Assert.Equal("bigint", column.StoreType);
+                Assert.Equal("decimal(20,0)", column.StoreType);
                 Assert.Equal(ValueGenerated.OnAdd, column.ValueGenerated);
             });
 
@@ -1347,14 +1253,9 @@ EXEC sp_addextendedproperty 'MS_Description', @description, 'SCHEMA', @defaultSc
         await base.Drop_column();
 
         AssertSql(
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'SomeColumn');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [People] DROP COLUMN [SomeColumn];
+            """
+ALTER TABLE `People` ALTER COLUMN `SomeColumn` DROP DEFAULT;
+ALTER TABLE `People` DROP COLUMN `SomeColumn`;
 """);
     }
 
@@ -1363,18 +1264,13 @@ ALTER TABLE [People] DROP COLUMN [SomeColumn];
         await base.Drop_column_primary_key();
 
         AssertSql(
-"""
-ALTER TABLE [People] DROP CONSTRAINT [PK_People];
+            """
+ALTER TABLE `People` DROP CONSTRAINT `PK_People`;
 """,
-//
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'Id');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [People] DROP COLUMN [Id];
+            //
+            """
+ALTER TABLE `People` ALTER COLUMN `Id` DROP DEFAULT;
+ALTER TABLE `People` DROP COLUMN `Id`;
 """);
     }
 
@@ -1409,8 +1305,8 @@ ALTER TABLE [People] DROP COLUMN [X];
         await base.Rename_column();
 
         AssertSql(
-"""
-EXEC sp_rename N'[People].[SomeColumn]', N'SomeOtherColumn', N'COLUMN';
+            """
+ALTER TABLE `People` RENAME COLUMN `SomeColumn` TO `SomeOtherColumn`;
 """);
     }
 
@@ -1419,18 +1315,8 @@ EXEC sp_rename N'[People].[SomeColumn]', N'SomeOtherColumn', N'COLUMN';
         await base.Create_index();
 
         AssertSql(
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'FirstName');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [People] ALTER COLUMN [FirstName] nvarchar(450) NULL;
-""",
-//
-"""
-CREATE INDEX [IX_People_FirstName] ON [People] ([FirstName]);
+            """
+CREATE INDEX `IX_People_FirstName` ON `People` (`FirstName`);
 """);
     }
 
@@ -1469,8 +1355,8 @@ CREATE UNIQUE INDEX [IX_People_FirstName_LastName] ON [People] ([FirstName], [La
         await base.Create_index_descending();
 
         AssertSql(
-"""
-CREATE INDEX [IX_People_X] ON [People] ([X] DESC);
+            """
+CREATE INDEX `IX_People_X` ON `People` (`X` DESC);
 """);
     }
 
@@ -1479,8 +1365,8 @@ CREATE INDEX [IX_People_X] ON [People] ([X] DESC);
         await base.Create_index_descending_mixed();
 
         AssertSql(
-"""
-CREATE INDEX [IX_People_X_Y_Z] ON [People] ([X], [Y] DESC, [Z]);
+            """
+CREATE INDEX `IX_People_X_Y_Z` ON `People` (`X`, `Y` DESC, `Z`);
 """);
     }
 
@@ -1503,12 +1389,12 @@ CREATE UNIQUE INDEX [IX_People_X] ON [People] ([X]);
         await base.Alter_index_change_sort_order();
 
         AssertSql(
-"""
-DROP INDEX [IX_People_X_Y_Z] ON [People];
+            """
+DROP INDEX `IX_People_X_Y_Z` ON `People`;
 """,
-//
-"""
-CREATE INDEX [IX_People_X_Y_Z] ON [People] ([X], [Y] DESC, [Z]);
+            //
+            """
+CREATE INDEX `IX_People_X_Y_Z` ON `People` (`X`, `Y` DESC, `Z`);
 """);
     }
 
@@ -1589,232 +1475,13 @@ CREATE UNIQUE INDEX [IX_People_Name] ON [People] ([Name]) WHERE [Name] IS NOT NU
 """);
     }
 
-    [ConditionalFact]
-    public virtual async Task Create_index_with_include()
-    {
-        await Test(
-            builder => builder.Entity(
-                "People", e =>
-                {
-                    e.Property<int>("Id");
-                    e.Property<string>("FirstName");
-                    e.Property<string>("LastName");
-                    e.Property<string>("Name");
-                }),
-            builder => { },
-            builder => builder.Entity("People").HasIndex("Name")
-                .IncludeProperties("FirstName", "LastName"),
-            model =>
-            {
-                var table = Assert.Single(model.Tables);
-                var index = Assert.Single(table.Indexes);
-                Assert.Equal(1, index.Columns.Count);
-                Assert.Contains(table.Columns.Single(c => c.Name == "Name"), index.Columns);
-                var includedColumns = (IReadOnlyList<string>?)index[JetAnnotationNames.Include];
-                Assert.Null(includedColumns);
-            });
-
-        AssertSql(
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'Name');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [People] ALTER COLUMN [Name] nvarchar(450) NULL;
-""",
-//
-"""
-CREATE INDEX [IX_People_Name] ON [People] ([Name]) INCLUDE ([FirstName], [LastName]);
-""");
-    }
-
-    [ConditionalFact]
-    public virtual async Task Create_index_with_include_and_filter()
-    {
-        await Test(
-            builder => builder.Entity(
-                "People", e =>
-                {
-                    e.Property<int>("Id");
-                    e.Property<string>("FirstName");
-                    e.Property<string>("LastName");
-                    e.Property<string>("Name");
-                }),
-            builder => { },
-            builder => builder.Entity("People").HasIndex("Name")
-                .IncludeProperties("FirstName", "LastName")
-                .HasFilter("[Name] IS NOT NULL"),
-            model =>
-            {
-                var table = Assert.Single(model.Tables);
-                var index = Assert.Single(table.Indexes);
-                Assert.Equal("([Name] IS NOT NULL)", index.Filter);
-                Assert.Equal(1, index.Columns.Count);
-                Assert.Contains(table.Columns.Single(c => c.Name == "Name"), index.Columns);
-                var includedColumns = (IReadOnlyList<string>?)index[JetAnnotationNames.Include];
-                Assert.Null(includedColumns);
-            });
-
-        AssertSql(
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'Name');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [People] ALTER COLUMN [Name] nvarchar(450) NULL;
-""",
-//
-"""
-CREATE INDEX [IX_People_Name] ON [People] ([Name]) INCLUDE ([FirstName], [LastName]) WHERE [Name] IS NOT NULL;
-""");
-    }
-
-    [ConditionalFact]
-    public virtual async Task Create_index_unique_with_include()
-    {
-        await Test(
-            builder => builder.Entity(
-                "People", e =>
-                {
-                    e.Property<int>("Id");
-                    e.Property<string>("FirstName");
-                    e.Property<string>("LastName");
-                    e.Property<string>("Name").IsRequired();
-                }),
-            builder => { },
-            builder => builder.Entity("People").HasIndex("Name")
-                .IsUnique()
-                .IncludeProperties("FirstName", "LastName"),
-            model =>
-            {
-                var table = Assert.Single(model.Tables);
-                var index = Assert.Single(table.Indexes);
-                Assert.True(index.IsUnique);
-                Assert.Equal(1, index.Columns.Count);
-                Assert.Contains(table.Columns.Single(c => c.Name == "Name"), index.Columns);
-                var includedColumns = (IReadOnlyList<string>?)index[JetAnnotationNames.Include];
-                Assert.Null(includedColumns);
-            });
-
-        AssertSql(
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'Name');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [People] ALTER COLUMN [Name] nvarchar(450) NOT NULL;
-""",
-//
-"""
-CREATE UNIQUE INDEX [IX_People_Name] ON [People] ([Name]) INCLUDE ([FirstName], [LastName]);
-""");
-    }
-
-    [ConditionalFact]
-    public virtual async Task Create_index_unique_with_include_and_filter()
-    {
-        await Test(
-            builder => builder.Entity(
-                "People", e =>
-                {
-                    e.Property<int>("Id");
-                    e.Property<string>("FirstName");
-                    e.Property<string>("LastName");
-                    e.Property<string>("Name").IsRequired();
-                }),
-            builder => { },
-            builder => builder.Entity("People").HasIndex("Name")
-                .IsUnique()
-                .IncludeProperties("FirstName", "LastName")
-                .HasFilter("[Name] IS NOT NULL"),
-            model =>
-            {
-                var table = Assert.Single(model.Tables);
-                var index = Assert.Single(table.Indexes);
-                Assert.True(index.IsUnique);
-                Assert.Equal("([Name] IS NOT NULL)", index.Filter);
-                Assert.Equal(1, index.Columns.Count);
-                Assert.Contains(table.Columns.Single(c => c.Name == "Name"), index.Columns);
-                var includedColumns = (IReadOnlyList<string>?)index[JetAnnotationNames.Include];
-                Assert.Null(includedColumns);
-            });
-
-        AssertSql(
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'Name');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [People] ALTER COLUMN [Name] nvarchar(450) NOT NULL;
-""",
-//
-"""
-CREATE UNIQUE INDEX [IX_People_Name] ON [People] ([Name]) INCLUDE ([FirstName], [LastName]) WHERE [Name] IS NOT NULL;
-""");
-    }
-
-    [ConditionalFact]
-    public virtual async Task Create_index_unique_with_include_filter_and_fillfactor()
-    {
-        await Test(
-            builder => builder.Entity(
-                "People", e =>
-                {
-                    e.Property<int>("Id");
-                    e.Property<string>("FirstName");
-                    e.Property<string>("LastName");
-                    e.Property<string>("Name").IsRequired();
-                }),
-            builder => { },
-            builder => builder.Entity("People").HasIndex("Name")
-                .IsUnique()
-                .IncludeProperties("FirstName", "LastName")
-                .HasFilter("[Name] IS NOT NULL")
-                .HasFillFactor(90),
-            model =>
-            {
-                var table = Assert.Single(model.Tables);
-                var index = Assert.Single(table.Indexes);
-                Assert.True(index.IsUnique);
-                Assert.Equal("([Name] IS NOT NULL)", index.Filter);
-                Assert.Equal(1, index.Columns.Count);
-                Assert.Contains(table.Columns.Single(c => c.Name == "Name"), index.Columns);
-                var includedColumns = (IReadOnlyList<string>?)index[JetAnnotationNames.Include];
-                Assert.Null(includedColumns);
-                // TODO: Online index not scaffolded?
-            });
-
-        AssertSql(
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'Name');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [People] ALTER COLUMN [Name] nvarchar(450) NOT NULL;
-""",
-//
-"""
-CREATE UNIQUE INDEX [IX_People_Name] ON [People] ([Name]) INCLUDE ([FirstName], [LastName]) WHERE [Name] IS NOT NULL WITH (FILLFACTOR = 90);
-""");
-    }
-
     public override async Task Drop_index()
     {
         await base.Drop_index();
 
         AssertSql(
-"""
-DROP INDEX [IX_People_SomeField] ON [People];
+            """
+DROP INDEX `IX_People_SomeField` ON `People`;
 """);
     }
 
@@ -1840,18 +1507,8 @@ EXEC sp_rename N'[People].[Foo]', N'foo', N'INDEX';
         await base.Add_primary_key_string();
 
         AssertSql(
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'SomeField');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [People] ALTER COLUMN [SomeField] nvarchar(450) NOT NULL;
-""",
-//
-"""
-ALTER TABLE [People] ADD CONSTRAINT [PK_People] PRIMARY KEY ([SomeField]);
+            """
+ALTER TABLE `People` ADD CONSTRAINT `PK_People` PRIMARY KEY (`SomeField`);
 """);
     }
 
@@ -1882,8 +1539,8 @@ ALTER TABLE [People] ADD CONSTRAINT [PK_Foo] PRIMARY KEY ([SomeField]);
         await base.Add_primary_key_composite_with_name();
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD CONSTRAINT [PK_Foo] PRIMARY KEY ([SomeField1], [SomeField2]);
+            """
+ALTER TABLE `People` ADD CONSTRAINT `PK_Foo` PRIMARY KEY (`SomeField1`, `SomeField2`);
 """);
     }
 
@@ -1899,18 +1556,8 @@ ALTER TABLE [People] ADD CONSTRAINT [PK_Foo] PRIMARY KEY ([SomeField1], [SomeFie
         await base.Drop_primary_key_string();
 
         AssertSql(
-"""
-ALTER TABLE [People] DROP CONSTRAINT [PK_People];
-""",
-//
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[People]') AND [c].[name] = N'SomeField');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [People] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [People] ALTER COLUMN [SomeField] nvarchar(max) NOT NULL;
+            """
+ALTER TABLE `People` DROP CONSTRAINT `PK_People`;
 """);
     }
 
@@ -1919,31 +1566,25 @@ ALTER TABLE [People] ALTER COLUMN [SomeField] nvarchar(max) NOT NULL;
         await base.Add_foreign_key();
 
         AssertSql(
-"""
-CREATE INDEX [IX_Orders_CustomerId] ON [Orders] ([CustomerId]);
+            """
+CREATE INDEX `IX_Orders_CustomerId` ON `Orders` (`CustomerId`);
 """,
-//
-"""
-ALTER TABLE [Orders] ADD CONSTRAINT [FK_Orders_Customers_CustomerId] FOREIGN KEY ([CustomerId]) REFERENCES [Customers] ([Id]) ON DELETE CASCADE;
+            //
+            """
+ALTER TABLE `Orders` ADD CONSTRAINT `FK_Orders_Customers_CustomerId` FOREIGN KEY (`CustomerId`) REFERENCES `Customers` (`Id`) ON DELETE CASCADE;
 """);
     }
 
     public override async Task Add_foreign_key_with_name()
     {
         await base.Add_foreign_key_with_name();
-
-        // AssertSql(
-        //     @"ALTER TABLE [Orders] DROP CONSTRAINT [FK_Orders_Customers_CustomerId];",
-        //     //
-        //     @"DROP INDEX [IX_Orders_CustomerId] ON [Orders];");
-
-        AssertSql(
-"""
-CREATE INDEX [IX_Orders_CustomerId] ON [Orders] ([CustomerId]);
+AssertSql(
+    """
+CREATE INDEX `IX_Orders_CustomerId` ON `Orders` (`CustomerId`);
 """,
-//
-"""
-ALTER TABLE [Orders] ADD CONSTRAINT [FK_Foo] FOREIGN KEY ([CustomerId]) REFERENCES [Customers] ([Id]) ON DELETE CASCADE;
+    //
+    """
+ALTER TABLE `Orders` ADD CONSTRAINT `FK_Foo` FOREIGN KEY (`CustomerId`) REFERENCES `Customers` (`Id`) ON DELETE CASCADE;
 """);
     }
 
@@ -1952,12 +1593,12 @@ ALTER TABLE [Orders] ADD CONSTRAINT [FK_Foo] FOREIGN KEY ([CustomerId]) REFERENC
         await base.Drop_foreign_key();
 
         AssertSql(
-"""
-ALTER TABLE [Orders] DROP CONSTRAINT [FK_Orders_Customers_CustomerId];
+            """
+ALTER TABLE `Orders` DROP CONSTRAINT `FK_Orders_Customers_CustomerId`;
 """,
-//
-"""
-DROP INDEX [IX_Orders_CustomerId] ON [Orders];
+            //
+            """
+DROP INDEX `IX_Orders_CustomerId` ON `Orders`;
 """);
     }
 
@@ -1966,8 +1607,8 @@ DROP INDEX [IX_Orders_CustomerId] ON [Orders];
         await base.Add_unique_constraint();
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD CONSTRAINT [AK_People_AlternateKeyColumn] UNIQUE ([AlternateKeyColumn]);
+            """
+ALTER TABLE `People` ADD CONSTRAINT `AK_People_AlternateKeyColumn` UNIQUE (`AlternateKeyColumn`);
 """);
     }
 
@@ -1976,8 +1617,8 @@ ALTER TABLE [People] ADD CONSTRAINT [AK_People_AlternateKeyColumn] UNIQUE ([Alte
         await base.Add_unique_constraint_composite_with_name();
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD CONSTRAINT [AK_Foo] UNIQUE ([AlternateKeyColumn1], [AlternateKeyColumn2]);
+            """
+ALTER TABLE `People` ADD CONSTRAINT `AK_Foo` UNIQUE (`AlternateKeyColumn1`, `AlternateKeyColumn2`);
 """);
     }
 
@@ -1986,8 +1627,8 @@ ALTER TABLE [People] ADD CONSTRAINT [AK_Foo] UNIQUE ([AlternateKeyColumn1], [Alt
         await base.Drop_unique_constraint();
 
         AssertSql(
-"""
-ALTER TABLE [People] DROP CONSTRAINT [AK_People_AlternateKeyColumn];
+            """
+ALTER TABLE `People` DROP CONSTRAINT `AK_People_AlternateKeyColumn`;
 """);
     }
 
@@ -1996,8 +1637,8 @@ ALTER TABLE [People] DROP CONSTRAINT [AK_People_AlternateKeyColumn];
         await base.Add_check_constraint_with_name();
 
         AssertSql(
-"""
-ALTER TABLE [People] ADD CONSTRAINT [CK_People_Foo] CHECK ([DriverLicense] > 0);
+            """
+ALTER TABLE `People` ADD CONSTRAINT `CK_People_Foo` CHECK (`DriverLicense` > 0);
 """);
     }
 
@@ -2020,8 +1661,8 @@ ALTER TABLE [People] ADD CONSTRAINT [CK_People_Foo] CHECK ([DriverLicense] > 0);
             migrationsSqlGenerationOptions: MigrationsSqlGenerationOptions.Idempotent);
 
         AssertSql(
-"""
-EXEC(N'ALTER TABLE [People] ADD CONSTRAINT [CK_People_Foo] CHECK ([DriverLicense] > 0)');
+            """
+ALTER TABLE `People` ADD CONSTRAINT `CK_People_Foo` CHECK ([DriverLicense] > 0);
 """);
     }
 
@@ -2030,12 +1671,12 @@ EXEC(N'ALTER TABLE [People] ADD CONSTRAINT [CK_People_Foo] CHECK ([DriverLicense
         await base.Alter_check_constraint();
 
         AssertSql(
-"""
-ALTER TABLE [People] DROP CONSTRAINT [CK_People_Foo];
+            """
+ALTER TABLE `People` DROP CONSTRAINT `CK_People_Foo`;
 """,
-//
-"""
-ALTER TABLE [People] ADD CONSTRAINT [CK_People_Foo] CHECK ([DriverLicense] > 1);
+            //
+            """
+ALTER TABLE `People` ADD CONSTRAINT `CK_People_Foo` CHECK (`DriverLicense` > 1);
 """);
     }
 
@@ -2044,8 +1685,8 @@ ALTER TABLE [People] ADD CONSTRAINT [CK_People_Foo] CHECK ([DriverLicense] > 1);
         await base.Drop_check_constraint();
 
         AssertSql(
-"""
-ALTER TABLE [People] DROP CONSTRAINT [CK_People_Foo];
+            """
+ALTER TABLE `People` DROP CONSTRAINT `CK_People_Foo`;
 """);
     }
 
@@ -2265,19 +1906,18 @@ DROP SEQUENCE [TestSequence];
     public override async Task InsertDataOperation()
     {
         await base.InsertDataOperation();
-
-        AssertSql(
-"""
-IF EXISTS (SELECT * FROM [sys].[identity_columns] WHERE [name] IN (N'Id', N'Name') AND [object_id] = OBJECT_ID(N'[Person]'))
-    SET IDENTITY_INSERT [Person] ON;
-INSERT INTO [Person] ([Id], [Name])
-VALUES (1, N'Daenerys Targaryen'),
-(2, N'John Snow'),
-(3, N'Arya Stark'),
-(4, N'Harry Strickland'),
-(5, NULL);
-IF EXISTS (SELECT * FROM [sys].[identity_columns] WHERE [name] IN (N'Id', N'Name') AND [object_id] = OBJECT_ID(N'[Person]'))
-    SET IDENTITY_INSERT [Person] OFF;
+AssertSql(
+    """
+INSERT INTO `Person` (`Id`, `Name`)
+VALUES (1, 'Daenerys Targaryen');
+INSERT INTO `Person` (`Id`, `Name`)
+VALUES (2, 'John Snow');
+INSERT INTO `Person` (`Id`, `Name`)
+VALUES (3, 'Arya Stark');
+INSERT INTO `Person` (`Id`, `Name`)
+VALUES (4, 'Harry Strickland');
+INSERT INTO `Person` (`Id`, `Name`)
+VALUES (5, NULL);
 """);
     }
 
@@ -2285,11 +1925,10 @@ IF EXISTS (SELECT * FROM [sys].[identity_columns] WHERE [name] IN (N'Id', N'Name
     {
         await base.DeleteDataOperation_simple_key();
 
-        // TODO remove rowcount
         AssertSql(
-"""
-DELETE FROM [Person]
-WHERE [Id] = 2;
+            """
+DELETE FROM `Person`
+WHERE `Id` = 2;
 SELECT @@ROWCOUNT;
 """);
     }
@@ -2297,12 +1936,10 @@ SELECT @@ROWCOUNT;
     public override async Task DeleteDataOperation_composite_key()
     {
         await base.DeleteDataOperation_composite_key();
-
-        // TODO remove rowcount
-        AssertSql(
-"""
-DELETE FROM [Person]
-WHERE [AnotherId] = 12 AND [Id] = 2;
+AssertSql(
+    """
+DELETE FROM `Person`
+WHERE `AnotherId` = 12 AND `Id` = 2;
 SELECT @@ROWCOUNT;
 """);
     }
@@ -2310,12 +1947,10 @@ SELECT @@ROWCOUNT;
     public override async Task UpdateDataOperation_simple_key()
     {
         await base.UpdateDataOperation_simple_key();
-
-        // TODO remove rowcount
-        AssertSql(
-"""
-UPDATE [Person] SET [Name] = N'Another John Snow'
-WHERE [Id] = 2;
+AssertSql(
+    """
+UPDATE `Person` SET `Name` = 'Another John Snow'
+WHERE `Id` = 2;
 SELECT @@ROWCOUNT;
 """);
     }
@@ -2323,12 +1958,10 @@ SELECT @@ROWCOUNT;
     public override async Task UpdateDataOperation_composite_key()
     {
         await base.UpdateDataOperation_composite_key();
-
-        // TODO remove rowcount
-        AssertSql(
-"""
-UPDATE [Person] SET [Name] = N'Another John Snow'
-WHERE [AnotherId] = 11 AND [Id] = 2;
+AssertSql(
+    """
+UPDATE `Person` SET `Name` = 'Another John Snow'
+WHERE `AnotherId` = 11 AND `Id` = 2;
 SELECT @@ROWCOUNT;
 """);
     }
@@ -2337,12 +1970,21 @@ SELECT @@ROWCOUNT;
     {
         await base.UpdateDataOperation_multiple_columns();
 
-        // TODO remove rowcount
         AssertSql(
-"""
-UPDATE [Person] SET [Age] = 21, [Name] = N'Another John Snow'
-WHERE [Id] = 2;
+            """
+UPDATE `Person` SET `Age` = 21, `Name` = 'Another John Snow'
+WHERE `Id` = 2;
 SELECT @@ROWCOUNT;
+""");
+    }
+
+    public override async Task Add_required_primitve_collection_with_custom_default_value_sql_to_existing_table()
+    {
+        await base.Add_required_primitve_collection_with_custom_default_value_sql_to_existing_table_core("N'[3, 2, 1]'");
+
+        AssertSql(
+            """
+ALTER TABLE [Customers] ADD [Numbers] nvarchar(max) NOT NULL DEFAULT (N'[3, 2, 1]');
 """);
     }
 
@@ -2502,18 +2144,18 @@ SELECT @@ROWCOUNT');
                     c =>
                     {
                         Assert.Equal("OwnedCollection", c.Name);
-                        Assert.Equal("nvarchar(max)", c.StoreType);
+                        Assert.Equal("longchar", c.StoreType);
                     },
                     c =>
                     {
                         Assert.Equal("OwnedReference", c.Name);
-                        Assert.Equal("nvarchar(max)", c.StoreType);
+                        Assert.Equal("longchar", c.StoreType);
                         Assert.True(c.IsNullable);
                     },
                     c =>
                     {
                         Assert.Equal("OwnedRequiredReference", c.Name);
-                        Assert.Equal("nvarchar(max)", c.StoreType);
+                        Assert.Equal("longchar", c.StoreType);
                         Assert.False(c.IsNullable);
                     });
                 Assert.Same(
@@ -2522,14 +2164,14 @@ SELECT @@ROWCOUNT');
             });
 
         AssertSql(
-"""
-CREATE TABLE [Entity] (
-    [Id] int NOT NULL IDENTITY,
-    [Name] nvarchar(max) NULL,
-    [OwnedCollection] nvarchar(max) NULL,
-    [OwnedReference] nvarchar(max) NULL,
-    [OwnedRequiredReference] nvarchar(max) NOT NULL,
-    CONSTRAINT [PK_Entity] PRIMARY KEY ([Id])
+            """
+CREATE TABLE `Entity` (
+    `Id` counter NOT NULL,
+    `Name` varchar(255) NULL,
+    `OwnedCollection` longchar NULL,
+    `OwnedReference` longchar NULL,
+    `OwnedRequiredReference` longchar NOT NULL,
+    CONSTRAINT `PK_Entity` PRIMARY KEY (`Id`)
 );
 """);
     }
@@ -2594,12 +2236,12 @@ CREATE TABLE [Entity] (
                     c =>
                     {
                         Assert.Equal("json_collection", c.Name);
-                        Assert.Equal("nvarchar(max)", c.StoreType);
+                        Assert.Equal("longchar", c.StoreType);
                     },
                     c =>
                     {
                         Assert.Equal("json_reference", c.Name);
-                        Assert.Equal("nvarchar(max)", c.StoreType);
+                        Assert.Equal("longchar", c.StoreType);
                     });
                 Assert.Same(
                     table.Columns.Single(c => c.Name == "Id"),
@@ -2607,13 +2249,13 @@ CREATE TABLE [Entity] (
             });
 
         AssertSql(
-"""
-CREATE TABLE [Entity] (
-    [Id] int NOT NULL IDENTITY,
-    [Name] nvarchar(max) NULL,
-    [json_collection] nvarchar(max) NULL,
-    [json_reference] nvarchar(max) NULL,
-    CONSTRAINT [PK_Entity] PRIMARY KEY ([Id])
+            """
+CREATE TABLE `Entity` (
+    `Id` counter NOT NULL,
+    `Name` varchar(255) NULL,
+    `json_collection` longchar NULL,
+    `json_reference` longchar NULL,
+    CONSTRAINT `PK_Entity` PRIMARY KEY (`Id`)
 );
 """);
     }
@@ -2694,18 +2336,18 @@ CREATE TABLE [Entity] (
                     c =>
                     {
                         Assert.Equal("OwnedCollection", c.Name);
-                        Assert.Equal("nvarchar(max)", c.StoreType);
+                        Assert.Equal("longchar", c.StoreType);
                     },
                     c =>
                     {
                         Assert.Equal("OwnedReference", c.Name);
-                        Assert.Equal("nvarchar(max)", c.StoreType);
+                        Assert.Equal("longchar", c.StoreType);
                         Assert.True(c.IsNullable);
                     },
                     c =>
                     {
                         Assert.Equal("OwnedRequiredReference", c.Name);
-                        Assert.Equal("nvarchar(max)", c.StoreType);
+                        Assert.Equal("longchar", c.StoreType);
                         Assert.False(c.IsNullable);
                     });
                 Assert.Same(
@@ -2714,16 +2356,16 @@ CREATE TABLE [Entity] (
             });
 
         AssertSql(
-"""
-ALTER TABLE [Entity] ADD [OwnedCollection] nvarchar(max) NULL;
+            """
+ALTER TABLE `Entity` ADD `OwnedCollection` longchar NULL;
 """,
-//
-"""
-ALTER TABLE [Entity] ADD [OwnedReference] nvarchar(max) NULL;
+            //
+            """
+ALTER TABLE `Entity` ADD `OwnedReference` longchar NULL;
 """,
-//
-"""
-ALTER TABLE [Entity] ADD [OwnedRequiredReference] nvarchar(max) NOT NULL DEFAULT N'';
+            //
+            """
+ALTER TABLE `Entity` ADD `OwnedRequiredReference` longchar NOT NULL DEFAULT '';
 """);
     }
 
@@ -2794,26 +2436,15 @@ ALTER TABLE [Entity] ADD [OwnedRequiredReference] nvarchar(max) NOT NULL DEFAULT
                     table.Columns.Single(c => c.Name == "Id"),
                     Assert.Single(table.PrimaryKey!.Columns));
             });
-
-        AssertSql(
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[Entity]') AND [c].[name] = N'OwnedCollection');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [Entity] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [Entity] DROP COLUMN [OwnedCollection];
+AssertSql(
+    """
+ALTER TABLE `Entity` ALTER COLUMN `OwnedCollection` DROP DEFAULT;
+ALTER TABLE `Entity` DROP COLUMN `OwnedCollection`;
 """,
-//
-"""
-DECLARE @var1 sysname;
-SELECT @var1 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[Entity]') AND [c].[name] = N'OwnedReference');
-IF @var1 IS NOT NULL EXEC(N'ALTER TABLE [Entity] DROP CONSTRAINT [' + @var1 + '];');
-ALTER TABLE [Entity] DROP COLUMN [OwnedReference];
+    //
+    """
+ALTER TABLE `Entity` ALTER COLUMN `OwnedReference` DROP DEFAULT;
+ALTER TABLE `Entity` DROP COLUMN `OwnedReference`;
 """);
     }
 
@@ -3177,12 +2808,12 @@ ALTER TABLE [NewEntities] ADD CONSTRAINT [PK_NewEntities] PRIMARY KEY ([Id]);
                     c =>
                     {
                         Assert.Equal("OwnedCollection", c.Name);
-                        Assert.Equal("nvarchar(max)", c.StoreType);
+                        Assert.Equal("longchar", c.StoreType);
                     },
                     c =>
                     {
                         Assert.Equal("OwnedReference", c.Name);
-                        Assert.Equal("nvarchar(max)", c.StoreType);
+                        Assert.Equal("longchar", c.StoreType);
                     });
                 Assert.Same(
                     table.Columns.Single(c => c.Name == "Id"),
@@ -3190,44 +2821,34 @@ ALTER TABLE [NewEntities] ADD CONSTRAINT [PK_NewEntities] PRIMARY KEY ([Id]);
             });
 
         AssertSql(
-"""
-DROP TABLE [Entity_NestedCollection];
+            """
+DROP TABLE `Entity_NestedCollection`;
 """,
-//
-"""
-DROP TABLE [Entity_OwnedCollection_NestedCollection2];
+            //
+            """
+DROP TABLE `Entity_OwnedCollection_NestedCollection2`;
 """,
-//
-"""
-DROP TABLE [Entity_OwnedCollection];
+            //
+            """
+DROP TABLE `Entity_OwnedCollection`;
 """,
-//
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[Entity]') AND [c].[name] = N'OwnedReference_Date');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [Entity] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [Entity] DROP COLUMN [OwnedReference_Date];
+            //
+            """
+ALTER TABLE `Entity` ALTER COLUMN `OwnedReference_Date` DROP DEFAULT;
+ALTER TABLE `Entity` DROP COLUMN `OwnedReference_Date`;
 """,
-//
-"""
-DECLARE @var1 sysname;
-SELECT @var1 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[Entity]') AND [c].[name] = N'OwnedReference_NestedReference_Number');
-IF @var1 IS NOT NULL EXEC(N'ALTER TABLE [Entity] DROP CONSTRAINT [' + @var1 + '];');
-ALTER TABLE [Entity] DROP COLUMN [OwnedReference_NestedReference_Number];
+            //
+            """
+ALTER TABLE `Entity` ALTER COLUMN `OwnedReference_NestedReference_Number` DROP DEFAULT;
+ALTER TABLE `Entity` DROP COLUMN `OwnedReference_NestedReference_Number`;
 """,
-//
-"""
-ALTER TABLE [Entity] ADD [OwnedCollection] nvarchar(max) NULL;
+            //
+            """
+ALTER TABLE `Entity` ADD `OwnedCollection` longchar NULL;
 """,
-//
-"""
-ALTER TABLE [Entity] ADD [OwnedReference] nvarchar(max) NULL;
+            //
+            """
+ALTER TABLE `Entity` ADD `OwnedReference` longchar NULL;
 """);
     }
 
@@ -3327,63 +2948,53 @@ ALTER TABLE [Entity] ADD [OwnedReference] nvarchar(max) NULL;
             });
 
         AssertSql(
-"""
-DECLARE @var0 sysname;
-SELECT @var0 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[Entity]') AND [c].[name] = N'OwnedCollection');
-IF @var0 IS NOT NULL EXEC(N'ALTER TABLE [Entity] DROP CONSTRAINT [' + @var0 + '];');
-ALTER TABLE [Entity] DROP COLUMN [OwnedCollection];
+            """
+ALTER TABLE `Entity` ALTER COLUMN `OwnedCollection` DROP DEFAULT;
+ALTER TABLE `Entity` DROP COLUMN `OwnedCollection`;
 """,
-//
-"""
-DECLARE @var1 sysname;
-SELECT @var1 = [d].[name]
-FROM [sys].[default_constraints] [d]
-INNER JOIN [sys].[columns] [c] ON [d].[parent_column_id] = [c].[column_id] AND [d].[parent_object_id] = [c].[object_id]
-WHERE ([d].[parent_object_id] = OBJECT_ID(N'[Entity]') AND [c].[name] = N'OwnedReference');
-IF @var1 IS NOT NULL EXEC(N'ALTER TABLE [Entity] DROP CONSTRAINT [' + @var1 + '];');
-ALTER TABLE [Entity] DROP COLUMN [OwnedReference];
+            //
+            """
+ALTER TABLE `Entity` ALTER COLUMN `OwnedReference` DROP DEFAULT;
+ALTER TABLE `Entity` DROP COLUMN `OwnedReference`;
 """,
-//
-"""
-ALTER TABLE [Entity] ADD [OwnedReference_Date] datetime2 NULL;
+            //
+            """
+ALTER TABLE `Entity` ADD `OwnedReference_Date` datetime NULL;
 """,
-//
-"""
-ALTER TABLE [Entity] ADD [OwnedReference_NestedReference_Number] int NULL;
+            //
+            """
+ALTER TABLE `Entity` ADD `OwnedReference_NestedReference_Number` integer NULL;
 """,
-//
-"""
-CREATE TABLE [Entity_NestedCollection] (
-    [OwnedEntityId] int NOT NULL,
-    [Id] int NOT NULL IDENTITY,
-    [Number2] int NOT NULL,
-    CONSTRAINT [PK_Entity_NestedCollection] PRIMARY KEY ([OwnedEntityId], [Id]),
-    CONSTRAINT [FK_Entity_NestedCollection_Entity_OwnedEntityId] FOREIGN KEY ([OwnedEntityId]) REFERENCES [Entity] ([Id]) ON DELETE CASCADE
+            //
+            """
+CREATE TABLE `Entity_NestedCollection` (
+    `OwnedEntityId` integer NOT NULL,
+    `Id` counter NOT NULL,
+    `Number2` integer NOT NULL,
+    CONSTRAINT `PK_Entity_NestedCollection` PRIMARY KEY (`OwnedEntityId`, `Id`),
+    CONSTRAINT `FK_Entity_NestedCollection_Entity_OwnedEntityId` FOREIGN KEY (`OwnedEntityId`) REFERENCES `Entity` (`Id`) ON DELETE CASCADE
 );
 """,
-//
-"""
-CREATE TABLE [Entity_OwnedCollection] (
-    [EntityId] int NOT NULL,
-    [Id] int NOT NULL IDENTITY,
-    [Date2] datetime2 NOT NULL,
-    [NestedReference2_Number3] int NULL,
-    CONSTRAINT [PK_Entity_OwnedCollection] PRIMARY KEY ([EntityId], [Id]),
-    CONSTRAINT [FK_Entity_OwnedCollection_Entity_EntityId] FOREIGN KEY ([EntityId]) REFERENCES [Entity] ([Id]) ON DELETE CASCADE
+            //
+            """
+CREATE TABLE `Entity_OwnedCollection` (
+    `EntityId` integer NOT NULL,
+    `Id` counter NOT NULL,
+    `Date2` datetime NOT NULL,
+    `NestedReference2_Number3` integer NULL,
+    CONSTRAINT `PK_Entity_OwnedCollection` PRIMARY KEY (`EntityId`, `Id`),
+    CONSTRAINT `FK_Entity_OwnedCollection_Entity_EntityId` FOREIGN KEY (`EntityId`) REFERENCES `Entity` (`Id`) ON DELETE CASCADE
 );
 """,
-//
-"""
-CREATE TABLE [Entity_OwnedCollection_NestedCollection2] (
-    [Owned2EntityId] int NOT NULL,
-    [Owned2Id] int NOT NULL,
-    [Id] int NOT NULL IDENTITY,
-    [Number4] int NOT NULL,
-    CONSTRAINT [PK_Entity_OwnedCollection_NestedCollection2] PRIMARY KEY ([Owned2EntityId], [Owned2Id], [Id]),
-    CONSTRAINT [FK_Entity_OwnedCollection_NestedCollection2_Entity_OwnedCollection_Owned2EntityId_Owned2Id] FOREIGN KEY ([Owned2EntityId], [Owned2Id]) REFERENCES [Entity_OwnedCollection] ([EntityId], [Id]) ON DELETE CASCADE
+            //
+            """
+CREATE TABLE `Entity_OwnedCollection_NestedCollection2` (
+    `Owned2EntityId` integer NOT NULL,
+    `Owned2Id` integer NOT NULL,
+    `Id` counter NOT NULL,
+    `Number4` integer NOT NULL,
+    CONSTRAINT `PK_Entity_OwnedCollection_NestedCollection2` PRIMARY KEY (`Owned2EntityId`, `Owned2Id`, `Id`),
+    CONSTRAINT `FK_Entity_OwnedCollection_NestedCollection2_Entity_OwnedCollect~` FOREIGN KEY (`Owned2EntityId`, `Owned2Id`) REFERENCES `Entity_OwnedCollection` (`EntityId`, `Id`) ON DELETE CASCADE
 );
 """);
     }
@@ -3437,7 +3048,11 @@ CREATE TABLE [Entity_OwnedCollection_NestedCollection2] (
                     c => Assert.Equal("Name", c.Name));
             });
 
-        AssertSql();
+        AssertSql(
+            """
+ALTER TABLE `Entity` ALTER COLUMN `Name` DROP DEFAULT;
+ALTER TABLE `Entity` ALTER COLUMN `Name` longchar NULL;
+""");
     }
 
     [ConditionalFact]
@@ -3554,7 +3169,11 @@ ALTER TABLE [Entity] ADD DEFAULT N'' FOR [Name];
                     c => Assert.Equal("Name", c.Name));
             });
 
-        AssertSql();
+        AssertSql(
+            """
+ALTER TABLE `Entity` ALTER COLUMN `Name` DROP DEFAULT;
+ALTER TABLE `Entity` ALTER COLUMN `Name` longchar NULL;
+""");
     }
 
     protected override string NonDefaultCollation

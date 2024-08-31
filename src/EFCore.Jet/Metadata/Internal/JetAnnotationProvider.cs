@@ -88,7 +88,7 @@ namespace EntityFrameworkCore.Jet.Metadata.Internal
                 .FirstOrDefault(
                     p => p.GetValueGenerationStrategy(table)
                          == JetValueGenerationStrategy.IdentityColumn);
-            if (property != null)
+            if (property != null && property is not RuntimeProperty)
             {
                 var seed = property.GetJetIdentitySeed(table);
                 var increment = property.GetJetIdentityIncrement(table);

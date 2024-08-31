@@ -40,6 +40,27 @@ namespace Microsoft.EntityFrameworkCore
         }
 
         /// <summary>
+        ///     Configures the key column to use the Jet IDENTITY feature to generate values for new entities,
+        ///     when targeting Jet. This method sets the property to be <see cref="ValueGenerated.OnAdd" />.
+        /// </summary>
+        /// <param name="columnBuilder">The builder for the column being configured.</param>
+        /// <param name="seed">The value that is used for the very first row loaded into the table.</param>
+        /// <param name="increment">The incremental value that is added to the identity value of the previous row that was loaded.</param>
+        /// <returns>The same builder instance so that multiple calls can be chained.</returns>
+        public static ColumnBuilder UseJetIdentityColumn(
+            this ColumnBuilder columnBuilder,
+            int seed = 1,
+            int increment = 1)
+        {
+            var overrides = columnBuilder.Overrides;
+            overrides.SetValueGenerationStrategy(JetValueGenerationStrategy.IdentityColumn);
+            overrides.SetJetIdentitySeed(seed);
+            overrides.SetJetIdentityIncrement(increment);
+
+            return columnBuilder;
+        }
+
+        /// <summary>
         ///     Configures the key property to use the Jet IDENTITY feature to generate values for new entities,
         ///     when targeting Jet. This method sets the property to be <see cref="ValueGenerated.OnAdd" />.
         /// </summary>
@@ -53,6 +74,21 @@ namespace Microsoft.EntityFrameworkCore
             int seed = 1,
             int increment = 1)
             => (PropertyBuilder<TProperty>)UseJetIdentityColumn((PropertyBuilder)propertyBuilder, seed, increment);
+
+        /// <summary>
+        ///     Configures the key column to use the Jet IDENTITY feature to generate values for new entities,
+        ///     when targeting Jet. This method sets the property to be <see cref="ValueGenerated.OnAdd" />.
+        /// </summary>
+        /// <typeparam name="TProperty">The type of the property being configured.</typeparam>
+        /// <param name="columnBuilder">The builder for the column being configured.</param>
+        /// <param name="seed">The value that is used for the very first row loaded into the table.</param>
+        /// <param name="increment">The incremental value that is added to the identity value of the previous row that was loaded.</param>
+        /// <returns>The same builder instance so that multiple calls can be chained.</returns>
+        public static ColumnBuilder<TProperty> UseJetIdentityColumn<TProperty>(
+            this ColumnBuilder<TProperty> columnBuilder,
+            int seed = 1,
+            int increment = 1)
+            => (ColumnBuilder<TProperty>)UseJetIdentityColumn((ColumnBuilder)columnBuilder, seed, increment);
 
         /// <summary>
         ///     Configures the seed for Jet IDENTITY.

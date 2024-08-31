@@ -2250,7 +2250,7 @@ FROM `Orders` AS `o`
 
             AssertSql(
                 """
-SELECT `o`.`OrderDate`
+SELECT IIF(`o`.`OrderDate` IS NULL, NULL, TIMEVALUE(`o`.`OrderDate`))
 FROM `Orders` AS `o`
 """);
         }

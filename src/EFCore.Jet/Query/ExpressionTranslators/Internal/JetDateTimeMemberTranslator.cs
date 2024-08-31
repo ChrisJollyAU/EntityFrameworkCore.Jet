@@ -108,7 +108,8 @@ namespace EntityFrameworkCore.Jet.Query.ExpressionTranslators.Internal
                             new[] { instance! },
                             false,
                             new[] { false },
-                            returnType)),
+                            returnType,
+                            _typeMappingSource.FindMapping(typeof(DateTime)))),
                     nameof(DateTime.TimeOfDay) => TimeSpanNullChecked(
                         instance!,
                         _sqlExpressionFactory.Function(
@@ -116,7 +117,8 @@ namespace EntityFrameworkCore.Jet.Query.ExpressionTranslators.Internal
                             new[] { instance! },
                             false,
                             new[] { false },
-                            returnType)),
+                            returnType,
+                            _typeMappingSource.FindMapping(typeof(TimeSpan)))),
 
                     nameof(DateTime.Ticks) => null,
 

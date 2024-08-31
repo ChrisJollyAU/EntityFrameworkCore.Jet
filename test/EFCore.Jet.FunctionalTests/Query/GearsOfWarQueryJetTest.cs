@@ -5884,7 +5884,7 @@ ORDER BY `g`.`Nickname`, `m`.`Id`
 
             AssertSql(
                 """
-SELECT `m`.`Timeline`
+SELECT TIMEVALUE(`m`.`Timeline`)
 FROM `Missions` AS `m`
 """);
         }

@@ -405,7 +405,7 @@ namespace EntityFrameworkCore.Jet.Scaffolding.Internal
                 (string.Equals(dataTypeName, "decimal", StringComparison.OrdinalIgnoreCase) ||
                  string.Equals(dataTypeName, "numeric", StringComparison.OrdinalIgnoreCase)))
             {
-                return $"{dataTypeName}({precision}, {scale})";
+                return $"{dataTypeName}({precision},{scale})";
             }
 
             if (maxLength > 0)
@@ -535,6 +535,7 @@ namespace EntityFrameworkCore.Jet.Scaffolding.Internal
 
                                     case DatabaseIndex index:
                                         index.Columns.Add(column);
+                                        index.IsDescending.Add(descending);
                                         break;
                                 }
                             }
