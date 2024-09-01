@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.TestModels.GearsOfWarModel;
 using Microsoft.EntityFrameworkCore.TestUtilities;
+using System;
 
 namespace EntityFrameworkCore.Jet.FunctionalTests.Query
 {
@@ -41,6 +42,18 @@ namespace EntityFrameworkCore.Jet.FunctionalTests.Query
                 {
                     mission.Timeline = mission.Timeline.AddYears(100);
                 }
+                if (mission.Date.Year < 100)
+                {
+                    mission.Date = mission.Date.AddYears(100);
+                }
+            }
+
+            foreach (var tag in tags)
+            {
+                if (tag.IssueDate.Year < 100)
+                {
+                    tag.IssueDate = tag.IssueDate.AddYears(100);
+                }
             }
 
             GearsOfWarData.WireUp(
@@ -73,7 +86,20 @@ namespace EntityFrameworkCore.Jet.FunctionalTests.Query
                 {
                     mission.Timeline = mission.Timeline.AddYears(100);
                 }
+                if (mission.Date.Year < 100)
+                {
+                    mission.Date = mission.Date.AddYears(100);
+                }
                 mission.Timeline = JetTestHelpers.GetExpectedValue(mission.Timeline);
+                mission.Duration = new TimeSpan(mission.Duration.Days, mission.Duration.Hours, mission.Duration.Minutes, mission.Duration.Seconds);
+            }
+
+            foreach (var tag in data.Tags)
+            {
+                if (tag.IssueDate.Year < 100)
+                {
+                    tag.IssueDate = tag.IssueDate.AddYears(100);
+                }
             }
 
             return data;
