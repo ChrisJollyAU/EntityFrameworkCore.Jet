@@ -23,6 +23,7 @@ public class JetLiftOrderByPostprocessor(IRelationalTypeMappingSource typeMappin
     SqlAliasManager sqlAliasManager)
     : ExpressionVisitor 
 {
+    private Stack<SelectExpression> parent = new Stack<SelectExpression>();
     /// <summary>
     ///     This is an internal API that supports the Entity Framework Core infrastructure and not subject to
     ///     the same compatibility standards as public APIs. It may be changed or removed without notice in
@@ -62,6 +63,45 @@ public class JetLiftOrderByPostprocessor(IRelationalTypeMappingSource typeMappin
                 return nonQueryExpression;
             case SelectExpression selectExpression:
                 {
+                    for (int i = 0; i < selectExpression.Tables.Count; i++)
+                    {
+                        if (selectExpression.Tables[i] is OuterApplyExpression outerApplyExpression)
+                        {
+                            var applySelect = outerApplyExpression.Table as SelectExpression;
+                            var applyPredicate = applySelect?.Predicate;
+                            var applyS2 = applySelect?.Tables[0] as SelectExpression;
+                            if (applyPredicate is null)
+                            {
+                                
+                                applyPredicate = applyS2?.Predicate;
+                            }
+                            else
+                            {
+                                if (applyS2?.Predicate != null)
+                                {
+                                    applyPredicate = sqlExpressionFactory.AndAlso(applyPredicate, applyS2.Predicate);
+                                }
+                            }
+                            if (applyPredicate != null && applySelect != null && applySelect.Limit == null)
+                            {
+                                applySelect = applySelect.Update(applySelect.Tables, null, applySelect.GroupBy,
+                                    applySelect.Having,applySelect.Projection, applySelect.Orderings, applySelect.Offset, applySelect.Limit);
+                                applySelect = AddAliasManager(applySelect);
+                                var lj = new LeftJoinExpression(applySelect, applyPredicate);
+                                selectExpression = selectExpression.Update(new List<TableExpressionBase>() { selectExpression.Tables[0], lj }, selectExpression.Predicate,
+                                    selectExpression.GroupBy,
+                                    selectExpression.Having, selectExpression.Projection, selectExpression.Orderings, selectExpression.Offset,
+                                    selectExpression.Limit);
+                                selectExpression = AddAliasManager(selectExpression);
+                                //selectExpression.AddLeftJoin(applySelect, applyPredicate);
+                                expression = selectExpression;
+                            }
+                        }
+                    }
+
+
+
+
                     Dictionary<int, (int? indexcol, OrderingExpression? orderexp, bool ascend, bool rewrite, bool referstocurouter)> columnsToRewrite = new();
                     bool isscalarselect = selectExpression is { Limit: SqlConstantExpression { Value: 1 }, Projection.Count: 1 };
                     for (int i = 0; i < selectExpression.Orderings.Count; i++)
@@ -72,6 +112,18 @@ public class JetLiftOrderByPostprocessor(IRelationalTypeMappingSource typeMappin
                             var locate = new JetLocateScalarSubqueryVisitor(typeMappingSource, sqlExpressionFactory);
                             var locatedExpression = locate.Visit(sqlExpression);
                             bool containsscalar = locatedExpression is ScalarSubqueryExpression or ExistsExpression;
+                            if (locatedExpression is ExistsExpression existsExpression)
+                            {
+                                var ncc = sqlExpressionFactory.Case(
+                                    new[]
+                                    {
+                                        new CaseWhenClause(
+                                            existsExpression,
+                                            sqlExpressionFactory.ApplyDefaultTypeMapping(sqlExpressionFactory.Constant(true)))
+                                    },
+                                    sqlExpressionFactory.Constant(false));
+                                sqlExpression = ncc;
+                            }
                             if (containsscalar)
                             {
                                 int index = selectExpression.AddToProjection(sqlExpression);
@@ -101,7 +153,10 @@ public class JetLiftOrderByPostprocessor(IRelationalTypeMappingSource typeMappin
 
                     if (columnsToRewrite.Count == 0 || columnsToRewrite.All(p => p.Value.rewrite == false))
                     {
-                        return base.Visit(expression);
+                        parent.Push(selectExpression);
+                        var result1 = base.Visit(expression);
+                        parent.Pop();
+                        return result1;
                     }
 
                     selectExpression.ClearOrdering();
@@ -158,9 +213,113 @@ public class JetLiftOrderByPostprocessor(IRelationalTypeMappingSource typeMappin
             {
                 return base.VisitExtension(relationalGroupByShaperExpression);
             }
+            case LeftJoinExpression leftJoinExpression:
+            {
+                if (leftJoinExpression.Table is SelectExpression joinSelectExpression)
+                {
+                    List<ColumnExpression> cols = new List<ColumnExpression>();
+                    if (leftJoinExpression.JoinPredicate is SqlBinaryExpression binaryExpression)
+                    {
+                        cols = ExtractColumnExpressions(binaryExpression);
+                    }
+                    else if (leftJoinExpression.JoinPredicate is SqlUnaryExpression unaryExpression)
+                    {
+                        cols = ExtractColumnExpressions(unaryExpression);
+                    }
+
+                    var collist = cols.Distinct().Where(c => joinSelectExpression.Tables.Select(d => d.Alias).Contains(c.TableAlias)).ToList();
+                    var proj = joinSelectExpression.Projection.Where(p => collist.Contains(p.Expression)).Select(p => p.Expression);
+                    var collist2 = collist.Except(proj);
+                    parent.TryPeek(out var pp);
+                    foreach (var cl2 in collist2)
+                    {
+                        joinSelectExpression.AddToProjection(cl2);
+                        if (joinSelectExpression.GroupBy.Count > 0)
+                        {
+                            joinSelectExpression.ApplyGrouping(cl2);
+                        }
+
+                        var newjoinpred = ReplaceTableForColumnPredicate(leftJoinExpression.JoinPredicate, cl2, pp ?? joinSelectExpression, leftJoinExpression);
+                        leftJoinExpression = leftJoinExpression.Update(leftJoinExpression.Table, newjoinpred);
+                    }
+                }
+                var result = base.Visit(leftJoinExpression);
+                return result;
+            }
         }
 
         return base.Visit(expression);
+    }
+
+    private SqlExpression ReplaceTableForColumnPredicate(SqlExpression originalExpression, SqlExpression cl2, SelectExpression joinSelectExpression, LeftJoinExpression leftJoinExpression)
+    {
+        if (originalExpression is SqlBinaryExpression sqlBinary)
+        {
+            var left = sqlBinary.Left;
+            var right = sqlBinary.Right;
+            var op = sqlBinary.OperatorType;
+            if (left.Equals(cl2) && cl2 is ColumnExpression lCol)
+            {
+                left = joinSelectExpression.CreateColumnExpression(leftJoinExpression, lCol.Name, lCol.Type,
+                    lCol.TypeMapping, lCol.IsNullable);
+            }
+            else
+            {
+                left = ReplaceTableForColumnPredicate(left, cl2, joinSelectExpression, leftJoinExpression);
+            }
+
+            if (right.Equals(cl2) && cl2 is ColumnExpression rCol)
+            {
+                right = joinSelectExpression.CreateColumnExpression(leftJoinExpression, rCol.Name, rCol.Type, rCol.TypeMapping, rCol.IsNullable);
+
+            }
+            else
+            {
+                right = ReplaceTableForColumnPredicate(right, cl2, joinSelectExpression, leftJoinExpression);
+            }
+
+            return new SqlBinaryExpression(op, left, right, sqlBinary.Type, sqlBinary.TypeMapping);
+        }
+
+        return originalExpression;
+    }
+
+    private List<ColumnExpression> ExtractColumnExpressions(SqlBinaryExpression binaryexp)
+    {
+        List<ColumnExpression> result = new List<ColumnExpression>();
+        if (binaryexp.Left is SqlBinaryExpression left)
+        {
+            result.AddRange(ExtractColumnExpressions(left));
+        }
+        else if (binaryexp.Left is ColumnExpression colLeft)
+        {
+            result.Add(colLeft);
+        }
+
+        if (binaryexp.Right is SqlBinaryExpression right)
+        {
+            result.AddRange(ExtractColumnExpressions(right));
+        }
+        else if (binaryexp.Right is ColumnExpression colRight)
+        {
+            result.Add(colRight);
+        }
+
+        return result;
+    }
+    private List<ColumnExpression> ExtractColumnExpressions(SqlUnaryExpression unaryexp)
+    {
+        List<ColumnExpression> result = new List<ColumnExpression>();
+        if (unaryexp.Operand is SqlBinaryExpression left)
+        {
+            result.AddRange(ExtractColumnExpressions(left));
+        }
+        else if (unaryexp.Operand is ColumnExpression colLeft)
+        {
+            result.Add(colLeft);
+        }
+
+        return result;
     }
 
     private SelectExpression AddAliasManager(SelectExpression selectExpression)

@@ -1,6 +1,8 @@
 ﻿// Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System;
+using System.Linq;
 using System.Threading.Tasks;
 using EntityFrameworkCore.Jet.FunctionalTests.TestUtilities;
 using Microsoft.EntityFrameworkCore.BulkUpdates;
@@ -1109,7 +1111,16 @@ WHERE `c`.`CustomerID` LIKE 'F%'
 
     public override async Task Update_multiple_tables_throws(bool async)
     {
-        await base.Update_multiple_tables_throws(async);
+        await AssertUpdate(
+            async,
+            ss => ss.Set<Microsoft.EntityFrameworkCore.TestModels.Northwind.Order>()
+                .Where(o => o.CustomerID.StartsWith("F"))
+                .Select(e => new { e, e.Customer }),
+            e => e.Customer,
+            s => s
+                .SetProperty(c => c.Customer.ContactName, "Name")
+                .SetProperty(c => c.e.OrderDate, new DateTime(2020, 1, 1)),
+            rowsAffectedCount: 0);
 
         AssertExecuteUpdateSql();
     }

@@ -1789,45 +1789,20 @@ ORDER BY `o0`.`CustomerID`
             await base.Select_nested_collection_with_groupby(isAsync);
 
             AssertSql(
-                $@"SELECT (
-    SELECT CASE
-        WHEN EXISTS (
-            SELECT 1
-            FROM `Orders` AS `o0`
-            WHERE `c`.`CustomerID` = `o0`.`CustomerID`)
-        THEN True ELSE False
-    END
-), `c`.`CustomerID`
+                """
+SELECT IIF(EXISTS (
+        SELECT 1
+        FROM `Orders` AS `o`
+        WHERE `c`.`CustomerID` = `o`.`CustomerID`), TRUE, FALSE), `c`.`CustomerID`, `o1`.`OrderID`
 FROM `Customers` AS `c`
-WHERE `c`.`CustomerID` LIKE 'A' & '%'",
-                //
-                $@"{AssertSqlHelper.Declaration("@_outer_CustomerID='ALFKI' (Size = 5)")}
-
-SELECT `o1`.`OrderID`
-FROM `Orders` AS `o1`
-WHERE {AssertSqlHelper.Parameter("@_outer_CustomerID")} = `o1`.`CustomerID`
-ORDER BY `o1`.`OrderID`",
-                //
-                $@"{AssertSqlHelper.Declaration("@_outer_CustomerID='ANATR' (Size = 5)")}
-
-SELECT `o1`.`OrderID`
-FROM `Orders` AS `o1`
-WHERE {AssertSqlHelper.Parameter("@_outer_CustomerID")} = `o1`.`CustomerID`
-ORDER BY `o1`.`OrderID`",
-                //
-                $@"{AssertSqlHelper.Declaration("@_outer_CustomerID='ANTON' (Size = 5)")}
-
-SELECT `o1`.`OrderID`
-FROM `Orders` AS `o1`
-WHERE {AssertSqlHelper.Parameter("@_outer_CustomerID")} = `o1`.`CustomerID`
-ORDER BY `o1`.`OrderID`",
-                //
-                $@"{AssertSqlHelper.Declaration("@_outer_CustomerID='AROUT' (Size = 5)")}
-
-SELECT `o1`.`OrderID`
-FROM `Orders` AS `o1`
-WHERE {AssertSqlHelper.Parameter("@_outer_CustomerID")} = `o1`.`CustomerID`
-ORDER BY `o1`.`OrderID`");
+LEFT JOIN (
+    SELECT `o0`.`OrderID`, `o0`.`CustomerID`
+    FROM `Orders` AS `o0`
+    GROUP BY `o0`.`OrderID`, `o0`.`CustomerID`
+) AS `o1` ON `c`.`CustomerID` = `o1`.`CustomerID`
+WHERE `c`.`CustomerID` LIKE 'F%'
+ORDER BY `c`.`CustomerID`
+""");
         }
 
         public override async Task Select_uncorrelated_collection_with_groupby_works(bool async)

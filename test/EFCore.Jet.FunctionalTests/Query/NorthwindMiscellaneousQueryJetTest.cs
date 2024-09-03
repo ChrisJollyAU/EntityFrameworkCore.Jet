@@ -5761,14 +5761,13 @@ ORDER BY `c`.`CustomerID`
 
             AssertSql(
                 """
-SELECT [c].[CustomerID], [t].[First], [t].[Second]
-FROM [Customers] AS [c]
-OUTER APPLY (
-    SELECT DISTINCT [o].[OrderID] AS [First], [o].[OrderDate] AS [Second]
-    FROM [Orders] AS [o]
-    WHERE [c].[CustomerID] = [o].[CustomerID]
-) AS [t]
-ORDER BY [c].[CustomerID]
+SELECT `c`.`CustomerID`, `o0`.`First`, `o0`.`Second`
+FROM `Customers` AS `c`
+LEFT JOIN (
+    SELECT DISTINCT `o`.`OrderID` AS `First`, `o`.`OrderDate` AS `Second`, `o`.`CustomerID`
+    FROM `Orders` AS `o`
+) AS `o0` ON `c`.`CustomerID` = `o0`.`CustomerID`
+ORDER BY `c`.`CustomerID`
 """);
         }
 
@@ -5779,15 +5778,14 @@ ORDER BY [c].[CustomerID]
 
             AssertSql(
                 """
-SELECT [c].[CustomerID], [t].[First], [t].[Second], [t].[Third]
-FROM [Customers] AS [c]
-OUTER APPLY (
-    SELECT DISTINCT [o].[OrderID] AS [First], [o].[OrderDate] AS [Second], [c0].[City] AS [Third]
-    FROM [Orders] AS [o]
-    LEFT JOIN [Customers] AS [c0] ON [o].[CustomerID] = [c0].[CustomerID]
-    WHERE [c].[CustomerID] = [o].[CustomerID]
-) AS [t]
-ORDER BY [c].[CustomerID], [t].[First], [t].[Second]
+SELECT `c`.`CustomerID`, `s`.`First`, `s`.`Second`, `s`.`Third`
+FROM `Customers` AS `c`
+LEFT JOIN (
+    SELECT DISTINCT `o`.`OrderID` AS `First`, `o`.`OrderDate` AS `Second`, `c0`.`City` AS `Third`, `o`.`CustomerID`
+    FROM `Orders` AS `o`
+    LEFT JOIN `Customers` AS `c0` ON `o`.`CustomerID` = `c0`.`CustomerID`
+) AS `s` ON `c`.`CustomerID` = `s`.`CustomerID`
+ORDER BY `c`.`CustomerID`, `s`.`First`, `s`.`Second`
 """);
         }
 

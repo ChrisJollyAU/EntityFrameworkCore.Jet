@@ -8530,14 +8530,13 @@ ORDER BY IIF(`t`.`GearNickName` IS NOT NULL, `g`.`SquadId`, NULL), `t`.`Note`
             await base.Correlated_collection_with_distinct_projecting_identifier_column(async);
 
             AssertSql(
-    """
-SELECT `g`.`Nickname`, `g`.`SquadId`, `t`.`Id`, `t`.`Name`
+                """
+SELECT `g`.`Nickname`, `g`.`SquadId`, `w0`.`Id`, `w0`.`Name`
 FROM `Gears` AS `g`
-OUTER APPLY (
-    SELECT DISTINCT `w`.`Id`, `w`.`Name`
+LEFT JOIN (
+    SELECT DISTINCT `w`.`Id`, `w`.`Name`, `w`.`OwnerFullName`
     FROM `Weapons` AS `w`
-    WHERE `g`.`FullName` = `w`.`OwnerFullName`
-) AS `t`
+) AS `w0` ON `g`.`FullName` = `w0`.`OwnerFullName`
 ORDER BY `g`.`Nickname`, `g`.`SquadId`
 """);
         }
@@ -8579,15 +8578,14 @@ ORDER BY `s`.`Id`, `g0`.`Nickname`
             await base.Correlated_collection_with_distinct_not_projecting_identifier_column(async);
 
             AssertSql(
-    """
-SELECT `g`.`Nickname`, `g`.`SquadId`, `t`.`Name`, `t`.`IsAutomatic`
+                """
+SELECT `g`.`Nickname`, `g`.`SquadId`, `w0`.`Name`, `w0`.`IsAutomatic`
 FROM `Gears` AS `g`
-OUTER APPLY (
-    SELECT DISTINCT `w`.`Name`, `w`.`IsAutomatic`
+LEFT JOIN (
+    SELECT DISTINCT `w`.`Name`, `w`.`IsAutomatic`, `w`.`OwnerFullName`
     FROM `Weapons` AS `w`
-    WHERE `g`.`FullName` = `w`.`OwnerFullName`
-) AS `t`
-ORDER BY `g`.`Nickname`, `g`.`SquadId`, `t`.`Name`
+) AS `w0` ON `g`.`FullName` = `w0`.`OwnerFullName`
+ORDER BY `g`.`Nickname`, `g`.`SquadId`, `w0`.`Name`
 """);
         }
 
@@ -8597,15 +8595,14 @@ ORDER BY `g`.`Nickname`, `g`.`SquadId`, `t`.`Name`
             await base.Correlated_collection_with_groupby_not_projecting_identifier_column_but_only_grouping_key_in_final_projection(async);
 
             AssertSql(
-    """
-SELECT `g`.`Nickname`, `g`.`SquadId`, `t`.`Key`
+                """
+SELECT `g`.`Nickname`, `g`.`SquadId`, `w0`.`Key`
 FROM `Gears` AS `g`
-OUTER APPLY (
-    SELECT `w`.`IsAutomatic` AS `Key`
+LEFT JOIN (
+    SELECT `w`.`IsAutomatic` AS `Key`, `w`.`OwnerFullName`
     FROM `Weapons` AS `w`
-    WHERE `g`.`FullName` = `w`.`OwnerFullName`
-    GROUP BY `w`.`IsAutomatic`
-) AS `t`
+    GROUP BY `w`.`IsAutomatic`, `w`.`OwnerFullName`
+) AS `w0` ON `g`.`FullName` = `w0`.`OwnerFullName`
 ORDER BY `g`.`Nickname`, `g`.`SquadId`
 """);
         }
@@ -8616,15 +8613,14 @@ ORDER BY `g`.`Nickname`, `g`.`SquadId`
             await base.Correlated_collection_with_groupby_not_projecting_identifier_column_with_group_aggregate_in_final_projection(async);
 
             AssertSql(
-    """
-SELECT `g`.`Nickname`, `g`.`SquadId`, `t`.`Key`, `t`.`Count`
+                """
+SELECT `g`.`Nickname`, `g`.`SquadId`, `w0`.`Key`, `w0`.`Count`
 FROM `Gears` AS `g`
-OUTER APPLY (
-    SELECT `w`.`IsAutomatic` AS `Key`, COUNT(*) AS `Count`
+LEFT JOIN (
+    SELECT `w`.`IsAutomatic` AS `Key`, COUNT(*) AS `Count`, `w`.`OwnerFullName`
     FROM `Weapons` AS `w`
-    WHERE `g`.`FullName` = `w`.`OwnerFullName`
-    GROUP BY `w`.`IsAutomatic`
-) AS `t`
+    GROUP BY `w`.`IsAutomatic`, `w`.`OwnerFullName`
+) AS `w0` ON `g`.`FullName` = `w0`.`OwnerFullName`
 ORDER BY `g`.`Nickname`, `g`.`SquadId`
 """);
         }
@@ -8638,16 +8634,15 @@ ORDER BY `g`.`Nickname`, `g`.`SquadId`
                     async);
 
             AssertSql(
-    """
-SELECT `g`.`Nickname`, `g`.`SquadId`, `t`.`IsAutomatic`, `t`.`Name`, `t`.`Count`
+                """
+SELECT `g`.`Nickname`, `g`.`SquadId`, `w0`.`IsAutomatic`, `w0`.`Name`, `w0`.`Count`
 FROM `Gears` AS `g`
-OUTER APPLY (
-    SELECT `w`.`IsAutomatic`, `w`.`Name`, COUNT(*) AS `Count`
+LEFT JOIN (
+    SELECT `w`.`IsAutomatic`, `w`.`Name`, COUNT(*) AS `Count`, `w`.`OwnerFullName`
     FROM `Weapons` AS `w`
-    WHERE `g`.`FullName` = `w`.`OwnerFullName`
-    GROUP BY `w`.`IsAutomatic`, `w`.`Name`
-) AS `t`
-ORDER BY `g`.`Nickname`, `g`.`SquadId`, `t`.`IsAutomatic`
+    GROUP BY `w`.`IsAutomatic`, `w`.`Name`, `w`.`OwnerFullName`
+) AS `w0` ON `g`.`FullName` = `w0`.`OwnerFullName`
+ORDER BY `g`.`Nickname`, `g`.`SquadId`, NOT (`w0`.`IsAutomatic`)
 """);
         }
 
@@ -8681,17 +8676,17 @@ ORDER BY `g`.`Nickname`, `g`.`SquadId`
             await base.Correlated_collection_via_SelectMany_with_Distinct_missing_indentifying_columns_in_projection(async);
 
             AssertSql(
-    """
-SELECT `g`.`Nickname`, `g`.`SquadId`, `t`.`HasSoulPatch`
+                """
+SELECT `g`.`Nickname`, `g`.`SquadId`, `s`.`HasSoulPatch`
 FROM `Gears` AS `g`
-OUTER APPLY (
-    SELECT DISTINCT `g1`.`HasSoulPatch`
-    FROM `Weapons` AS `w`
-    LEFT JOIN `Gears` AS `g0` ON `w`.`OwnerFullName` = `g0`.`FullName`
-    LEFT JOIN `Cities` AS `c` ON `g0`.`AssignedCityName` = `c`.`Name`
-    INNER JOIN `Gears` AS `g1` ON `c`.`Name` = `g1`.`CityOfBirthName`
-    WHERE `g`.`FullName` = `w`.`OwnerFullName`
-) AS `t`
+LEFT JOIN (
+    SELECT DISTINCT `g1`.`HasSoulPatch`, `w`.`OwnerFullName`
+    FROM ((`Weapons` AS `w`
+    LEFT JOIN `Gears` AS `g0` ON `w`.`OwnerFullName` = `g0`.`FullName`)
+    LEFT JOIN `Cities` AS `c` ON `g0`.`AssignedCityName` = `c`.`Name`)
+    LEFT JOIN `Gears` AS `g1` ON `c`.`Name` = `g1`.`CityOfBirthName`
+    WHERE `c`.`Name` IS NOT NULL AND `g1`.`CityOfBirthName` IS NOT NULL
+) AS `s` ON `g`.`FullName` = `s`.`OwnerFullName`
 ORDER BY `g`.`Nickname`, `g`.`SquadId`
 """);
         }
