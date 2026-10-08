@@ -255,7 +255,7 @@ public sealed class JetCatalog
     /// </summary>
     private static void CreateComplexSystemTables(JetDatabase db, byte[] sidEngine)
     {
-        db.CreateTable("MSysComplexColumns", MSysComplexColumnsColumns, tableType: TableType.System);
+        db.CreateTable("MSysComplexColumns", MSysComplexColumnsColumns);
         // Index names, order and flags as the engine writes them: the ComplexID primary key first, then the
         // two non-unique lookups the engine uses to find a table's complex columns.
         db.CreateIndex("MSysComplexColumns", "IdxID", [("ComplexID", false)],
@@ -270,7 +270,7 @@ public sealed class JetCatalog
 
         foreach ((string name, ColumnSpec[] columns, _) in MSysComplexTypeTables)
         {
-            db.CreateTable(name, columns, tableType: TableType.System);
+            db.CreateTable(name, columns);
             MarkAsSystemTable(db, name, ObjectAttributes.System | ObjectAttributes.ComplexStorage, sidEngine);
         }
     }
