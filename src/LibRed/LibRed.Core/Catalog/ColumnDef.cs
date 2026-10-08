@@ -117,6 +117,9 @@ public sealed class ColumnDef
     /// LibRed encodes index keys for 417 collation configurations, not only General legacy.</remarks>
     public Collation Collation { get; init; } = Collation.GeneralLegacy;
 
+    /// <summary>A complex column's <c>MSysComplexColumns.ComplexID</c>, from the descriptor; 0 for any other.</summary>
+    public int ComplexId { get; init; }
+
     /// <summary>The column's on-disk descriptor bytes (the 25-byte Jet4 record), captured verbatim on read —
     /// the reserved words at <c>0x03</c> and <c>0x11</c> and the undocumented flag bits included, which no
     /// modelled property carries. Nothing writes from it: every DDL edits the descriptor in place, so those

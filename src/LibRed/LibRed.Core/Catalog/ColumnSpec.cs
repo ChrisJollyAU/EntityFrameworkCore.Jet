@@ -50,6 +50,29 @@ public sealed record ColumnSpec(
             CalculatedExpression: Storage.Calculated.CalculatedExpression.NormaliseIdentifierQuoting(expression),
             CalculatedResultType: resultType);
 
+    /// <summary>An attachment column.</summary>
+    public static ColumnSpec Attachment(string name) => Complex(name, JetCatalog.AttachmentTemplate);
+
+    /// <summary>A multi-value column holding values of <paramref name="elementType"/>. The values take the
+    /// template's size whatever was asked for, as ACE does.</summary>
+    public static ColumnSpec MultiValue(string name, JetDataType elementType) =>
+        Complex(name, JetCatalog.MSysComplexTypeTables
+            .FirstOrDefault(t => t.Name != JetCatalog.AttachmentTemplate && t.Columns[0].Type == elementType).Name
+            ?? throw new NotSupportedException($"A multi-value column cannot hold {elementType}."));
+
+    // The in-row complex id: a fixed Int32 AutoNumber, drawn from the table's 0x1C.
+    private static ColumnSpec Complex(string name, string template) =>
+        new(name, JetDataType.Complex, sizeof(int), IsFixedLength: true, IsAutoNumber: true) { ComplexTemplate = template };
+
+    /// <summary>The <c>MSysComplexType_*</c> template of a complex column; null for any other.</summary>
+    internal string? ComplexTemplate { get; init; }
+
+    /// <summary>A complex column's <c>MSysComplexColumns.ComplexID</c>, assigned when the column is created.</summary>
+    internal int ComplexId { get; init; }
+
+    /// <summary>The column's collation, where it is not the database's.</summary>
+    internal Collation? Collation { get; init; }
+
     /// <summary>The descriptor's storage type: ACE widens the result type to the next in its family, which is
     /// why the payload's own length is what says how to decode it (§3.4a).</summary>
     internal static JetDataType PromotedType(JetDataType resultType) => resultType switch

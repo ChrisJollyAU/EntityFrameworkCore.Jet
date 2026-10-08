@@ -43,6 +43,12 @@ internal enum ColumnExtendedFlags : byte
     /// <summary>The column can store compressed Unicode text (§7).</summary>
     CompressedUnicode = 0x01,
 
+    /// <summary>Set on a flat table's per-value id column, <c>&lt;table&gt;_&lt;column&gt;</c>.</summary>
+    ComplexValueId = 0x04,
+
+    /// <summary>Set on a flat table's link to the owning record, <c>_&lt;column&gt;</c>.</summary>
+    ComplexOwnerLink = 0x08,
+
     /// <summary>An attachment value column (FileData, FileFlags, FileName, FileTimeStamp, FileType, FileURL), in
     /// the attachment template and every attachment flat table.</summary>
     AttachmentValue = 0x10,

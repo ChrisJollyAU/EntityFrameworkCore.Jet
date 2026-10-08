@@ -811,8 +811,37 @@ join the owner's transaction; a standalone deletion starts a transaction coverin
 
 > **The in-row complex id is an AutoNumber.** The `0x12` column's descriptor carries the auto-number flag
 > (`0x0F` bit `0x04`) and its high-water is the owner table's [`0x1C`](page-02a-tdef.md), separate from the
-> table's ordinary counter at `0x14`. Its descriptor also names its catalog row: `0x0B` holds the
+> table's ordinary counter at `0x14`. Its descriptor also names its catalog row: `0x0B`–`0x0E` hold the
 > `ComplexID`. See [page-02b-columns.md](page-02b-columns.md).
+
+### Creating a complex column
+
+ACE's SQL has no type for a complex column. Creating one, in a new table or appended to an existing one,
+writes the same structure for every element type:
+
+1. **The owner column**: type `0x12`, length 4, flags `0x07`, `0x0B`–`0x0E` the Int32 `ComplexID`. The id is
+   `MSysComplexColumns`' AutoNumber, so a dropped column's id is never handed out again. In a new table the
+   column is in the table's definition; appended, it is added to it and the table's rows are numbered — see
+   [`0x1C`](page-02a-tdef.md). The owner's `MSysObjects.Flags` gains `0x00040000`.
+2. **The flat table** `f_<GUID>_<column>`, cut to 64 characters, `Flags` `0x800A0000`, owned by the user SID,
+   its two `MSysACEs` rows the owner table's grants with `FInheritable` true. Its columns, stored in name order:
+   - the template's value columns, as the template declares them but with ids `0`… in **name** order;
+   - `<table>_<column>`, the next id: a variable Int32 AutoNumber, extended flag `0x04`; if that name passes 64
+     characters it is `<first character of the table>_<column>`, cut to 64;
+   - `_<column>`, the id after: a variable Int32, extended flag `0x08`, cut to 64.
+
+   Neither bookkeeping column carries a LANGID, and every column has `0x09` zero. Its three indexes, in
+   data-block order: `MSysComplexPKIndex` over the value id (primary, `0x0089`), `_<column>` (`0x0088`), and
+   `IdxFKPrimaryScalar` over `_<column>` and `Value` — `FileName` for an attachment (`0x0089`).
+3. **The registry row**: `ColumnName`, `ComplexID`, `ComplexTypeObjectID` = the template's TDEF page,
+   `ConceptualTableID` = the owner's, `FlatTableID` = the flat table's.
+4. **The owner's index** over the column, `<column cut to 31 characters>_<GUID>` (a different GUID from the
+   flat table's), unique, flags `0x0289`.
+5. **The flat table's `LvProp`**: `Required` = false on its first value column in name order (`Value`,
+   `FileData`).
+
+The pages are allocated in that order. A multi-value column has no element size or precision of its own: its
+`Value` is always the template's.
 
 ### Catalog rows for the hidden tables
 

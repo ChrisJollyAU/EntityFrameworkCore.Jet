@@ -394,6 +394,10 @@ public abstract class JetFormatBase
     /// <summary>Decimal/Numeric columns only.</summary>
     public abstract int ColumnScaleOffset { get; }
 
+    /// <summary>Complex columns only: the Int32 <c>MSysComplexColumns.ComplexID</c>, over the bytes a text column
+    /// gives its collation.</summary>
+    public abstract int ColumnComplexIdOffset { get; }
+
     /// <summary>
     /// Non-numeric columns use the precision/scale bytes and the two after them for the text collation, and
     /// the four bytes together are a 32-bit Windows LCID with the sort-order version in its otherwise-unused

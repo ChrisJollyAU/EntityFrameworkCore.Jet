@@ -59,7 +59,8 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         IReadOnlyList<(string Name, string Expression)>? checkConstraints = null,
         string? primaryKeyName = null,
         int primaryKeyDeclaredAfterColumns = 0,
-        TableType tableType = TableType.User)
+        TableType tableType = TableType.User,
+        bool flatTable = false)
     {
         relationships ??= [];
         uniqueConstraints ??= [];
@@ -93,6 +94,13 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         if (columns.Count > _channel.Format.MaxColumnsPerTable)
             throw new InvalidOperationException(
                 $"Table '{name}' has {columns.Count} columns; a table can have at most {_channel.Format.MaxColumnsPerTable}.");
+
+        // Each complex column takes the registry's next ComplexIDs, in column order, before its descriptor is written.
+        if (columns.Any(c => c.ComplexTemplate is not null))
+        {
+            int complexId = NextComplexId();
+            columns = [.. columns.Select(c => c.ComplexTemplate is null ? c : c with { ComplexId = complexId++ })];
+        }
 
         // Before the foreign keys' type match, as ACE checks it: an OLE column referencing a LONG key gets this.
         RejectOleIndexColumns(
@@ -304,10 +312,13 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             columnProps.AddRange(CalculatedProperties(col));
         }
 
+        // A table owning a complex column is flagged so — Access marks every one it writes.
         AddCatalogRow(name, tdefPage, columnProps, checkConstraints,
-            ownsComplexColumns: columns.Any(c => c.Type == JetDataType.Complex));
+            flatTable ? ObjectAttributes.System | ObjectAttributes.ComplexFlatTable
+            : columns.Any(c => c.Type == JetDataType.Complex) ? ObjectAttributes.OwnsComplexColumns
+            : ObjectAttributes.None);
         // A new table's permission rows: what the Tables container grants what it creates (system-catalog §11).
-        _catalog.AddPermissionRows(tdefPage, JetCatalog.ObjectContainerParentId);
+        _catalog.AddPermissionRows(tdefPage, JetCatalog.ObjectContainerParentId, inheritable: flatTable);
 
         // Each foreign key's index is built after its relationship's rows, as ACE builds it (verified: a database's
         // first relationship takes MSysRelationships' first data page, and the key's index root the page after).
@@ -323,6 +334,8 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         }
         foreach (IncomingRelationship inc in incoming)
             AddIncomingRelationshipBlock(inc);
+        foreach (ColumnSpec complex in columns.Where(c => c.ComplexTemplate is not null))
+            AddComplexStorage(name, complex);
     }
 
     /// <summary>Allocates an index's root — an empty leaf owned by the table at <paramref name="tdefPage"/>. Every
@@ -1662,6 +1675,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
                 $"Cannot add AutoNumber column '{spec.Name}': table '{table.Name}' already has one, and a table "
                 + "can have only one.");
 
+        if (spec.ComplexTemplate is not null) spec = spec with { ComplexId = NextComplexId() };
         var newColumn = new ColumnDef
         {
             Name = spec.Name,
@@ -1686,7 +1700,8 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             IsNullable = spec.IsNullable,
             // WITH COMPRESSION: the capable flag ACE sets for a column declared so, on the SQL route as on CREATE TABLE.
             SupportsCompressedUnicode = spec.SupportsCompressedUnicode,
-            Collation = spec.Type == JetDataType.FixedPoint ? Collation.GeneralLegacy : _collation,
+            Collation = spec.Collation ?? (spec.Type == JetDataType.FixedPoint ? Collation.GeneralLegacy : _collation),
+            ComplexId = spec.ComplexId,
             // Without this the descriptor gets no 0xC0 and the column reads back as an ordinary one: its
             // Expression and ResultType properties are written, nothing looks at them, and every row stores
             // NULL where the computed value should be.
@@ -1731,6 +1746,12 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
 
         _catalog.Invalidate();
         if (spec.IsAutoNumber) NumberExistingRows(tableName, spec);
+        if (spec.ComplexTemplate is not null)
+        {
+            UpdateCatalogRows("MSysObjects", "Id", table.DefinitionPage, required: true,
+                ("Flags", unchecked((int)(table.ObjectFlags | ObjectAttributes.OwnsComplexColumns))));
+            AddComplexStorage(table.Name, spec);
+        }
         return true;
     }
 
@@ -1820,7 +1841,78 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             }
         }
 
-        ReseedCounter(table, column, spec.Seed == 1 && increment == 1 ? rows.Count + 1 : spec.Seed, increment);
+        if (column.Type != JetDataType.Complex)
+        {
+            ReseedCounter(table, column, spec.Seed == 1 && increment == 1 ? rows.Count + 1 : spec.Seed, increment);
+            return;
+        }
+        // A complex column's high-water is 0x1C, which a column numbered before it may already have passed.
+        byte[] tdef = _channel.ReadPage(table.DefinitionPage).Span.ToArray();
+        TableDefinition.WriteComplexAutoNumber(tdef, _channel.Format,
+            Math.Max(TableDefinition.ReadComplexAutoNumber(tdef, _channel.Format), rows.Count));
+        _channel.WritePage(table.DefinitionPage, tdef);
+        _catalog.Invalidate();
+    }
+
+    // The names ACE gives a complex column's storage, and the length it cuts the column name to in the owner
+    // index's name, <column>_<GUID>.
+    private const string FlatPrimaryIndex = "MSysComplexPKIndex";
+    private const string FlatScalarIndex = "IdxFKPrimaryScalar";
+    private const int OwnerIndexColumnLength = 31;
+
+    /// <summary>The ComplexID the registry hands out next: its AutoNumber, so an id is never reused.</summary>
+    private int NextComplexId() =>
+        (_catalog.FindTable("MSysComplexColumns")
+            ?? throw new NotSupportedException("Complex columns need an Access 2007 or later (.accdb) database."))
+        .RequireColumn("ComplexID").Seed;
+
+    /// <summary>Creates a complex column's storage, as DAO does: the flat table and its three indexes, the
+    /// registry row, the owner's unique index over the column, and the flat table's <c>Required</c> property.</summary>
+    private void AddComplexStorage(string ownerName, ColumnSpec column)
+    {
+        (_, ColumnSpec[] values, string key) = JetCatalog.MSysComplexTypeTables.Single(t => t.Name == column.ComplexTemplate);
+        Comparer<string> byName = Comparer<string>.Create(JetTextComparer.For(_collation).Compare);
+        static string Cut(string name) => name.Length <= JetName.MaxLength ? name : name[..JetName.MaxLength];
+        static string NewGuidName() => Guid.NewGuid().ToString("N").ToUpperInvariant();
+
+        // Value columns take ids in name order, then the value id, then the owner link; neither of those two
+        // carries a LANGID.
+        string link = Cut($"_{column.Name}");
+        string valueId = $"{ownerName}_{column.Name}".Length <= JetName.MaxLength
+            ? $"{ownerName}_{column.Name}" : Cut($"{ownerName[0]}_{column.Name}");
+        ColumnSpec[] valueColumns = [.. values.OrderBy(v => v.Name, byName).Select((v, i) => v with { ColumnId = i })];
+        ColumnSpec[] flatColumns =
+        [
+            .. valueColumns,
+            new(valueId, JetDataType.Int32, sizeof(int), IsFixedLength: false, IsAutoNumber: true,
+                ColumnId: valueColumns.Length, IsEngineColumn: true,
+                ExtendedFlags: (byte)ColumnExtendedFlags.ComplexValueId) { Collation = default(Collation) },
+            new(link, JetDataType.Int32, sizeof(int), IsFixedLength: false,
+                ColumnId: valueColumns.Length + 1, IsEngineColumn: true,
+                ExtendedFlags: (byte)ColumnExtendedFlags.ComplexOwnerLink) { Collation = default(Collation) },
+        ];
+        string flatName = Cut($"f_{NewGuidName()}_{column.Name}");
+        Create(flatName, [.. flatColumns.OrderBy(c => c.Name, byName)], flatTable: true);
+        AddIndex(flatName, FlatPrimaryIndex, [(valueId, false)], isUnique: true, isPrimary: true, disallowNull: true, ignoreNulls: false);
+        AddIndex(flatName, link, [(link, false)], isUnique: false, isPrimary: false, disallowNull: true, ignoreNulls: false);
+        AddIndex(flatName, FlatScalarIndex, [(link, false), (key, false)], isUnique: true, isPrimary: false, disallowNull: true, ignoreNulls: false);
+        int flatPage = _catalog.RequireTable(flatName).DefinitionPage;
+
+        TableDefinition registry = _catalog.RequireTable("MSysComplexColumns");
+        var row = new object?[registry.Columns.Count];
+        JetCatalog.Set(registry, row, "ColumnName", column.Name);
+        JetCatalog.Set(registry, row, "ComplexID", column.ComplexId);
+        JetCatalog.Set(registry, row, "ComplexTypeObjectID", _catalog.RequireTable(column.ComplexTemplate!).DefinitionPage);
+        JetCatalog.Set(registry, row, "ConceptualTableID", _catalog.RequireTable(ownerName).DefinitionPage);
+        JetCatalog.Set(registry, row, "FlatTableID", flatPage);
+        new RowInserter(_channel, registry).Insert(row, updateIndexes: true);
+        _catalog.Invalidate();
+
+        AddIndex(ownerName, $"{column.Name[..Math.Min(column.Name.Length, OwnerIndexColumnLength)]}_{NewGuidName()}",
+            [(column.Name, false)], isUnique: true, isPrimary: false, disallowNull: true, ignoreNulls: false);
+        SetColumnProperties(flatPage, valueColumns[0].Name,
+            [PropertyBlob.Bool(valueColumns[0].Name, PropertyBlob.RequiredProperty, false)]);
+        _catalog.Invalidate();
     }
 
 
@@ -2805,7 +2897,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     private void AddCatalogRow(string name, int tdefPage,
         IReadOnlyList<PropertyBlob.Property> columnProps,
         IReadOnlyList<(string Name, string Expression)> checkConstraints,
-        bool ownsComplexColumns)
+        ObjectAttributes flags)
     {
         // Per-column properties (DefaultValue / Required) and CHECK constraints (a table property) both
         // live in the object's extended-properties (LvProp) blob.
@@ -2814,9 +2906,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             props.Add(new PropertyBlob.Property("", PropertyBlob.CheckConstraintsProperty,
                 PropertyBlob.WriteCheckList(checkConstraints)));
 
-        // A table owning a complex column is flagged so — Access marks every one it writes.
         _catalog.AddObjectRow(
-            name, tdefPage, ObjectType.Table, JetCatalog.ObjectContainerParentId,
-            flags: (int)(ownsComplexColumns ? ObjectAttributes.OwnsComplexColumns : ObjectAttributes.None), props);
+            name, tdefPage, ObjectType.Table, JetCatalog.ObjectContainerParentId, flags: unchecked((int)flags), props);
     }
 }

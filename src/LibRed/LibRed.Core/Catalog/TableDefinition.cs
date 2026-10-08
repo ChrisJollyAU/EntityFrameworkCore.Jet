@@ -537,6 +537,8 @@ public sealed class TableDefinition : Page
                 Precision = d.Precision,
                 Scale = d.Scale,
                 Collation = d.Collation,
+                ComplexId = d.Type == JetDataType.Complex
+                    ? buffer.ReadInt32(columnBlock + i * format.ColumnDescriptorSize + format.ColumnComplexIdOffset) : 0,
                 // The descriptor's bytes as read, fields LibRed does not model included.
                 RawDescriptor = buffer.Slice(columnBlock + i * format.ColumnDescriptorSize, format.ColumnDescriptorSize).ToArray(),
             });
@@ -1073,8 +1075,9 @@ public sealed class TableDefinition : Page
                 Precision = EffectivePrecision(s),
                 Scale = s.Scale,
                 // Numeric columns carry no collation (their 0x0B/0x0C bytes are precision/scale); every
-                // other column inherits the database's collating order.
-                Collation = s.Type == JetDataType.FixedPoint ? Collation.GeneralLegacy : collation,
+                // other column inherits the database's collating order unless the spec gives its own.
+                Collation = s.Collation ?? (s.Type == JetDataType.FixedPoint ? Collation.GeneralLegacy : collation),
+                ComplexId = s.ComplexId,
             });
         }
         return columns;
@@ -1137,6 +1140,8 @@ public sealed class TableDefinition : Page
         BinaryPrimitives.WriteUInt16LittleEndian(d.AsSpan(format.ColumnVariableIndexOffset, 2),
             (ushort)(c.VariableTableIndex >= 0 ? c.VariableTableIndex : (c.IsFixedLength ? 0 : c.VariableIndex)));
         WriteLocaleUnion(d, c.Type, c.Precision, c.Scale, c.Collation, format);
+        if (c.Type == JetDataType.Complex)
+            BinaryPrimitives.WriteInt32LittleEndian(d.AsSpan(format.ColumnComplexIdOffset, sizeof(int)), c.ComplexId);
         // Compose the flag byte (0x0F) from every bit a user column models, plus the catalog bits a created system
         // column asks for; likewise the extended-flag byte (0x10), plus the unmodelled bits an attachment's
         // value columns ask for.

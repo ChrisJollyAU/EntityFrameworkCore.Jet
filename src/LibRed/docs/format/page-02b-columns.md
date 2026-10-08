@@ -12,8 +12,8 @@
 | `0x05` | 2 | Column id |
 | `0x07` | 2 | Variable-table index. For a **fixed** column it is the running count of variable columns with a smaller id (**not** `0`), dropped ones included — ACE's own `ADD COLUMN` writes `2` for a LONG added to `(K LONG, A TEXT, B TEXT)`, and still `2` when `B` was dropped first: an added column's count is the `0x2B` high-water. For a **variable** column it is that column's own slot index, which is the `0x2B` **high-water** and *not* the count of live variable columns: after a variable column is dropped the next one goes above the abandoned slot, so the two part company. Verified byte-for-byte against DAO-written system tables and against ACE performing the same DDL. |
 | `0x09` | 2 | Ordinal position — DAO's `Field.OrdinalPosition`. The engine presents columns in descriptor order, not by this; DAO keeps the two in step by moving the descriptor when it sets it. At creation a second copy of the column id `0x05` on a **user** table, but **zero** on the tables the engine writes for itself (see the note below). It **diverges** after an `ALTER COLUMN` type change, which burns a new id into `0x05` yet leaves `0x09` alone (§3.8), after a `DROP COLUMN`, whose gap the next `ADD COLUMN` closes by ranking the values, and whenever DAO sets it |
-| `0x0B` | 1 | Numeric **precision** (Decimal/Numeric columns); on a **Complex** column the `MSysComplexColumns.ComplexID` (see below); otherwise the low byte of the collation's LANGID (the database default, e.g. `0x09` for en-US) |
-| `0x0C` | 1 | Numeric **scale** (Decimal/Numeric columns); `0` on a **Complex** column; otherwise the high byte of the LANGID (`0x04` for en-US) |
+| `0x0B` | 1 | Numeric **precision** (Decimal/Numeric columns); otherwise the low byte of the collation's LANGID (the database default, e.g. `0x09` for en-US). On a **Complex** column `0x0B`–`0x0E` are instead the Int32 `MSysComplexColumns.ComplexID` (see below) |
+| `0x0C` | 1 | Numeric **scale** (Decimal/Numeric columns); otherwise the high byte of the LANGID (`0x04` for en-US) |
 | `0x0D` | 1 | Collation **sort id** — the LCID's high word; `0` except for an alternate sort order (see the note below) |
 | `0x0E` | 1 | Collation **sort-order version**: `0` = General Legacy (Access 2000–2007), `1` = the "General" order Access 2010+ made default (a different key encoding, §10.4) |
 | `0x0F` | 1 | Flags (see below) |
@@ -56,10 +56,10 @@
 > must not be reported for the others, and a "one AutoNumber per table" rule must be applied over the
 > non-complex columns alone or it rejects a table Access created quite normally.
 >
-> `0x0B` carries the column's `ComplexID`, the key of its `MSysComplexColumns` row, where an ordinary column
-> would hold a precision or the LANGID low byte — and `0x0C` is `0`, where an ordinary column holds the
-> LANGID high byte (`04` for en-US on every plain column beside these). So the descriptor points at the
-> catalog entry directly; a reader need not match on column name.
+> `0x0B`–`0x0E` carry the column's `ComplexID` as one Int32, the key of its `MSysComplexColumns` row, in place
+> of the collation an ordinary column holds there — in a General v1 database too, where `0x0E` is the id's top
+> byte, not a sort-order version. So the descriptor points at the catalog entry directly; a reader need not
+> match on column name.
 >
 > | column | `0x0B` | `MSysComplexColumns.ComplexID` |
 > | --- | --- | --- |

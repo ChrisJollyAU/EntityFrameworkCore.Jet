@@ -106,18 +106,19 @@ public sealed class JetCatalog
 
     /// <summary>The flat storage tables, in the order the engine creates them. Each holds a single
     /// <c>Value</c> column of its element type; Attachment is the exception, carrying the file metadata.
-    /// Engine tables, but not part of the catalog, so their columns carry no catalog flag.</summary>
-    private static readonly (string Name, ColumnSpec[] Columns)[] MSysComplexTypeTables =
+    /// Engine tables, but not part of the catalog, so their columns carry no catalog flag. <c>Key</c> is the value
+    /// column a complex column's <c>IdxFKPrimaryScalar</c> keys beside the owner link.</summary>
+    internal static readonly (string Name, ColumnSpec[] Columns, string Key)[] MSysComplexTypeTables =
     [
-        ("MSysComplexType_UnsignedByte", [new("Value", JetDataType.Byte, 1, true, ColumnId: 0, IsEngineColumn: true)]),
-        ("MSysComplexType_Short", [new("Value", JetDataType.Int16, 2, true, ColumnId: 0, IsEngineColumn: true)]),
-        ("MSysComplexType_Long", [new("Value", JetDataType.Int32, 4, true, ColumnId: 0, IsEngineColumn: true)]),
-        ("MSysComplexType_IEEESingle", [new("Value", JetDataType.Single, 4, true, ColumnId: 0, IsEngineColumn: true)]),
-        ("MSysComplexType_IEEEDouble", [new("Value", JetDataType.Double, 8, true, ColumnId: 0, IsEngineColumn: true)]),
-        ("MSysComplexType_GUID", [new("Value", JetDataType.Guid, 16, true, ColumnId: 0, IsEngineColumn: true)]),
-        ("MSysComplexType_Decimal", [new("Value", JetDataType.FixedPoint, 9, false, ColumnId: 0, IsEngineColumn: true)]),
-        ("MSysComplexType_Text", [new("Value", JetDataType.Text, 510, false, ColumnId: 0, IsEngineColumn: true)]),
-        ("MSysComplexType_Attachment",
+        ("MSysComplexType_UnsignedByte", [new("Value", JetDataType.Byte, 1, true, ColumnId: 0, IsEngineColumn: true)], "Value"),
+        ("MSysComplexType_Short", [new("Value", JetDataType.Int16, 2, true, ColumnId: 0, IsEngineColumn: true)], "Value"),
+        ("MSysComplexType_Long", [new("Value", JetDataType.Int32, 4, true, ColumnId: 0, IsEngineColumn: true)], "Value"),
+        ("MSysComplexType_IEEESingle", [new("Value", JetDataType.Single, 4, true, ColumnId: 0, IsEngineColumn: true)], "Value"),
+        ("MSysComplexType_IEEEDouble", [new("Value", JetDataType.Double, 8, true, ColumnId: 0, IsEngineColumn: true)], "Value"),
+        ("MSysComplexType_GUID", [new("Value", JetDataType.Guid, 16, true, ColumnId: 0, IsEngineColumn: true)], "Value"),
+        ("MSysComplexType_Decimal", [new("Value", JetDataType.FixedPoint, 9, false, ColumnId: 0, IsEngineColumn: true)], "Value"),
+        ("MSysComplexType_Text", [new("Value", JetDataType.Text, 510, false, ColumnId: 0, IsEngineColumn: true)], "Value"),
+        (AttachmentTemplate,
         [
             new("FileData", JetDataType.Ole, 0, false, ColumnId: 3, IsEngineColumn: true, ExtendedFlags: AttachmentValue),
             new("FileFlags", JetDataType.Int32, 4, true, ColumnId: 5, IsEngineColumn: true, ExtendedFlags: AttachmentValue),
@@ -125,8 +126,11 @@ public sealed class JetCatalog
             new("FileTimeStamp", JetDataType.DateTime, 8, true, ColumnId: 4, IsEngineColumn: true, ExtendedFlags: AttachmentValue),
             new("FileType", JetDataType.Text, 510, false, ColumnId: 2, IsEngineColumn: true, ExtendedFlags: AttachmentValue),
             new("FileURL", JetDataType.Memo, 0, false, ColumnId: 0, IsEngineColumn: true, ExtendedFlags: AttachmentValue),
-        ]),
+        ], "FileName"),
     ];
+
+    /// <summary>The attachment column's template.</summary>
+    internal const string AttachmentTemplate = "MSysComplexType_Attachment";
 
     /// <summary>Builds the initial catalog definitions and usage maps in their stored page order.</summary>
     internal static (List<byte[]?> Pages, int GlobalMapPage, int ObjectsPage, int AcesPage, int QueriesPage, int RelationshipsPage)
@@ -264,7 +268,7 @@ public sealed class JetCatalog
         // engine writes them.
         MarkAsSystemTable(db, "MSysComplexColumns", ObjectAttributes.System, sidEngine);
 
-        foreach ((string name, ColumnSpec[] columns) in MSysComplexTypeTables)
+        foreach ((string name, ColumnSpec[] columns, _) in MSysComplexTypeTables)
         {
             db.CreateTable(name, columns, tableType: TableType.System);
             MarkAsSystemTable(db, name, ObjectAttributes.System | ObjectAttributes.ComplexStorage, sidEngine);
@@ -1184,8 +1188,9 @@ public sealed class JetCatalog
     /// creates every object — and every other inheritable grant is copied for its own account, OR'd into the
     /// owner's row when it names the owner's account. The owner's row comes first, the rest in the container's
     /// order. So the masks follow the database: a table's owner gets 0xF00FE where the Tables container grants the
-    /// Creator that alone, and 0xFFEFF where it also grants admin 0xFFEFF, as Northwind's does.</remarks>
-    internal void AddPermissionRows(int objectId, int containerId)
+    /// Creator that alone, and 0xFFEFF where it also grants admin 0xFFEFF, as Northwind's does. A complex
+    /// column's flat table takes the same rows marked inheritable.</remarks>
+    internal void AddPermissionRows(int objectId, int containerId, bool inheritable)
     {
         TableDefinition msysAces = RequireTable("MSysACEs");
         int idIndex = msysAces.RequireColumn("ObjectId").Index, sidIndex = msysAces.RequireColumn("SID").Index;
@@ -1205,7 +1210,7 @@ public sealed class JetCatalog
         }
 
         foreach ((byte[] sid, int acm) in grants.OrderBy(g => g.Sid.AsSpan().SequenceEqual(owner) ? 0 : 1))
-            InsertAceRow(_channel, msysAces, objectId, sid, acm, inheritable: false);
+            InsertAceRow(_channel, msysAces, objectId, sid, acm, inheritable);
     }
 
     /// <summary>Puts <paramref name="value"/> in the row slot <paramref name="column"/> occupies.</summary>
@@ -1277,7 +1282,7 @@ public sealed class JetCatalog
             if (row[idIndex] is int id && id < 0 && id >= nextId) nextId = id + 1;
 
         AddObjectRow(name, nextId, type, parentId, flags);
-        AddPermissionRows(nextId, parentId);
+        AddPermissionRows(nextId, parentId, inheritable: false);
         return nextId;
     }
 
