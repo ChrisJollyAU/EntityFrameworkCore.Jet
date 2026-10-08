@@ -667,7 +667,7 @@ public sealed class TableDefinition : Page
         var columns = ResolveColumns(format, specs, collation);
         IReadOnlyList<LogicalIndexSpec> logical = logicalIndexes
             ?? indexes.Select((ix, i) => LogicalIndexSpec.Plain(i, i, ix.IsPrimaryKey, ix.Name)).ToList();
-        ValidateIndexAndLongValueSpecs(format, columns, indexes, logical, longValueColumns);
+        ValidateIndexAndLongValueSpecs(format, collation, columns, indexes, logical, longValueColumns);
 
         int definitionSize = DefinitionSize(format, columns, indexes, logical, longValueColumns);
         var page = new byte[Math.Max(format.PageSize, definitionSize)];
@@ -805,6 +805,7 @@ public sealed class TableDefinition : Page
 
     private static void ValidateIndexAndLongValueSpecs(
         JetFormatBase format,
+        Collation collation,
         IReadOnlyList<ColumnDef> columns,
         IReadOnlyList<IndexSpec> indexes,
         IReadOnlyList<LogicalIndexSpec> logical,
@@ -832,7 +833,7 @@ public sealed class TableDefinition : Page
         // Duplicate index names, on the create path. ACE rejects them, and every downstream lookup resolves an
         // index by name, so two blocks sharing one would make DROP INDEX remove an arbitrary one of them. The
         // column list has had this check all along (see below); the index list had only a length check.
-        var indexNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var indexNames = new HashSet<string>(JetTextComparer.For(collation));
         foreach (LogicalIndexSpec index in logical)
         {
             ValidateNameLength(index.Name, "Logical index", format);

@@ -379,6 +379,35 @@ public class TableCreatorTests
                 disallowNull: false, ignoreNulls: false);
             Assert.Throws<InvalidOperationException>(() => db.CreateIndex("T", "IX", [("B", false)],
                 isUnique: false, isPrimary: false, disallowNull: false, ignoreNulls: false));
+
+            // One name in the database's collation, as ACE refuses it.
+            db.CreateIndex("T", "ß", [("K", false)], isUnique: false, isPrimary: false,
+                disallowNull: false, ignoreNulls: false);
+            Assert.Throws<InvalidOperationException>(() => db.CreateIndex("T", "ss", [("B", false)],
+                isUnique: false, isPrimary: false, disallowNull: false, ignoreNulls: false));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // Logical blocks sit in name order in the database's collation; the expected order is ACE's, as stored by
+    // CREATE INDEX on a General database.
+    [Fact]
+    public void Logical_index_blocks_are_in_collation_order()
+    {
+        string[] names = ["a1", "B1", "b2", "A2", "ab", "a_b", "a_", "_x", "_", "Z_", "z", "1a", "9", "10", "2", "0"];
+        string path = TemporaryDatabase.CreatePath("indexorder-");
+        try
+        {
+            JetDatabase.Create(path);
+            using var db = JetDatabase.Open(path, readOnly: false);
+            db.CreateTable("T", [.. names.Select((_, i) => Long($"C{i}"))]);
+            for (int i = 0; i < names.Length; i++)
+                db.CreateIndex("T", names[i], [($"C{i}", false)], isUnique: false, isPrimary: false,
+                    disallowNull: false, ignoreNulls: false);
+
+            Assert.Equal(
+                ["_", "_x", "0", "10", "1a", "2", "9", "a_", "a_b", "a1", "A2", "ab", "B1", "b2", "z", "Z_"],
+                db.Catalog.FindTable("T")!.LogicalIndexes.Select(l => l.Name));
         }
         finally { TemporaryDatabase.Delete(path); }
     }

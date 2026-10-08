@@ -219,8 +219,13 @@ physical (data-block) index, prefer a real index's name over a foreign-key relat
 > `0x17 = 0x02`, name = the hidden name **`.r` followed by the letter `'A' + index_num`** — `.rB` for block 1,
 > `.rC` for 2, `.rD` for 3 (verified vs ACE, in `CREATE TABLE` and `ALTER TABLE` alike; the name past `Z` is
 > not measured). The two ends cross-reference: each block's `0x0D` holds the other block's `index_num`
-> (`0x04`). Logical blocks are stored **sorted by name, ignoring case** (verified: `a3` sorts before `IX2`, a
-> foreign key `fk` before `IX2`; how punctuation and accented letters order is not measured). `index_num` is
+> (`0x04`). Logical blocks are stored **sorted by name in the database's collation** (page 0's), the order
+> index keys in that collation sort in: case ignored, `_` and most punctuation before digits and letters,
+> hyphen and apostrophe weighed after the letters, accented letters beside their base letter, each locale's
+> own letters where it places them (Spanish `ch` after `cz`; Norwegian/Danish `æ ø å aa` after `z`), and the
+> hidden `.r` names first (verified vs ACE under General v0 and v1, Spanish, Swedish/Finnish,
+> Norwegian/Danish, Czech, Turkish and French). Names equal in that collation are one name: ACE refuses an
+> index `ss` beside `ß`, and `ae` beside `æ` except in Norwegian/Danish, where `æ` is a letter. `index_num` is
 > assigned in creation order (a table's own indexes first, then relationships as added), and a new block —
 > an index, an outgoing or an incoming relationship block — takes the **lowest number no block holds**
 > (verified vs ACE: with 1 and 2 free below a live 3, a new index takes 1; a parent's incoming block likewise

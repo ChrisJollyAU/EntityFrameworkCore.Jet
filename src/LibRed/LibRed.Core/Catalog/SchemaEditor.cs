@@ -278,8 +278,9 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
                 ChildBlockNumber: (uint)i, ChildPage: tdefPage, upd, del));
         }
 
-        // Access stores logical blocks sorted by name, ignoring case (with their names in the same order).
-        childLogical.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+        // Access stores logical blocks sorted by name in the database's collation (with their names in the same order).
+        JetTextComparer names = JetTextComparer.For(_collation);
+        childLogical.Sort((a, b) => names.Compare(a.Name, b.Name));
 
         // Build the definition, pointed at the usage maps on the usage-map page.
         byte[] tdef = TableDefinition.Build(format, tableType, columns, _collation, indexes, longValueSpecs, childLogical,
@@ -626,7 +627,8 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // (verified) — and so must LibRed: every lookup downstream (DROP INDEX, the back-fill, DROP CONSTRAINT)
         // finds an index by name with First/FirstOrDefault, so two blocks sharing one name make those operations
         // pick an arbitrary block — a DROP that removes the wrong one.
-        if (table.Indexes.Any(i => string.Equals(i.Name, indexName, StringComparison.OrdinalIgnoreCase)))
+        JetTextComparer names = JetTextComparer.For(_collation);
+        if (table.Indexes.Any(i => names.Equals(i.Name, indexName)))
             throw new InvalidOperationException(
                 $"Table '{table.Name}' already has an index named '{indexName}'.");
 
@@ -693,13 +695,12 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         new UsageMap(_channel).SetBit(newIndexUsageRow, usageMapPage, rootPage, set: true);
 
         // The new index adds a (zero) stats block and its data block after the existing ones, and a logical
-        // block in name order. ACE's order ignores case (verified: a3 goes before IX2, and an FK named fk before
-        // IX2); how it orders punctuation and accented letters is not measured.
+        // block in name order, in the database's collation.
         parts.Stats.Add(new byte[format.RealIndexEntrySize]);
         bool complexColumn = slots.Any(s => table.Columns.Any(c => c.ColumnId == s.Id && c.Type == JetDataType.Complex));
         parts.DataBlocks.Add(TableDefinition.BuildDataBlock(format, slots, rootPage, newIndexUsageRow, usageMapPage,
             unique, ignoreNulls, required, complexColumn));
-        int k = parts.Logical.Count(b => string.Compare(NameOf(b.Name), indexName, StringComparison.OrdinalIgnoreCase) < 0);
+        int k = parts.Logical.Count(b => names.Compare(NameOf(b.Name), indexName) < 0);
         parts.Logical.Insert(k, (TableDefinition.BuildInfoBlock(format, buildInfo(newNum, dataCount)), TableDefinition.NameEntry(indexName, format)));
 
         WriteTdef(table.DefinitionPage, parts);
@@ -2775,7 +2776,8 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             "an incoming relationship", parts.DataBlocks.Count, parts.Logical.Count + 1);
 
         string newName = HiddenRelationshipName(inc.Number);
-        int k = parts.Logical.Count(b => string.Compare(NameOf(b.Name), newName, StringComparison.OrdinalIgnoreCase) < 0); // name-sorted, ignoring case
+        JetTextComparer names = JetTextComparer.For(_collation);
+        int k = parts.Logical.Count(b => names.Compare(NameOf(b.Name), newName) < 0); // name-sorted in the database's collation
         parts.Logical.Insert(k, (TableDefinition.BuildInfoBlock(_channel.Format, inc.Spec(newName)), TableDefinition.NameEntry(newName, _channel.Format)));
 
         WriteTdef(inc.ParentPage, parts);
