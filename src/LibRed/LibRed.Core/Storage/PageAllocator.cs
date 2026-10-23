@@ -446,41 +446,49 @@ internal sealed class PageAllocator
     {
         SortedSet<int> pages = [.. _channel.PagesReleasedAtClose];
         if (pages.Count == 0 && !_channel.HasPublishedWrites && _reservationBits == 0 && _groups.Count == 0) return;
-        (_, MapRecord released) = ReadGlobalMaps();
-        // Every bit kept, none bounded by the file: a released page past its end was never materialized, and is
-        // skipped below.
-        pages.UnionWith(UsageMap.PagesInRecord(_channel, released.Record, rejectBeyond: null, "The global released-pages map"));
-        if (pages.Count == 0 && _reservationBits == 0 && _groups.Count == 0) return;
 
-        bool ownTransaction = !_channel.InTransaction;
-        if (ownTransaction) _channel.BeginTransaction();
-        try
+        // In the file's exclusive scope, as a writing statement runs: the global maps are read, rewritten and
+        // committed with no other connection committing between. Outside it, a statement on another connection
+        // could commit page 1 after this transaction first wrote it, and the commit would fail as a write conflict.
+        _channel.WriteExclusive(() =>
         {
-            // Sized before the merge: a conversion allocates its bitmap pages from the free map as it stands,
-            // without the pages being released.
-            if (pages.Count != 0) SizeReleasedMap(pages);
-            ReturnGroups();
+            (_, MapRecord released) = ReadGlobalMaps();
+            // Every bit kept, none bounded by the file: a released page past its end was never materialized, and is
+            // skipped below.
+            pages.UnionWith(UsageMap.PagesInRecord(_channel, released.Record, rejectBeyond: null, "The global released-pages map"));
+            if (pages.Count == 0 && _reservationBits == 0 && _groups.Count == 0) return false;
 
-            // A released page past the end of the file was never materialized; the free map already records
-            // every page past the end as free.
-            foreach (int page in pages)
-                if (page < _channel.PageCount) Free(page);
-            for (int bit = 0; bit < 32; bit++)
-                if ((_reservationBits & (1u << bit)) != 0) Free(_reservationStart + bit);
-            _reservationBits = 0;
-            _owners.Clear();
-            _bitmapSlot = 0;
+            bool ownTransaction = !_channel.InTransaction;
+            if (ownTransaction) _channel.BeginTransaction();
+            try
+            {
+                // Sized before the merge: a conversion allocates its bitmap pages from the free map as it stands,
+                // without the pages being released.
+                if (pages.Count != 0) SizeReleasedMap(pages);
+                ReturnGroups();
 
-            (_, released) = ReadGlobalMaps();
-            ClearReleasedMap(released);
-            _channel.ClearPagesReleasedAtClose();
-            if (ownTransaction) _channel.CommitTransaction(flush: false);
-        }
-        catch
-        {
-            if (ownTransaction) _channel.RollbackTransaction();
-            throw;
-        }
+                // A released page past the end of the file was never materialized; the free map already records
+                // every page past the end as free.
+                foreach (int page in pages)
+                    if (page < _channel.PageCount) Free(page);
+                for (int bit = 0; bit < 32; bit++)
+                    if ((_reservationBits & (1u << bit)) != 0) Free(_reservationStart + bit);
+                _reservationBits = 0;
+                _owners.Clear();
+                _bitmapSlot = 0;
+
+                (_, released) = ReadGlobalMaps();
+                ClearReleasedMap(released);
+                _channel.ClearPagesReleasedAtClose();
+                if (ownTransaction) _channel.CommitTransaction(flush: false);
+            }
+            catch
+            {
+                if (ownTransaction) _channel.RollbackTransaction();
+                throw;
+            }
+            return true;
+        });
     }
 
     /// <summary>
