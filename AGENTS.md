@@ -405,8 +405,10 @@ flags — `jet` and `libred` — and skips the jobs that don't apply:
   partway through the largest shard.
 - **LibRed** — `LibRed.Engine.Tests` and `LibRed.Core.Tests` on Linux/Windows/macOS + ubuntu-arm/windows-arm,
   no ACE anywhere.
-- **LibRedAccess** — the ACE cross-check suites on `windows-latest` with ACE 2016, plus `LibRed.Ado.Tests` and
-  `LibRed.EFCore.Tests`, which need no driver but run only there for now.
+- **LibRedAccess** — the ACE cross-check suites on `windows-latest`, plus `LibRed.Ado.Tests` and
+  `LibRed.EFCore.Tests`, which need no driver but run only there for now. Two legs: the 2016 redistributable, and
+  the Microsoft 365 Access Runtime installed through the Office Deployment Tool, where the version-guarded cases
+  (BIGINT/DATETIME2, backtick CHECKs) actually run. The 365 leg is `continue-on-error` until it proves stable.
 - **LibRedFunctional** — both `EFCore.LibRed.FunctionalTests` (compatible mode) and
   `EFCore.LibRed.Extended.FunctionalTests` (extended mode) on the five-platform matrix, `continue-on-error`.
 - **NuGet** — packs for `master`, `*-servicing`, `*-wip` and release tags, attaching the packages to the run
