@@ -735,6 +735,13 @@ jobs:
           '@
               $setup = Start-Process .\setup.exe -ArgumentList '/configure', 'AccessRuntime.xml' -Wait -PassThru
               if ($setup.ExitCode -ne 0) { throw "The Office Deployment Tool exited with $($setup.ExitCode)." }
+              # Since the December 2025 Office builds, ACE refuses every query that reaches another file ("Operation
+              # is not supported for this type of object") unless AllowQueryRemoteTables is 1. The IN externaldatabase
+              # cross-checks were measured with it set, as on the developer machine. -Force on an existing registry
+              # key would wipe its values, so the key is only created when missing.
+              $engines = 'HKLM:\SOFTWARE\Microsoft\Office\16.0\Access Connectivity Engine\Engines'
+              if (-not (Test-Path $engines)) { New-Item $engines -Force | Out-Null }
+              New-ItemProperty $engines -Name AllowQueryRemoteTables -PropertyType DWord -Value 1 -Force | Out-Null
           }
           else
           {
