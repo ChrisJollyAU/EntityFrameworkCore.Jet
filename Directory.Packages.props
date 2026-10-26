@@ -1,8 +1,8 @@
 <Project>
 	<PropertyGroup>
 		<ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-		<EFCoreVersion>[11.0.0-rc.2.26504.105]</EFCoreVersion>
-		<MSLibVersion>[11.0.0-rc.2.26504.105]</MSLibVersion>
+		<EFCoreVersion>[11.0.0-rc.3.26522.148]</EFCoreVersion>
+		<MSLibVersion>[11.0.0-rc.3.26522.148]</MSLibVersion>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -25,7 +25,7 @@
 		<PackageVersion Include="Microsoft.Extensions.Logging" Version="$(MSLibVersion)" />
 		<PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="$(MSLibVersion)" />
 		<PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.10.0" />
-		<PackageVersion Include="Microsoft.SourceLink.GitHub" Version="11.0.100-rc.2.26504.105" />
+		<PackageVersion Include="Microsoft.SourceLink.GitHub" Version="11.0.100-rc.3.26522.148" />
 		<PackageVersion Include="Moq" Version="4.20.72" />
 		<PackageVersion Include="MSTest.TestAdapter" Version="4.4.0" />
 		<PackageVersion Include="MSTest.TestFramework" Version="4.4.0" />
