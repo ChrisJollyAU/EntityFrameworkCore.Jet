@@ -14,6 +14,9 @@
          stops MTP replacing that target with one that silently runs nothing. -->
     <IsTestingPlatformApplication>false</IsTestingPlatformApplication>
     <TestingPlatformDotnetTestSupport>false</TestingPlatformDotnetTestSupport>
+
+    <!-- EXPERIMENT: run the test hosts on exactly the RC 2 runtime, never a newer one the runner has. -->
+    <RollForward>Disable</RollForward>
   </PropertyGroup>
 
 </Project>
