@@ -11,6 +11,7 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
           jetlocktrace probe <database>
           jetlocktrace hold <database> --region <1-6> (--page <n> | --user-slot <n>)
                                        [--shared] [--as-user <n>]
+          jetlocktrace watch <database> [--slots <first>[-<last>]] [--seconds <n>] [--out <path>]
 
         Options
           --page-size <n>   Database page size. Default 4096 (Jet 4 / ACE); use 2048 for Jet 3.
@@ -63,6 +64,17 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
                             session has unless 255 users are connected.
           Exit code 2 means the lock conflicted and nothing was taken.
           Numbers may be decimal or 0x-prefixed hex.
+
+        Commit-slot sampling (never writes to the database):
+          watch <database>  Reads the page-0 commit slots in one positional read per sample, as fast as it
+                            can, and records every change. The report, printed after sampling ends, lists
+                            each transition (time, how long the previous value was held, the slots as hex
+                            and little-endian number, '*' on those that changed), then a summary and each
+                            slot's distinct values. Values below 256 are flagged.
+            --slots <a>[-<b>]  The slots to watch. Default 0-3.
+            --seconds <n>      How long to sample. Default 60.
+            --out <path>       Write the report to a file instead of stdout.
+          Stops after --seconds, on Ctrl+C, or when the file <database>.watch.stop exists.
         """);
     return 0;
 }
@@ -75,6 +87,8 @@ try
             return LiveLocks.Probe(args[1..]);
         case "hold":
             return LiveLocks.Hold(args[1..]);
+        case "watch":
+            return Watch.Run(args[1..]);
     }
 }
 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException

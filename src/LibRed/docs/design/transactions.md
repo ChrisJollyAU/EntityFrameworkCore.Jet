@@ -58,9 +58,11 @@ Status: **draft / accepted direction** · Date: 2026-07-18
 > idle 5-second read of the commit table and the order of a user's own slot writes around a batch of page writes
 > are all in [locking.md](../format/locking.md) and [page-00 §2.2](../format/page-00-database.md). Page 0 is
 > **not** under a byte-range lock (no byte-range lock is taken on the database file at all). What is still
-> missing is the **values** ACE writes into its slot as it begins and ends a batch (the order and 2-byte extent
-> are known, the values are not), what the 5-second read compares, and what a kill between the two slot writes
-> of a multi-page batch leaves behind. Guessing the values writes a signal Access reads as corruption. LibRed
+> missing is what the 5-second read compares, the slot of an exclusive holder and of a second concurrent user
+> during a multi-page batch, and what a kill while a slot holds `00 00` leaves for the next open. The values
+> themselves are measured: a multi-page batch writes `00 00`, the pages, then the user's counter plus one; a
+> one-page batch writes the page then counter plus one only. A wrong value in a slot is a signal Access reads as
+> corruption, so the remaining cases must be measured before they are written. LibRed
 > still takes none of these locks, writes no lock file and no slot, and is **single-writer**, as
 > `src/LibRed/README.md` states: every mention of commit bytes, `.laccdb` records and cross-process recovery
 > below is **roadmap, not code**. What ships today is the deferred-write overlay, the write-conflict check on
@@ -108,7 +110,7 @@ same time**. That rules out any LibRed-private durability side-channel:
 - Access writes pages under *its* protocol and never touches a LibRed journal, so our
   recovery would roll its committed work back — corruption, not safety.
 - Jet itself has no WAL. Durability = the page-0 **commit-byte table** (`0xE00`–`0xFFF`,
-  256×2 bytes: idle `00 01`, **mid-write `00 00`** (the white paper's meaning; the values ACE writes around a batch are not measured), corrupt `01 00`) plus the OS
+  256×2 bytes: idle `00 01`, **mid-write `00 00`** (the white paper's meaning; ACE 16 writes it as a multi-page batch's leading slot write), corrupt `01 00`) plus the OS
   byte-range locks. A `00 00` with no matching `.ldb` lock after a crash ⇒ Jet marks the
   DB suspect and repairs.
 
@@ -254,7 +256,7 @@ above), not before.
   the clear leaves the Jet "suspect" signal (later, with `JetLockManager`) → repair path. (Measured:
   a user killed inside ACE's ~500 ms deferral after an autocommit `UPDATE` had written nothing — the
   update is lost and the file is not suspect. A kill between the two slot writes of a multi-page
-  batch is not measured.)
+  batch leaves the slot at `00 00`; what the next open does is not measured.)
   With the self-consistent manager, recovery is process-local (no cross-process crash
   interop claimed yet).
 
@@ -281,8 +283,8 @@ Two orderings hold in every mode, and they are the ones that matter for concurre
   rests on the write reaching the OS — which every handle on the machine reads through —
   not on it reaching the disk.
 - **Every batch ends with a write of the connection's own slot** (`0xE00 + 2n` for user
-  *n*). A batch of one existing page is the page then the slot; a batch of two or more is
-  the slot, the pages, the slot ([page-00 §2.2](../format/page-00-database.md)). An
+  *n*). A batch of one existing page is the page then the slot (counter + 1); a batch of two or more is
+  the slot (`00 00`), the pages, the slot (counter + 1) ([page-00 §2.2](../format/page-00-database.md)). An
   explicit transaction writes nothing at all until its commit — apart from an `INSERT`'s
   TDEF page and page 1, written about 500 ms after the `INSERT`
   ([locking.md](../format/locking.md)).
@@ -333,10 +335,10 @@ Build correctness first with lock seams stubbed; drop the Jet lock manager in la
    map; multi-*process* single-writer LibRed↔LibRed.
 8. **(Concurrency phase) `JetLockManager`.** Jet-exact offsets, commit-byte polling,
    `.laccdb` records → live co-residency with `MSACCESS.EXE`. The lock bands and shapes, the
-   `.laccdb` record, the poll interval (5 s) and the slot write order are measured
-   ([locking.md](../format/locking.md)); characterize the remaining unknowns first — the slot
-   values, what the poll compares, the `.ldb` of an `.mdb`, and a kill between a multi-page
-   batch's slot writes.
+   `.laccdb` record, the poll interval (5 s) and the slot write order and values are measured
+   ([locking.md](../format/locking.md)); characterize the remaining unknowns first — what the
+   poll compares, the slot of an exclusive holder and of a second user during a multi-page batch,
+   the `.ldb` of an `.mdb`, and what the next open does after a kill while a slot holds `00 00`.
 
 Steps 1–3 close every transaction-related P0 in the audit (✅). Step 5 completes the
 in-process transaction contract (✅), and step 6 adds the SQL front door onto it. Steps 7–8

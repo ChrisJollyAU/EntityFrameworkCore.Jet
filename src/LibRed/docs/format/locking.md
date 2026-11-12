@@ -103,12 +103,11 @@ Every user then locks and releases `0x10000500`, length 256 (group 5). Its purpo
 
 A user writes only **its own** 2-byte slot ([page-00 §2.2](page-00-database.md#22-the-user-commit-byte-table-0xe00-0xfff)): `0xE00 + 2n` when shared, `0xE00` when exclusive. For each batch of page writes:
 
-- **One existing page:** the page, then the slot.
-- **Two or more existing pages:** the slot, the pages, the slot.
-- **Pages newly appended to the file** are written first — a 1-byte write at the last byte of the new page, then the full page(s) — before the leading slot write.
-- Every batch **ends with a slot write**; the page locks are released after it.
-
-The values written are not known.
+- **One existing page:** the page, then the slot (counter + 1). `00 00` never appears.
+- **Two or more existing pages:** the slot (`00 00`), the pages, the slot (counter + 1). The slot reads `00 00` for exactly as long as the pages are being written — the white paper's "mid-write to disk" state.
+- **Pages newly appended to the file** are written first — a 1-byte write at the last byte of the new page, then the full page(s) — before the leading slot write (`00 00`).
+- Every batch **ends with a slot write** storing the user's commit counter plus one (little-endian 16-bit); the page locks are released after it. This holds for a lone statement, an explicit transaction's commit and closing the connection (a one-page batch: counter + 1 only).
+- The counter rises by exactly one per batch; the other users' slots and slot 0 are untouched.
 
 ## 7. Conflicts and errors
 
@@ -127,10 +126,10 @@ Another user sees a table or column created or dropped by DDL on its next statem
 
 Unmeasured, and so not stated as fact above:
 
-- The two slot values written around a multi-page batch, and whether the leading one is the white paper's "mid-write" `00 00`.
+- The slot of an exclusive holder (slot 0), and of a second concurrent user, during a multi-page batch; the `01 00` cases beyond those in page-00 §2.2.
 - What group 5 of region 1 is for; whether group 1 means anything beyond being the session byte.
 - User numbers above 2 and the bound of 255; lock-file names for extensions other than `.accdb`.
 - Row-level locking for recordset edits (DAO / ADO cursors); DAO deny-read / deny-write table opens.
-- A kill landing between the leading and closing slot writes of a multi-page batch, and what the next open does.
+- A kill landing between the leading and closing slot writes of a multi-page batch: the slot then holds `00 00`; what the next open does is not known.
 - Which process's 5-second poll leads to a cache refresh, and what it compares.
 - Multi-user page allocation beyond the `INSERT` locks above.

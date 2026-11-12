@@ -76,6 +76,28 @@ conflicts in Access on purpose.
 Numbers may be decimal or `0x`-prefixed hex. Exit code `2` means the lock conflicted and nothing was taken. To
 hold a lock from a script, feed it stdin: `(sleep 30; echo) | jetlocktrace hold …`.
 
+## Sampling the commit slots: `watch`
+
+Process Monitor shows that ACE writes a page-0 commit slot but not the bytes. `watch` samples them instead: one
+positional read (`RandomAccess.Read`, no buffering of our own, no memory mapping) of the requested slots per
+iteration, many thousands a second, so it can land inside the ~1.5 ms window between ACE writing its slot and
+writing it again. **It never writes to the database**; it opens it read-only with `FileShare.ReadWrite | Delete`.
+The slot table's offset and slot size come from the database's own format (`JetFormatBase`), as in `probe`.
+
+```
+jetlocktrace watch <database> [--slots <first>[-<last>]] [--seconds <n>] [--out <path>]
+```
+
+`--slots` defaults to `0-3`; `--seconds` to 60. Transitions are held in memory and printed only after sampling
+ends, so console I/O never slows the loop. Stop early with **Ctrl+C** (the report still prints) or by creating the
+file `<database>.watch.stop` (checked every 10,000 samples).
+
+The report has one line per transition: seconds since start, how long the previous value was held (microseconds
+and samples that saw it), then each slot as hex and little-endian number, `*` marking the slots that changed. The
+summary gives samples, samples per second, mean and worst gap between samples, and each slot's distinct values with
+how often a transition entered them and their shortest and longest completed hold. Any value below 256 (`00 00`,
+`01 00`) is flagged `RESERVED`. A torn read is possible in principle; what was read is reported as read.
+
 ## Capturing a trace
 
 In Process Monitor, filter to `Path contains <your database name>` (and `Process Name is MSACCESS.EXE` for a

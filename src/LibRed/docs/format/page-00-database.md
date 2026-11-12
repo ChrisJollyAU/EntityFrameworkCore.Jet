@@ -302,7 +302,7 @@ the position the connection takes in the `.ldb`/`.laccdb` when it registers, whi
 the lock file and why neither can be written without the other ([locking.md](locking.md) has the lock file and
 its protocol). Each 2-byte value is a commit/lock status Jet
 uses (with the matching user lock in the `.ldb`/`.laccdb`) to coordinate concurrency — this table is only the
-per-user *overall status*; the lock file holds the actual page-level read/write registration. **`00 00` means "mid-write to disk"** (the white paper's meaning), and `01 00` means
+per-user *overall status*; the lock file holds the actual page-level read/write registration. **`00 00` means "mid-write to disk"** (the white paper's meaning; ACE 16 writes it around a multi-page batch, [below](#22-the-user-commit-byte-table-0xe00-0xfff)), and `01 00` means
 "accessed a corrupted page" — either one *without a matching user lock* makes Jet declare the database
 suspect and demand a repair before it will open.
 
@@ -338,7 +338,9 @@ Four properties follow:
   reserved `00 00`/`01 00` status codes, and a freshly compacted file starts there (below).
 - **The on-disk value lags the last write by one.** A statement's increment is not flushed until the *next*
   write, or until the connection closes (which lands the pending one plus its own). So a burst of *n* inserts
-  reads as *n−1* until something follows it.
+  reads as *n−1* until something follows it. The increment is stored by a batch's closing slot write, and an
+  autocommit statement's batch goes out with its deferred page writes — after the statement has returned — or
+  when the next statement runs ([locking.md §5](locking.md#5-lifetimes)).
 - **Every committed write costs exactly one**, DDL included. The lag makes this easy to misread: in the
   sequence above `CREATE INDEX` appears to move it by 2 and the first `INSERT` by 0, but the whole
   seven-statement sequence is 722 → 729, exactly +7. The same five inserts with and without a
@@ -354,14 +356,17 @@ and takes no lock.
 **When the slot is written (measured: ACE 16).** A batch of page writes reaches the
 file in one of two shapes, by how many *existing* pages it holds:
 
-- **one existing page:** the page, then the slot;
-- **two or more existing pages:** the slot, the pages, the slot.
+- **one existing page:** the page, then the slot (counter + 1) — `00 00` never appears;
+- **two or more existing pages:** the slot (`00 00`), the pages, the slot (counter + 1).
 
-Pages newly **appended** to the file are written first — a 1-byte write at the last byte of the new page, then
-the full page(s) — before that leading slot write. Every batch **ends with a slot write**, and the batch's page
-locks are released after it. This holds for a lone statement, an explicit transaction's commit and the final
-writes at close. The values written are not known — only the order and the 2-byte extent at the slot's offset —
-so whether the leading write of a multi-page batch is the `00 00` "mid-write" state above is open.
+So the slot reads `00 00` for exactly as long as a multi-page batch's pages are being written — the white paper's
+"mid-write to disk" state. Pages newly **appended** to the file are written first — a 1-byte write at the last
+byte of the new page, then the full page(s) — before that leading slot write (`00 00`). Every batch **ends with a
+slot write** storing the user's commit counter plus one, and the batch's page locks are released after it. This
+holds for a lone statement, an explicit transaction's commit (two or more existing pages: `00 00`, pages,
+counter + 1) and the final writes at close (a one-page batch: counter + 1 only). The counter rises by exactly one
+per batch; the other users' slots and slot 0 are untouched. The slot of an exclusive holder (slot 0) and of a
+second concurrent user during a multi-page batch are not known.
 
 **Idle reads.** An idle shared user reads the whole 512-byte table every 5 seconds (measured); what it compares
 and which process's read leads to a cache refresh are not known.
