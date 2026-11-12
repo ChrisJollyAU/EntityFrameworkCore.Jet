@@ -1,3 +1,6 @@
+using LibRed.Formats;
+using LibRed.IO;
+
 namespace JetLockTrace;
 
 /// <summary>
@@ -6,116 +9,93 @@ namespace JetLockTrace;
 /// </summary>
 /// <remarks>
 ///     <para>
-///         Lock offsets pack three things:
-///     </para>
-///     <code>
-///         offset = (region &lt;&lt; 28) | (page &lt;&lt; 9) | userNumber
-///     </code>
-///     <para>
-///         The <c>&lt;&lt; 9</c> spacing gives every page a 512-byte window in lock space, because an exclusive lock
-///         spans 256-512 bytes and must not reach into the next page's window. It is <b>not</b> the page size — Jet
-///         3.5 used 2 KB pages and the same shift, and ACE uses 4 KB.
-///     </para>
-///     <para>
-///         The locks are placed beyond end-of-file, so nothing in the database is ever actually locked; the ranges are
-///         pure semaphores. Region names come from the Microsoft Jet locking white paper
-///         (<c>docs/JetWhitePapers_UPDATE1/Jetlock.docx</c>) and are the Jet development team's own.
+///         The layout itself — regions, page windows, user bytes — is <see cref="JetLockLayout" /> in LibRed.Core,
+///         the same copy the engine locks through; this class only words what it decodes. Region names come from the
+///         Microsoft Jet locking white paper (<c>docs/JetWhitePapers_UPDATE1/Jetlock.docx</c>) and are the Jet
+///         development team's own.
 ///     </para>
 /// </remarks>
 public static class LockDecoder
 {
     /// <summary>
-    ///     Bytes of lock space reserved per page: 256 for the rows plus 256 for the users. See the remarks on
-    ///     <see cref="LockDecoder" />.
+    ///     The page-0 layout the commit-byte table is read from. A trace carries no database header, so this is the
+    ///     Jet 4 layout every ACE version shares.
     /// </summary>
-    private const int LockBytesPerPage = 512;
+    private static readonly JetFormatBase PageZeroFormat = JetFormatBase.FromVersionByte((byte)JetVersion.Version4);
 
-    /// <summary>
-    ///     The first half of a page's lock window: one byte per row, at <c>rowId + 1</c>, so byte 0 is unused and
-    ///     locks always begin at +1. The user array occupies the bytes above this.
-    /// </summary>
-    private const int RowBytesPerPage = 256;
+    /// <summary>The group of region 1 every user locks and releases on connecting; what it is for is not known.</summary>
+    private const int UnknownUserGroup = 5;
 
-    /// <summary>Offset of the user commit-byte table within page 0.</summary>
-    private const int CommitByteTableOffset = 0xE00;
-
-    /// <summary>Bytes per user in the commit-byte table (Jet 3.0 and later; Jet 2.x used one).</summary>
-    private const int CommitByteWidth = 2;
-
-    /// <summary>Bytes per entry in the lock file: 32 for the computer name, 32 for the security name.</summary>
-    private const int UserRecordWidth = 64;
-
-    private static string RegionName(long region)
+    private static string RegionName(JetLockRegion region)
         => region switch
         {
-            0x1 => "user-lock",
-            // Jet 3.0 moved read locks into the write-lock range; they differ only by being shared and 1 byte wide.
-            0x2 => "write/read",
-            0x3 => "read/commit",
-            0x4 => "table-read",
-            0x5 => "table-write",
-            0x6 => "deny-write",
-            _ => $"region-{region:X}",
+            JetLockRegion.User => "user-lock",
+            // Jet 3.0 moved read locks into the write-lock range; Jet's "shared" one is a single byte there.
+            JetLockRegion.WriteRead => "write/read",
+            JetLockRegion.ReadCommit => "read/commit",
+            JetLockRegion.TableRead => "table-read",
+            JetLockRegion.TableWrite => "table-write",
+            JetLockRegion.TableDenyWrite => "deny-write",
+            _ => $"region-{(int)region:X}",
         };
 
     /// <summary>Describes a lock or unlock at <paramref name="offset" /> spanning <paramref name="length" /> bytes.</summary>
-    public static string DescribeLock(long offset, long? length)
+    /// <param name="offset">The lock offset.</param>
+    /// <param name="length">The lock length, if known.</param>
+    /// <param name="exclusive">
+    ///     The <c>Exclusive</c> flag ProcMon recorded, when it recorded one (unlock rows carry none). ACE takes only
+    ///     operating-system exclusive locks, so <c>false</c> is the one thing marked as unexpected.
+    /// </param>
+    public static string DescribeLock(long offset, long? length, bool? exclusive = null)
     {
-        long region = (offset >> 28) & 0xF;
-        string kind = RegionName(region);
-        string width = DescribeWidth(length);
+        JetLockAddress a = JetLockLayout.Decode(offset, length);
+        string kind = RegionName(a.Region);
+        string size = $"({length?.ToString() ?? "?"})";
+        string where = $"[0x{a.WithinRegion:X}]";
+        string mark = exclusive == false ? "  !! OS-SHARED lock: ACE takes none" : "";
 
-        long withinRegion = offset & 0x0FFFFFFF;
-
-        // Region 1 is not page-based, and its stride is 256 rather than the 512 of regions 2-6: it holds groups of
-        // one shared byte per user, so 256 bytes is enough and an exclusive lock over a whole group is exactly 256
-        // wide. Group 0 is the user-slot array the white paper documents (0x10000001..0x100000FF); observed traces
-        // also use groups 1 and 5, which the paper does not mention.
-        if (region == 0x1)
+        // Region 1 is not page-based: groups of 256 bytes, one byte per user. A connected user holds its byte in
+        // group 0 and its byte in group 1 (one lower) for its whole session; every user also locks and releases the
+        // whole of group 5, whose meaning is unknown. A range over several bytes is a presence probe or the first
+        // attempt on open: it succeeds only when nobody else holds a byte in it.
+        if (a.Region == JetLockRegion.User)
         {
-            long group = withinRegion >> 8;
-            long slot = withinRegion & 0xFF;
-            string note = group == 0 ? "" : "  <-- undocumented group";
+            long group = a.Window;
+            long slot = a.ByteInWindow;
+            string text = (group, length, a.User) switch
+            {
+                (JetLockLayout.UserGroup, _, { } user) => $"group 0  user {user} byte",
+                (JetLockLayout.SessionGroup, _, { } user) => $"group 1  session byte, user {user}",
+                (JetLockLayout.UserGroup or JetLockLayout.SessionGroup, > 1, _)
+                    => $"group {group}  bytes {slot}..{slot + (length ?? 1) - 1}: presence probe over several users' bytes",
+                (UnknownUserGroup, _, _) => $"group 5  bytes {slot}..{slot + (length ?? 1) - 1}: meaning unknown",
+                _ => $"group {group}  byte {slot}",
+            };
 
-            return length is > 1
-                ? $"{kind,-11} group {group,-2} users {slot}..{slot + length.Value - 1,-4} {width}  [0x{withinRegion:X}]{note}"
-                : $"{kind,-11} group {group,-2} user {slot,-9} {width}  [0x{withinRegion:X}]{note}";
+            return $"{kind,-11} {text} {size}  {where}{mark}";
         }
 
-        long page = withinRegion / LockBytesPerPage;
-        long offsetInWindow = withinRegion % LockBytesPerPage;
-
-        // A shared lock is one byte, and that byte names a row: byte = rowId + 1, so byte 0 is unused and locks
-        // always start at +1. Verified against the fixture — a page holding 53 rows is locked at bytes up to 53,
-        // and pages holding a single row are only ever locked at byte 1.
-        if (length == 1)
+        // A one-byte lock on a page is Jet's "shared" lock, at the holder's own user number.
+        if (length == 1 && a.User is { } sharer)
         {
-            return $"{kind,-11} page {page,-6} row {offsetInWindow - 1,-4} {width}  [0x{withinRegion:X}]";
+            return $"{kind,-11} page {a.Window,-6} shared, user {sharer,-3} {size}  {where}{mark}";
         }
 
-        // An exclusive lock blankets all 256 row bytes and then extends far enough to touch the holder's own byte in
-        // the user array that follows, so the USER is identified by where the range ends, not where it starts —
-        // which is what the white paper means by "the last two digits of the ending lock range". That also explains
-        // the 512-byte window: 256 row bytes + 256 user bytes.
-        if (length is >= RowBytesPerPage and <= LockBytesPerPage && offsetInWindow is 0 or 1)
+        // An exclusive lock starts at byte 1 and covers every user's shared byte, then runs on to the holder's own
+        // number, so the USER is identified by where the range ends, not where it starts.
+        if (a.User is { } holder)
         {
-            long user = offsetInWindow + length.Value - 1 - RowBytesPerPage;
-            return $"{kind,-11} page {page,-6} all rows, user {user,-3} {width}  [0x{withinRegion:X}]";
+            return $"{kind,-11} page {a.Window,-6} exclusive, user {holder,-3} {size}  {where}{mark}";
         }
 
-        return $"{kind,-11} page {page,-6} +{offsetInWindow,-5} {width}  [0x{withinRegion:X}]";
+        // An upgrade: a user already holding its own byte takes the rest of the shared bytes, 2..256.
+        if (length is > 1 && a.ByteInWindow >= 2 && a.ByteInWindow + length.Value - 1 == JetLockLayout.ExclusiveLengthBase)
+        {
+            return $"{kind,-11} page {a.Window,-6} upgrade, bytes {a.ByteInWindow}..{JetLockLayout.ExclusiveLengthBase}, every other user's byte {size}  {where}{mark}";
+        }
+
+        return $"{kind,-11} page {a.Window,-6} +{a.ByteInWindow,-5} {size}  {where}{mark}";
     }
-
-    private static string DescribeWidth(long? length)
-        => length switch
-        {
-            null => "?",
-            1 => "SHARED(1)",
-            // The white paper: an exclusive lock takes the first 256 bytes to block and detect shared locks, plus
-            // enough beyond that to identify which user holds it.
-            >= 256 and <= 512 => $"EXCL({length})",
-            _ => $"RANGE({length})",
-        };
 
     /// <summary>Describes a read or write against the database file.</summary>
     public static string DescribeDatabaseIo(long offset, long? length, int pageSize)
@@ -123,9 +103,9 @@ public static class LockDecoder
         long page = offset / pageSize;
         long inPage = offset % pageSize;
 
-        if (page == 0 && inPage >= CommitByteTableOffset)
+        if (page == 0 && inPage >= PageZeroFormat.CommitByteTableOffset)
         {
-            long slot = (inPage - CommitByteTableOffset) / CommitByteWidth;
+            long slot = (inPage - PageZeroFormat.CommitByteTableOffset) / PageZeroFormat.CommitByteSlotSize;
             return $"commit-byte user {slot}   (page 0 +0x{inPage:X3}, {length} bytes)";
         }
 
@@ -145,27 +125,18 @@ public static class LockDecoder
     }
 
     /// <summary>Describes a read or write against the lock file.</summary>
-    /// <remarks>
-    ///     Reports the record <i>index</i> rather than a user slot, because the mapping between the two is not settled:
-    ///     the white paper says slot 1 writes "the first 64 bytes" (implying <c>(slot - 1) * 64</c>) but also that a
-    ///     lock at <c>0x10000040</c> writes "starting at 4096 bytes" (implying <c>slot * 64</c>), and those disagree.
-    ///     An observed trace has slot 1 writing at offset 0. Left as an index until an experiment settles it.
-    /// </remarks>
+    /// <remarks>User <c>n</c>'s record is the <c>n - 1</c>th, so user 1's is at offset 0.</remarks>
     public static string DescribeLockFileIo(long offset, long? length)
-        => length == UserRecordWidth && offset % UserRecordWidth == 0
-            ? $"user record #{offset / UserRecordWidth}   (computer + security name)"
+        => length == JetLockLayout.UserRecordSize && JetLockLayout.UserAtRecordOffset(offset) is { } user
+            ? $"user {user} record   (computer + security name)"
             : $"offset {offset} ({length} bytes)";
 
     /// <summary>Whether <paramref name="path" /> names a lock file rather than a database.</summary>
     public static bool IsLockFile(string path)
-        => path.EndsWith(".laccdb", StringComparison.OrdinalIgnoreCase)
-            || path.EndsWith(".ldb", StringComparison.OrdinalIgnoreCase);
+        => path.EndsWith(JetLockFile.AceExtension, StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(JetLockFile.JetExtension, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Whether <paramref name="path" /> names a database or its lock file.</summary>
     public static bool IsDatabaseOrLockFile(string path)
-        => IsLockFile(path)
-            || path.EndsWith(".accdb", StringComparison.OrdinalIgnoreCase)
-            || path.EndsWith(".mdb", StringComparison.OrdinalIgnoreCase)
-            || path.EndsWith(".accde", StringComparison.OrdinalIgnoreCase)
-            || path.EndsWith(".mdw", StringComparison.OrdinalIgnoreCase);
+        => IsLockFile(path) || JetLockFile.PathFor(path) is not null;
 }

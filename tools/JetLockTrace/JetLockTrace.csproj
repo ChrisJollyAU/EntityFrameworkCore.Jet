@@ -7,6 +7,15 @@
     <AssemblyName>jetlocktrace</AssemblyName>
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Signed with the repo key, as the test projects are, so LibRed.Core's InternalsVisibleTo can reach it. -->
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>$(MSBuildThisFileDirectory)..\..\Key.snk</AssemblyOriginatorKeyFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The lock layout, the lock-file primitive and the page-0 commit-byte table come from LibRed.Core, so the tool
+         decodes with the same copy the engine encodes with. Core multi-targets net10.0, which this tool uses. -->
+    <ProjectReference Include="..\..\src\LibRed\LibRed.Core\LibRed.Core.csproj" />
+  </ItemGroup>
 
 </Project>

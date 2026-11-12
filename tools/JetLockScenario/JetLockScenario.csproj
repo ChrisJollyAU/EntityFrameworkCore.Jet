@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Interactive driver for tracing how ACE places locks: one OLE DB connection, one command per line, with
+       a marker probed before and after each command so a ProcMon capture can be cut into steps.
+       A real project rather than a file-based app, because System.Data.OleDb will not bind in a file-based app.
+       Build for x86 with:  dotnet build -p:Platform=x86  (the process bitness must match the installed ACE). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>$(JetTestWindowsOnlyTargetFramework)</TargetFramework>
+    <RootNamespace>JetLockScenario</RootNamespace>
+    <AssemblyName>jetlockscenario</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- x64 unless asked for x86 (-p:Platform=x86). Separate outputs, so one build does not overwrite the other. -->
+    <PlatformTarget>x64</PlatformTarget>
+    <PlatformTarget Condition="'$(Platform)' == 'x86'">x86</PlatformTarget>
+    <OutputPath>bin\$(PlatformTarget)\$(Configuration)\</OutputPath>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Data.OleDb" />
+  </ItemGroup>
+
+</Project>
