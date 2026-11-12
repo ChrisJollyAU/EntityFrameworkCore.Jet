@@ -46,6 +46,7 @@ reuse, file growth and release. Catalog records, properties and stored queries a
 | [page-09-released-data.md](page-09-released-data.md) | Released data page (type `0x0109`): a table data page emptied by DELETE, or a packed LVAL page emptied of its values |
 | [long-values.md](long-values.md) | Memo / OLE long values, LVAL pages, and the per-column usage-map list |
 | [data-types.md](data-types.md) | Data-type codes and their decode, plus compressed Unicode |
+| [locking.md](locking.md) | The `.laccdb` lock file and ACE's locking protocol — lock offsets and shapes, user registration, lifetimes, conflicts, and the commit-slot write order (cross-cutting; the slot table itself is in [page-00 §2.2](page-00-database.md)) |
 | [system-catalog.md](system-catalog.md) | `MSysObjects` / `MSysACEs` / `MSysQueries` / `MSysRelationships`, the `LvProp` property blob, views & procedures, relationships |
 | [appendix-structures.md](appendix-structures.md) | Consolidated field-layout tables for every on-disk structure — quick reference, no prose |
 
@@ -123,6 +124,7 @@ table says which file each section lives in.
 | §10 | Index B-tree pages | [page-03-04-index-btree.md](page-03-04-index-btree.md) |
 | §11 | System catalog | [system-catalog.md](system-catalog.md) |
 | §12 | Version differences | this README (below) |
+| — | Locking (lock file, lock offsets, commit-slot write order) | [locking.md](locking.md) — no §-number |
 
 ---
 

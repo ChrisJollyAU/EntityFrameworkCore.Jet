@@ -53,13 +53,18 @@ Status: **draft / accepted direction** · Date: 2026-07-18
 > **Deferred (2026-09-24) — the commit-byte protocol and the Jet lock manager (§3 L0, phases 7–8).** The two
 > are one job, not two: a writer's commit slot is `0xE00 + 2n` for *its own* user number *n*, and that number
 > comes from the position it takes in the `.laccdb` — so there is no writing the commit table without first
-> doing the lock-file registration. What is missing is measured behaviour: the values ACE writes into its slot
-> as it begins and ends a batch (the order and 2-byte extent are known, the values are not — page-00 §2.2),
-> and whether page 0 is itself under a byte-range lock meanwhile. Guessing writes a signal Access reads as
-> corruption, so this waits on a ProcMon/Frida characterisation of a live `MSACCESS.EXE`. Until then LibRed is
-> **single-writer**, as `src/LibRed/README.md` states, and every mention of commit bytes, `.laccdb` records and
-> cross-process recovery below is **roadmap, not code**. What ships today is the deferred-write overlay, the
-> write-conflict check on commit, and process-local page locks.
+> doing the lock-file registration. The lock side has since been **measured** (ACE 16, two users): the lock
+> offsets and shapes, the `.laccdb` record, its lifecycle, the lock lifetimes, the retry and error behaviour, the
+> idle 5-second read of the commit table and the order of a user's own slot writes around a batch of page writes
+> are all in [locking.md](../format/locking.md) and [page-00 §2.2](../format/page-00-database.md). Page 0 is
+> **not** under a byte-range lock (no byte-range lock is taken on the database file at all). What is still
+> missing is the **values** ACE writes into its slot as it begins and ends a batch (the order and 2-byte extent
+> are known, the values are not), what the 5-second read compares, and what a kill between the two slot writes
+> of a multi-page batch leaves behind. Guessing the values writes a signal Access reads as corruption. LibRed
+> still takes none of these locks, writes no lock file and no slot, and is **single-writer**, as
+> `src/LibRed/README.md` states: every mention of commit bytes, `.laccdb` records and cross-process recovery
+> below is **roadmap, not code**. What ships today is the deferred-write overlay, the write-conflict check on
+> commit, and process-local page locks.
 
 This is the ground-up design for LibRed's transaction support and the concurrency
 infrastructure it sits on. It replaced the ad-hoc page-level undo log that used to be in
@@ -103,7 +108,7 @@ same time**. That rules out any LibRed-private durability side-channel:
 - Access writes pages under *its* protocol and never touches a LibRed journal, so our
   recovery would roll its committed work back — corruption, not safety.
 - Jet itself has no WAL. Durability = the page-0 **commit-byte table** (`0xE00`–`0xFFF`,
-  256×2 bytes: idle `00 01`, **mid-write `00 00`**, corrupt `01 00`) plus the OS
+  256×2 bytes: idle `00 01`, **mid-write `00 00`** (the white paper's meaning; the values ACE writes around a batch are not measured), corrupt `01 00`) plus the OS
   byte-range locks. A `00 00` with no matching `.ldb` lock after a crash ⇒ Jet marks the
   DB suspect and repairs.
 
@@ -151,9 +156,9 @@ above), not before.
   a simple in-file or side-file presence map. Correct LibRed↔LibRed, Windows-and-Unix
   where `FileStream.Lock` is supported; a `MonitorLockManager` (process-local
   `ReaderWriterLockSlim` per page) covers single-process / cross-platform.
-- **`JetLockManager` (later):** the exact Jet 4/ACE offsets (~10M/20M bands on the
-  `.laccdb` handle), the page-0 commit-byte table registration/polling, the `.laccdb`
-  32+32-byte identity records. Windows-only. This is a values+detection swap; the L1
+- **`JetLockManager` (later):** the exact Jet 4/ACE offsets (`(region << 28) | (page << 9) | byte`, regions 1, 2
+  and 4–6, on the `.laccdb` handle — [locking.md](../format/locking.md)), the page-0 commit-byte table
+  registration/polling, the `.laccdb` 32+32-byte identity records. Windows-only. This is a values+detection swap; the L1
   call sites and L2 semantics do not change.
 
 ### L1 — PageChannel (write choke point)
@@ -246,7 +251,10 @@ above), not before.
   No new mechanism is needed: nesting is the Phase-1 savepoint stack, driven by the controller.
 - **Durability:** commit writes dirty pages out (to the OS, as ACE does — §5) then clears
   the commit-byte; a crash before
-  the clear leaves the Jet "suspect" signal (later, with `JetLockManager`) → repair path.
+  the clear leaves the Jet "suspect" signal (later, with `JetLockManager`) → repair path. (Measured:
+  a user killed inside ACE's ~500 ms deferral after an autocommit `UPDATE` had written nothing — the
+  update is lost and the file is not suspect. A kill between the two slot writes of a multi-page
+  batch is not measured.)
   With the self-consistent manager, recovery is process-local (no cross-process crash
   interop claimed yet).
 
@@ -268,14 +276,18 @@ reaches the OS:
 Two orderings hold in every mode, and they are the ones that matter for concurrency:
 
 - **Pages reach the OS before the lock is released.** A page's `.laccdb` lock is released
-  only after that page's `WriteFile`, never before. Cross-connection visibility therefore
+  only after that page's `WriteFile`, never before — and the batch's commit-slot write
+  also precedes the release. Cross-connection visibility therefore
   rests on the write reaching the OS — which every handle on the machine reads through —
   not on it reaching the disk.
-- **The commit-slot write brackets the batch**: the connection's own slot at `0xE02` is
-  written immediately before the first page and again after the last
-  ([page-00 §2.2](../format/page-00-database.md)). An explicit transaction writes nothing
-  at all until its commit.
-- File growth is a 1-byte write at the last byte of the new page, then the page itself.
+- **Every batch ends with a write of the connection's own slot** (`0xE00 + 2n` for user
+  *n*). A batch of one existing page is the page then the slot; a batch of two or more is
+  the slot, the pages, the slot ([page-00 §2.2](../format/page-00-database.md)). An
+  explicit transaction writes nothing at all until its commit — apart from an `INSERT`'s
+  TDEF page and page 1, written about 500 ms after the `INSERT`
+  ([locking.md](../format/locking.md)).
+- File growth is a 1-byte write at the last byte of the new page, then the page itself;
+  newly appended pages are written before a multi-page batch's leading slot write.
 
 **What LibRed does.** The same, deliberately: a commit publishes every overlay page to the
 OS under the publish lock, and neither a commit nor a close forces them to disk. An
@@ -320,8 +332,11 @@ Build correctness first with lock seams stubbed; drop the Jet lock manager in la
 7. **L0 `SelfConsistentLockManager`.** Real byte-range page locks (our offsets) + presence
    map; multi-*process* single-writer LibRed↔LibRed.
 8. **(Concurrency phase) `JetLockManager`.** Jet-exact offsets, commit-byte polling,
-   `.laccdb` records → live co-residency with `MSACCESS.EXE`. Characterize the remaining
-   unknowns (own-slot writes, poll interval, Jet-4 `.laccdb` record shape) first.
+   `.laccdb` records → live co-residency with `MSACCESS.EXE`. The lock bands and shapes, the
+   `.laccdb` record, the poll interval (5 s) and the slot write order are measured
+   ([locking.md](../format/locking.md)); characterize the remaining unknowns first — the slot
+   values, what the poll compares, the `.ldb` of an `.mdb`, and a kill between a multi-page
+   batch's slot writes.
 
 Steps 1–3 close every transaction-related P0 in the audit (✅). Step 5 completes the
 in-process transaction contract (✅), and step 6 adds the SQL front door onto it. Steps 7–8
@@ -344,5 +359,7 @@ don't move.
 - **Deadlock policy** once multiple pages lock in different orders: initial mitigation is
   a global writer lock (one writer at a time), so no page-order deadlock exists yet;
   revisit when finer locking arrives.
-- **`.ldb`/`.laccdb` lifecycle** (create on first open, delete on last close) — belongs to
-  steps 7–8; not needed for in-process correctness.
+- **`.ldb`/`.laccdb` lifecycle** — measured for the `.laccdb` (created by the first shared user,
+  deleted by a user that closes cleanly and finds no other; left behind by a kill and reused —
+  [locking.md](../format/locking.md)); the `.ldb` of an `.mdb` is not measured. LibRed creates
+  and deletes none of it: that belongs to steps 7–8 and is not needed for in-process correctness.

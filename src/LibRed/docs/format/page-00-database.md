@@ -299,9 +299,10 @@ relocated to the end of the larger 4 KB page:
 The first slot (`0xE00`) is the **exclusive-mode** commit state; the remaining 255 are shared-mode users,
 **user *n* at `0xE00 + 2n`** — so the first shared user is `0xE02`. A user's number is its own: it comes from
 the position the connection takes in the `.ldb`/`.laccdb` when it registers, which is what ties this table to
-the lock file and why neither can be written without the other. Each 2-byte value is a commit/lock status Jet
+the lock file and why neither can be written without the other ([locking.md](locking.md) has the lock file and
+its protocol). Each 2-byte value is a commit/lock status Jet
 uses (with the matching user lock in the `.ldb`/`.laccdb`) to coordinate concurrency — this table is only the
-per-user *overall status*; the lock file holds the actual page-level read/write registration. **`00 00` means "mid-write to disk"**, and `01 00` means
+per-user *overall status*; the lock file holds the actual page-level read/write registration. **`00 00` means "mid-write to disk"** (the white paper's meaning), and `01 00` means
 "accessed a corrupted page" — either one *without a matching user lock* makes Jet declare the database
 suspect and demand a repair before it will open.
 
@@ -343,12 +344,27 @@ Four properties follow:
   seven-statement sequence is 722 → 729, exactly +7. The same five inserts with and without a
   `CREATE INDEX` differ by one.
 
-**The slot write brackets every batch of page writes (verified).** A connection's writes reach the file as:
-a 2-byte write to *its own* slot, then the data/index/usage-map pages, then a second 2-byte write to that same
-slot. This holds for a lone statement, for an explicit transaction's commit, and for the final writes at close,
-and it is the on-disk half of the mid-write signal above: the file carries the "this user is writing" state for
-exactly as long as the pages are in flight. (The two values written are not known — only the order and the
-2-byte extent at the slot's offset.)
+**Which slot, and the tie to the lock file (measured: ACE 16, two users).** A user writes **only its own** 2-byte
+slot: `0xE00 + 2n` when it is shared user *n*, `0xE00` when it holds the file exclusively. Each shared user
+writes none but its own slot. The number *n* is the user's number in the lock file — its 64-byte record sits at
+`(n − 1) × 64` and its user locks are the bytes `n` and `n − 1` of groups 0 and 1 of lock region 1 — so the table
+and the lock file are indexed by one number ([locking.md](locking.md)). An exclusive holder creates no lock file
+and takes no lock.
+
+**When the slot is written (measured: ACE 16).** A batch of page writes reaches the
+file in one of two shapes, by how many *existing* pages it holds:
+
+- **one existing page:** the page, then the slot;
+- **two or more existing pages:** the slot, the pages, the slot.
+
+Pages newly **appended** to the file are written first — a 1-byte write at the last byte of the new page, then
+the full page(s) — before that leading slot write. Every batch **ends with a slot write**, and the batch's page
+locks are released after it. This holds for a lone statement, an explicit transaction's commit and the final
+writes at close. The values written are not known — only the order and the 2-byte extent at the slot's offset —
+so whether the leading write of a multi-page batch is the `00 00` "mid-write" state above is open.
+
+**Idle reads.** An idle shared user reads the whole 512-byte table every 5 seconds (measured); what it compares
+and which process's read leads to a cache refresh are not known.
 
 **Reopening does not reset it; compacting does.** The counter carries straight across a close and reopen. A
 DAO `CompactDatabase` writes a whole new file and its slot 1 starts at **256**, the idle value, then counts

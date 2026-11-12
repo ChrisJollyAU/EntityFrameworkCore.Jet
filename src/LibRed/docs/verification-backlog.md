@@ -10,6 +10,17 @@ as an assertion once known. Page-0 pokes go through
 
 Items marked ✔ were re-checked by reading the cited code/test; the rest are as the sweep reported them.
 
+## Settled 2026-11-12
+
+| item | result | where it is pinned |
+|---|---|---|
+| `.laccdb` lifecycle (transactions §7) | Created by the first shared user; deleted by a user that closes cleanly and finds no other user; left behind by a kill, reused by the next user, deleted by the last clean closer. An exclusive open creates none. The `.ldb` of an `.mdb` is not measured. | [locking.md §1](format/locking.md) — measured once (no LibRed behaviour to pin) |
+| Lock bands and shapes (transactions §3, §6) | Regions 1, 2, 4, 5, 6 at `(region << 28) \| (page << 9) \| byte`; shared = one byte at the user's number, exclusive = from byte 1, `256 + n` long; every lock OS-exclusive and fail-immediately; none on the database file. Replaces the "~10M/20M bands" the design doc guessed. | [locking.md §2–4](format/locking.md); `JetLockLayout`, `tools/JetLockTrace` |
+| Page-0 byte-range lock (transactions deferral note) | None: no byte-range lock is taken on the database file. | [locking.md §1](format/locking.md) — measured once |
+| `.laccdb` record shape (transactions §6 step 8) | 64 bytes per user at `(n − 1) × 64`, written right after the user locks; the 32+32 split is the white paper's, the 64-byte write at that offset is measured. | [locking.md §1](format/locking.md) |
+| Poll interval (transactions §6 step 8) | An idle shared user reads the whole 512-byte commit table at `0xE00` every 5 seconds; no locks are taken or refreshed idle. What the read compares is open. | [locking.md §5](format/locking.md) |
+| Commit-slot write order (page-00 §2.2) | **Doc corrected:** the slot write does *not* bracket every batch. One existing page: page, slot. Two or more: slot, pages, slot. Appended pages first. A user writes only its own slot (`0xE00 + 2n`, `0xE00` exclusive). The values are still unknown. | [page-00 §2.2](format/page-00-database.md); [locking.md §6](format/locking.md) |
+
 ## Settled 2026-10-18
 
 | item | result | where it is pinned |
@@ -90,7 +101,6 @@ Nothing open.
 | where | claim | instrument | probe |
 |---|---|---|---|
 | page-02c:151 | Create-time DEFAULT validation (LibRed rejects at INSERT). | measured, not yet implemented | ACE at CREATE / ADD COLUMN: `[A]` → "The database engine does not recognize either the field 'A' in a validation expression, or the default value in the table 'T'."; bare `A` into a LONG → "Type mismatch"; `Sum(1)`, `Count(*)`, `Foo()` (and `DCount(…)` in ADD COLUMN) → "Unknown function 'Sum' in validation expression or default value on 'T.C'."; a subquery, and `DCount('*','X')` in CREATE (its comma, inferred), → "Syntax error in CREATE/ALTER TABLE statement." Needs the evaluator to answer "is this function known" without running it. |
-| transactions:347 | `.laccdb` lifecycle (create on first open, delete on last close). | ACE OLE DB | `File.Exists` before/during/after two overlapping connections, and after a killed child process. |
 
 ## 3. Reserved / undecoded fields — one parameterised poke probe
 
@@ -111,8 +121,13 @@ column's input (rewrites the envelope) → DAO `CompactDatabase`; re-read the by
 
 | where | claim | what it takes |
 |---|---|---|
-| page-05:316 | A second handle and another handle's past-EOF reservation; multi-user allocation. | Two processes (ACE shares one engine per process). Deferred with multi-writer. |
-| page-00:355; transactions:55, 154, 323 | The two commit-slot values; page-0 byte-range lock; lock bands, poll interval, `.ldb` record shape. | Frida on `NtWriteFile`/`NtLockFile`, ProcMon for lock offsets (user-run). `.ldb` shape: share-read the lock file while ACE holds it. |
+| page-05:316 | A second handle and another handle's past-EOF reservation; multi-user allocation. **Narrowed 2026-11-12:** only the locks are measured — an `INSERT` locks page 1 and the table's TDEF page exclusively while it allocates, and two users inserting alternately got distinct AutoNumber values ([locking.md](format/locking.md)). Page placement and the past-EOF reservation across handles are open. | Two processes (ACE shares one engine per process). Deferred with multi-writer. |
+| locking.md; page-00 §2.2; transactions | The two slot values written around a multi-page batch, and whether the leading one is the white paper's "mid-write" `00 00`. | Frida on `NtWriteFile` for the buffers (ProcMon shows none), or a hex diff of the slot taken between the two writes. |
+| locking.md | A kill landing between the leading and closing slot writes of a multi-page batch (the suspect-state case), and what the next open does. | Child process killed mid-batch (e.g. a large multi-page `COMMIT`), then reopen with ACE and read the slot. |
+| locking.md; page-00 §2.2 | Which process's 5-second poll of the commit table leads to a cache refresh, and what it compares. | Two ACE processes, one writing; observe when the other re-reads pages. |
+| locking.md | What region 1 group 5 (`0x10000500`, 256 bytes, locked and released on connecting) is for; whether group 1 has any meaning beyond the session byte. | Vary what the connecting user does (read-only, exclusive-refused, row-level mode) and diff the locks. |
+| locking.md | User numbers above 2 and the bound of 255 (only 1 and 2 observed); the shape of an upgrade by a user other than 1; lock-file names for extensions other than `.accdb` (`.ldb` for `.mdb`). | 3+ connections; an `.mdb` through ACE and Jet 4.0. |
+| locking.md | Row-level locking for recordset edits (DAO/ADO cursors); DAO deny-read / deny-write table opens. (SQL `UPDATE`/`INSERT` under row-level mode is measured: page-level shapes.) | DAO recordset edits from two processes with `Jet OLEDB:Database Locking Mode=1`. |
 | page-00:457 | Creating under a non-default workgroup (Access desktop's open of a default-workgroup file is now verified). | DAO `SystemDB` + `CreateUser` on a copied System.mdw, then `Access.Application` under that user. OLE DB does not check SIDs. |
 | page-01:160 | What writes overflow slots wider than 4 bytes (`MSysAccessStorage`). | `Access.Application`: save/resize forms and modules; scan for live `0x4000` slots > 4 bytes. |
 | page-05:265 | A non-empty released map = a release cut off before close (inferred). | Child process `DROP TABLE` then `TerminateProcess`; read the map; reopen with ACE. |
