@@ -170,7 +170,8 @@ LibRed follows relocations through one shared resolver used by scans, index seek
 mutation helpers. It validates that the source begins with a 4-byte pointer, plus the in-file page
 number, target row, page owner, and source/target flag shapes before exposing target bytes;
 malformed pointers — a missing target page among them — fail with `InvalidDataException`. LibRed does
-not set the commit slot: it keeps no user slot of its own (§2.2).
+not set its commit slot to `01 00` on such a read: it writes its slot only around its own page writes
+([page-00 §2.2](page-00-database.md)).
 
 ## 5. Row record format
 

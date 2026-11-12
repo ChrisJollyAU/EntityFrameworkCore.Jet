@@ -150,6 +150,11 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // for them). Like Access, a fresh table has NO data page — the first is allocated lazily on
         // the first insert — so its usage maps start empty.
         int tdefPage = _allocator.Allocate();
+        // ACE locks the new table's definition page as a DROP or ALTER locks the table's, and opens MSysComplexColumns
+        // for writing (locking.md §4).
+        _channel.LockTable(tdefPage, name, TableUse.Design);
+        if (_catalog.FindTable("MSysComplexColumns") is { } complexColumns)
+            _channel.LockTable(complexColumns.DefinitionPage, complexColumns.Name, TableUse.Write);
         int usageMapPage = _allocator.Allocate();
 
         // Key the long-value maps by the column's *id*, not its position. The two coincide on an ordinary
@@ -582,8 +587,15 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// <summary>The table a design change names — the one it alters, indexes or drops from, or a relationship's parent
     /// — or ACE's error when there is none: "Cannot find table or constraint." for every one of them (verified: ALTER
     /// TABLE in each form, CREATE and DROP INDEX, and a FOREIGN KEY's REFERENCES).</summary>
-    private TableDefinition DesignTable(string name) =>
-        _catalog.FindTable(name) ?? throw new InvalidOperationException("Cannot find table or constraint.");
+    /// <remarks>Found, it is locked for the design change as ACE locks it, exclusively in the table-read region
+    /// (<see cref="PageChannel.LockTable"/>; measured for ALTER TABLE and CREATE INDEX): refused with ACE's 3211 while
+    /// another user has the table in use.</remarks>
+    private TableDefinition DesignTable(string name)
+    {
+        TableDefinition table = _catalog.FindTable(name) ?? throw new InvalidOperationException("Cannot find table or constraint.");
+        _channel.LockTable(table.DefinitionPage, table.Name, TableUse.Design);
+        return table;
+    }
 
     /// <summary>
     /// Resolves <c>REFERENCES table</c> with no column list (<see cref="RelationshipSpec.ReferencesPrimaryKey"/>)
@@ -1164,6 +1176,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         TableDefinition? table = _catalog.FindTable(tableName);
         if (table is null) return false;
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, table.Name);
+        _channel.LockTable(table.DefinitionPage, table.Name, TableUse.Design);   // ACE's DROP TABLE lock (locking.md §4)
 
         // The relationships this table owns as the child (referencing) side, each with its outgoing block's number
         // where it is enforced. They are detached once the table itself is gone, below.
@@ -1410,6 +1423,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // create-side check exists to prevent (RenameNameValidationAccessTests).
         JetName.Validate(newName, "table name");
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, table.Name);
+        _channel.LockTable(table.DefinitionPage, table.Name, TableUse.Design);   // an ALTER TABLE, as DesignTable locks
         // The table being renamed is not a collision with itself: renaming to the same name is a no-op that ACE
         // allows (and EF's schema "move" degrades to exactly that on a schema-less engine), as is a case-only
         // change. Both verified — RenameFanOutProbeTest.

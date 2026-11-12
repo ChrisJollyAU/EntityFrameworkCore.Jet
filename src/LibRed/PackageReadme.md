@@ -71,10 +71,15 @@ AES-256 and RC4, and the legacy Jet page encoding, plus setting, changing and re
 This is an **alpha**. It is used against Entity Framework Core's own specification suite, but it has not
 been through production use.
 
-- **Single writer.** LibRed tolerates extra open handles, but implements no multi-user concurrency control:
-  no lock file, and none of the page/record locking Access coordinates through its side-car `.laccdb`/`.ldb`.
-  Safe for any number of readers with no writer, or one writer with serialized access. Two concurrent writers
-  will corrupt the file, so this is not the library for a shared network database.
+- **Partial multi-user support.** LibRed tolerates extra open handles. On Windows it registers as a user in
+  Access's side-car `.laccdb`/`.ldb`, so Access sees it there and will not open the file exclusively under it;
+  it marks its commits in the database header as Access does and notices Access's; and it takes and honours
+  Access's page write locks, so LibRed and Access updating rows at the same time wait for each other and lose
+  neither change; and its table locks, so a schema change waits for (and is refused, as Access refuses it, while)
+  the other has the table in use. It does not yet take Access's allocation locks: concurrent inserts, and other
+  writes or schema changes that allocate pages, are not safe — two such writers, LibRed and Access included, can
+  corrupt the file. Off Windows it takes no locks at all. Safe for any number of readers with no
+  writer, or one writer with serialized access; not yet the library for a busy shared network database.
 - Jet 3 (Access 97) files are not supported.
 - **Validation rules authored in the Access UI are not enforced**: LibRed will accept a row that Access would
   have rejected.

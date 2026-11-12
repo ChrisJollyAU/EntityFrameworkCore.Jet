@@ -983,8 +983,9 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         bool Holds() => CurrentRelationship(identity) is not { } current || _database.ExistingRowsHaveParents(current);
 
         // ACE then holds both tables exclusively until the transaction ends, so nothing can delete a parent the
-        // check found (verified: another connection's DELETE is refused). LibRed takes no table locks, so the
-        // same check is made again when the transaction commits, for as long as the relationship survives.
+        // check found (verified: another connection's DELETE is refused). LibRed's exclusive table locks keep another
+        // user out the same way, but the connections of one process are one user and share them, so the same check
+        // is made again when the transaction commits, for as long as the relationship survives.
         _database.DependOn(
             Holds,
             $"Transaction conflict on foreign key '{added.Name}': a row in '{added.ReferencedTable}' that the "

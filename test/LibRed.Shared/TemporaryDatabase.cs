@@ -110,24 +110,28 @@ public sealed class TemporaryDatabase : IDisposable
     /// tracked and is swept at process exit instead.</summary>
     public static void Delete(string path)
     {
-        if (!File.Exists(path))
+        // The database's lock file goes with it. A user deletes it on closing only when it finds nobody else
+        // connected, so ACE and LibRed closing together can each still see the other and both leave it behind —
+        // the race ACE has with itself, which a test run would otherwise leave in %TEMP%. Deleting a lock file a live
+        // user still holds open fails, and is left to the next attempt or the process-exit sweep.
+        // The path stays tracked until both are gone.
+        string[] files = [path, System.IO.Path.ChangeExtension(path, ".laccdb"), System.IO.Path.ChangeExtension(path, ".ldb")];
+        for (var attempt = 0; ; attempt++)
         {
-            TrackedPaths.TryRemove(path, out _);
-            return;
-        }
-
-        for (var attempt = 0; attempt < 4; attempt++)
-        {
-            try
+            bool remaining = false;
+            foreach (string file in files)
             {
-                File.Delete(path);
+                if (!File.Exists(file)) continue;
+                try { File.Delete(file); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { remaining = true; }
+            }
+            if (!remaining)
+            {
                 TrackedPaths.TryRemove(path, out _);
                 return;
             }
-            catch (IOException)
-            {
-                Thread.Sleep(25 * (attempt + 1));
-            }
+            if (attempt == 3) return;
+            Thread.Sleep(25 * (attempt + 1));
         }
     }
 

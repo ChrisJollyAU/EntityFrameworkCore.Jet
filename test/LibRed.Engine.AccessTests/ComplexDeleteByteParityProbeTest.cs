@@ -50,7 +50,8 @@ public class ComplexDeleteByteParityProbeTest(ITestOutputHelper output)
 
     // A DELETE with no WHERE empties a table in one go and leaves its complex values' flat rows where they are
     // (page-09 §9). On a DAO-built multi-value column holding values, LibRed's DELETE FROM must change exactly the
-    // pages DAO's does, byte for byte — page 0 aside, whose commit-byte counter LibRed does not keep.
+    // pages DAO's does, byte for byte — page 0 included: each is user 1 and ends its one statement's batch with
+    // that user's commit slot plus one (measured: DAO's page 0 and LibRed's identical).
     [Fact]
     public void A_complex_delete_with_no_where_leaves_the_bytes_dao_leaves()
     {
@@ -101,7 +102,6 @@ public class ComplexDeleteByteParityProbeTest(ITestOutputHelper output)
             int pageSize = JetFormatBase.Detect(new MemoryStream(o)).PageSize;
             HashSet<int> ace = ChangedPages(o, a, pageSize), noise = ChangedPages(o, n, pageSize);
             ace.ExceptWith(noise);
-            ace.Remove(0);
             HashSet<int> libred = ChangedPages(o, l, pageSize);
             Assert.Equal(ace.Order(), libred.Order());
             foreach (int page in ace)

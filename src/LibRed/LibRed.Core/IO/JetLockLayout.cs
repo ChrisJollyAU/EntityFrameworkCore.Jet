@@ -80,6 +80,10 @@ internal static class JetLockLayout
     /// <c>n - 1</c>.</summary>
     public const int SessionGroup = 1;
 
+    /// <summary>The group of the <see cref="JetLockRegion.User"/> region that every user locks whole and releases
+    /// on connecting. What it is for is not known.</summary>
+    public const int ConnectGroup = 5;
+
     /// <summary>The highest user number (the white paper's bound; only users 1 and 2 are measured). User numbers run
     /// from 1.</summary>
     public const int MaxUserNumber = 255;
@@ -122,12 +126,33 @@ internal static class JetLockLayout
         return (PageWindow(region, page) + 1, ExclusiveLengthBase + user);
     }
 
+    /// <summary>The ranges <paramref name="user"/> locks to make the shared byte it holds on <paramref name="page"/>
+    /// exclusive — an upgrade: every other user's byte of the window, bytes 1 to <see cref="ExclusiveLengthBase"/> but
+    /// its own, as the range below its byte (none for user 1) and the range above it. Measured for user 1 only, as
+    /// <c>window + 2</c>, length 255 (<c>docs/format/locking.md</c> §2); the shape for a higher number is that rule
+    /// carried on, not measured.</summary>
+    public static ((long Offset, long Length)? Below, (long Offset, long Length) Above) UpgradeRanges(
+        JetLockRegion region, int page, int user)
+    {
+        ThrowIfNotUser(user);
+        long window = PageWindow(region, page);
+        return (user > 1 ? (window + 1, user - 1) : null, (window + user + 1, ExclusiveLengthBase - user));
+    }
+
     /// <summary>The one byte in group <see cref="UserGroup"/> of the <see cref="JetLockRegion.User"/> region that
     /// marks <paramref name="user"/> as connected.</summary>
     public static long UserByte(int user)
     {
         ThrowIfNotUser(user);
-        return ((long)JetLockRegion.User << RegionShift) + UserGroup * UserGroupSize + user;
+        return UserGroupStart(UserGroup) + user;
+    }
+
+    /// <summary>The offset of byte 0 of <paramref name="group"/> in the <see cref="JetLockRegion.User"/>
+    /// region.</summary>
+    public static long UserGroupStart(int group)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(group);
+        return ((long)JetLockRegion.User << RegionShift) + (long)group * UserGroupSize;
     }
 
     /// <summary>The one byte in group <see cref="SessionGroup"/> of the <see cref="JetLockRegion.User"/> region that
@@ -135,7 +160,7 @@ internal static class JetLockLayout
     public static long SessionByte(int user)
     {
         ThrowIfNotUser(user);
-        return ((long)JetLockRegion.User << RegionShift) + SessionGroup * UserGroupSize + user - 1;
+        return UserGroupStart(SessionGroup) + user - 1;
     }
 
     /// <summary>The offset of <paramref name="user"/>'s record in the lock file: the record index is
@@ -144,6 +169,28 @@ internal static class JetLockLayout
     {
         ThrowIfNotUser(user);
         return (long)(user - 1) * UserRecordSize;
+    }
+
+    /// <summary>The <see cref="UserRecordSize"/> bytes of a user's record: each name in its own
+    /// <see cref="RecordNameSize"/>-byte field, as single-byte characters, ended by a NUL and padded with spaces —
+    /// the shape ACE 16 writes (<c>docs/format/locking.md</c> §1). A name too long for its field is cut to leave room
+    /// for the NUL, and a character outside ASCII is written as <c>?</c>; ACE's handling of either is not
+    /// measured.</summary>
+    public static byte[] UserRecord(string computerName, string securityName)
+    {
+        byte[] record = new byte[UserRecordSize];
+        WriteRecordName(record.AsSpan(0, RecordNameSize), computerName);
+        WriteRecordName(record.AsSpan(RecordNameSize, RecordNameSize), securityName);
+        return record;
+    }
+
+    private static void WriteRecordName(Span<byte> field, string name)
+    {
+        field.Fill((byte)' ');
+        int length = Math.Min(name.Length, RecordNameSize - 1);
+        for (int i = 0; i < length; i++)
+            field[i] = name[i] is > '\0' and < (char)0x80 ? (byte)name[i] : (byte)'?';
+        field[length] = 0;
     }
 
     /// <summary>The user whose record starts at <paramref name="offset"/> of the lock file, or null when the offset is

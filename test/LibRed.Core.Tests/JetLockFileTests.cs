@@ -294,8 +294,8 @@ public class JetLockFileTests
         Assert.False(File.Exists(path));
     }
 
-    // Two handles on one empty lock file, as two users have; the file is shared for read, write and delete, so
-    // the second open (and the deletion afterwards) does not conflict with the first.
+    // Two handles on one empty lock file, as two users have; the file is shared for read and write, so the second
+    // open does not conflict with the first, and both are closed before the deletion afterwards.
     private static void WithTwoHandles(Action<JetLockFile, JetLockFile> body)
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "Lock-file locking is Windows-only for now.");

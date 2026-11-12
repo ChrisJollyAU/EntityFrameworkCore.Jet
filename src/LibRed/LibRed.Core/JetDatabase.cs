@@ -757,13 +757,18 @@ public sealed class JetDatabase : IDisposable
 
     /// <summary>Opens a table by name for row access. A missing one is refused with ACE's message for a table a
     /// statement reads — the one DAO's <c>OpenRecordset</c> gives too (verified).</summary>
+    /// <remarks>Every table a statement reads or writes is opened here, and a registered user takes ACE's table-read
+    /// lock on it, and its table-write locks on its first write (<see cref="IO.PageChannel.LockTable"/>): held for
+    /// the statement, or the transaction it runs in. The catalog's own reads of its tables do not come here and take
+    /// none.</remarks>
     public Table OpenTable(string name)
     {
         TableDefinition def = Catalog.FindTable(name)
             ?? throw new ArgumentException(
                 $"The Microsoft Access database engine cannot find the input table or query '{name}'. Make sure it "
                 + "exists and that its name is spelled correctly.", nameof(name));
-        return new Table(_channel, def, Catalog);
+        _channel.LockTable(def.DefinitionPage, def.Name, TableUse.Read);
+        return new Table(_channel, def, Catalog, locked: true);
     }
 
     /// <summary>Closes the database. A writable handle first returns the pages it released to the global free

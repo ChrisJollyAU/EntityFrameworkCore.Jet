@@ -11,7 +11,9 @@ namespace JetLockTrace;
 /// </summary>
 /// <remarks>
 ///     Both lock through <see cref="JetLockFile" /> at offsets from <see cref="JetLockLayout" />, the same copy
-///     LibRed uses. Neither writes to the database or the lock file, and neither creates a missing lock file.
+///     LibRed uses. Neither writes to the database or the lock file, and neither creates a missing lock file; the
+///     lock-file handle is opened read/write all the same, because that is the one way <see cref="JetLockFile" />
+///     opens it.
 /// </remarks>
 public static class LiveLocks
 {
@@ -310,7 +312,8 @@ public static class LiveLocks
         return $"computer \"{Text(record[..JetLockLayout.RecordNameSize])}\", security \"{Text(record[JetLockLayout.RecordNameSize..])}\"";
     }
 
-    // The names are NUL-padded ANSI; anything unprintable is shown as '.', so a record that is not text is visible.
+    // Each name is single-byte text ended by a NUL and padded with spaces (JetLockLayout.UserRecord); anything
+    // unprintable is shown as '.', so a record that is not text is visible.
     private static string Text(ReadOnlySpan<byte> name)
     {
         int end = name.IndexOf((byte)0);

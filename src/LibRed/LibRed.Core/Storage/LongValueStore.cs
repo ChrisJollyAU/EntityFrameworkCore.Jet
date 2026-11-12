@@ -67,8 +67,9 @@ public sealed class LongValueStore(PageChannel channel)
     /// <remarks>
     /// ACE enforces this and reports it as <i>"you and another user are attempting to change the same data at
     /// the same time"</i>; the diagnosis is the point, even if the wording is about the cause rather than what
-    /// was found. LibRed is single-writer, so it cannot produce the interleaving ACE guards against, but it
-    /// can be handed a file another engine wrote and must not read a stale chain as though it were live.
+    /// was found. LibRed takes no lock on a long-value page it reads, so it can meet the interleaving ACE guards
+    /// against, and it can be handed a file another engine wrote: either way it must not read a stale chain as
+    /// though it were live.
     /// Only the entry page is checked, because every chunk after it is reached from a page already validated.
     /// </remarks>
     private void VerifyChainStamp(uint declared, int page)

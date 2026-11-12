@@ -53,7 +53,9 @@ public sealed class PageChannel : IDisposable
     private readonly Dictionary<int, object> _overlayParsed = [];
     // Committed plaintext image from which each transactional page was first derived. At commit, every image
     // must still match; otherwise another channel committed the same page and publishing this stale overlay
-    // would silently lose that writer's change.
+    // would silently lose that writer's change. For a registered user it is also the set of pages this channel
+    // holds a write lock on (LockForWrite): every page with a baseline, which is every page that was in the file
+    // when first written — an appended page has none, and ACE locks none (locking.md §6).
     private readonly Dictionary<int, byte[]?> _commitBaselines = [];
     private bool _schemaDirty;
     private int _txPageCount;
@@ -89,10 +91,12 @@ public sealed class PageChannel : IDisposable
     // Whether anything this channel wrote has been published, so a close knows the session changed the file.
     private bool _published;
 
-    private PageChannel(FileStream stream, JetFormatBase format, bool readOnly, string path, IPageCodec? codec, ILockManager? locks)
+    private PageChannel(FileStream stream, JetFormatBase format, bool readOnly, bool exclusive, string path,
+        IPageCodec? codec, ILockManager? locks)
     {
         _stream = stream;
         _readOnly = readOnly;
+        IsExclusive = exclusive;
         _format = format;
         _path = path;
         _codec = codec;
@@ -100,11 +104,21 @@ public sealed class PageChannel : IDisposable
         // A test may inject its own manager; otherwise share the per-path one (refcounted, released on Dispose).
         _ownsLocks = locks is null;
         _locks = locks ?? MonitorLockManager.AcquireKey(_identity);
-        _cache = PageCache.AcquireKey(_identity);
+        // A shared open, read-only included, registers this process as a Jet user of the file, as ACE does; the
+        // first channel on the file registers and the rest join it. An exclusive one takes no lock file, as ACE.
+        _cache = PageCache.AcquireKey(_identity, registerAs: exclusive ? null : (path, format));
         _seenSchemaGeneration = _cache.SchemaGeneration;
         _cache.InitFileLength(stream.Length);
+        // The commit slot this channel's batches write (PublishBatch): slot 0 when it holds the file exclusively,
+        // its user's slot when it is registered, none otherwise — a read-only channel never publishes a batch.
+        // The table's place is the same in every version a raise can move the file to.
+        if (!readOnly && (exclusive ? 0 : _cache.User?.User) is { } slot)
+            _commitSlot = format.CommitByteTableOffset + slot * format.CommitByteSlotSize;
         Allocator = new PageAllocator(this);
     }
+
+    // The file offset of this channel's commit slot, or null when it writes none (see the constructor).
+    private readonly int? _commitSlot;
 
     /// <summary>The allocator owning this channel's page allocation and release paths.</summary>
     internal PageAllocator Allocator { get; }
@@ -274,7 +288,7 @@ public sealed class PageChannel : IDisposable
             if (databaseKey != 0 && codec is null)
                 throw new NotSupportedException("The database is encrypted with an unsupported scheme.");
 
-            return new PageChannel(stream, format, readOnly, path, codec, locks) { IsExclusive = exclusive };
+            return new PageChannel(stream, format, readOnly, exclusive, path, codec, locks);
         }
         catch
         {
@@ -285,10 +299,15 @@ public sealed class PageChannel : IDisposable
 
     /// <summary>Whether this channel holds the file to itself — see the <c>exclusive</c> argument to
     /// <see cref="Open"/>. Rewriting the file as a whole is only allowed on such a channel.</summary>
-    public bool IsExclusive { get; private init; }
+    public bool IsExclusive { get; }
 
     /// <summary>The database file this channel reads and writes.</summary>
     internal string Path => _path;
+
+    /// <summary>The Jet user number this process holds on the file — one for every channel the process has open on
+    /// it — or null when it is not registered: an exclusive open, off Windows, or a lock file that could not be
+    /// opened (see <see cref="JetUserRegistration"/>).</summary>
+    internal int? UserNumber => _cache.User?.User;
 
     /// <summary>Rejects a page number that cannot exist in this file. Page numbers come out of the file
     /// itself, so a bad one is corruption — without this the read seeks past the end and throws
@@ -418,7 +437,7 @@ public sealed class PageChannel : IDisposable
         if (_active is not null)
         {
             if (!_commitBaselines.ContainsKey(pageNumber))
-                _commitBaselines[pageNumber] = ReadCommittedPageOrNull(pageNumber);
+                _commitBaselines[pageNumber] = LockForWrite(pageNumber);
             if (_active.NeedsBeforeImage(pageNumber))
                 _active.RecordBeforeImage(pageNumber, _overlay.TryGetValue(pageNumber, out byte[]? prior) ? prior : null);
             _overlay[pageNumber] = source[..PageSize].ToArray();
@@ -431,26 +450,295 @@ public sealed class PageChannel : IDisposable
         WriteThrough(pageNumber, source, parsed);
     }
 
-    /// <summary>Writes a page to disk and the shared cache (the committed path): encrypts a copy on the way to
-    /// disk for an encrypted file while caching plaintext, growing the file if the page lies past its end. Used
-    /// for non-transactional writes and to publish each overlay page on commit.</summary>
+    /// <summary>Writes a page to disk and the shared cache (the committed path) outside a transaction: a batch of
+    /// its own (see <see cref="PublishBatch"/>).</summary>
     private void WriteThrough(int pageNumber, ReadOnlySpan<byte> source, object? parsed)
     {
         byte[] copy = source[..PageSize].ToArray();
         _cache.PublishLocked(() =>
         {
-            WriteThroughUnderPublishLock(pageNumber, copy);
-            if (parsed is not null) _cache.SetParsed(pageNumber, parsed);
+            // Taken before the write replaces it: what a failed slot write puts the page back to. The page's lock
+            // goes after the batch's closing slot write, as ACE's does (locking.md §6).
+            byte[]? baseline = LockForWrite(pageNumber);
+            try { PublishBatch([pageNumber], _ => copy, _ => baseline, _ => parsed); }
+            finally { if (baseline is not null) _cache.User?.Unlock(JetLockRegion.WriteRead, pageNumber, exclusive: true); }
         });
     }
 
+    /// <summary>Takes this user's write lock on <paramref name="pageNumber"/>, which is about to be written for the
+    /// first time in a batch, and then reads the committed image the write derives from (null for a page past the
+    /// end of the committed file). Locked only for a registered user, and only a page already in the file: ACE locks
+    /// no page it appends (locking.md §4, §6). Held until the batch that writes it has ended, or the transaction or
+    /// savepoint frame that first wrote it is rolled back — <see cref="_commitBaselines"/> records which pages.</summary>
+    /// <exception cref="InvalidOperationException">Another user holds the page and does not let go within ACE's
+    /// retries.</exception>
+    /// <exception cref="StaleReadException">The lock was newly taken and another user has committed since this
+    /// statement's scope last looked: what the caller has read may be older than the file, so the write cannot go
+    /// ahead on it. The cache is dropped first; the caller rolls back what it did and runs the statement again.</exception>
+    private byte[]? LockForWrite(int pageNumber)
+    {
+        if (_cache.User is not { } user || pageNumber >= (int)(_cache.FileLength / PageSize))
+            return ReadCommittedPageOrNull(pageNumber);
+
+        // Joined: the process has held the page throughout, so nobody else has written it since this caller read it.
+        if (user.Lock(JetLockRegion.WriteRead, pageNumber, exclusive: true) && _cache.RefreshIfOthersCommitted())
+        {
+            user.Unlock(JetLockRegion.WriteRead, pageNumber, exclusive: true);
+            throw new StaleReadException();
+        }
+
+        byte[]? baseline = ReadCommittedPageOrNull(pageNumber);
+        // A page with no baseline holds no lock. A transactional write made outside the publish gate can meet another
+        // channel's failed publication truncating the file back below the page.
+        if (baseline is null) user.Unlock(JetLockRegion.WriteRead, pageNumber, exclusive: true);
+        return baseline;
+    }
+
+    /// <summary>The pages the open transaction holds write locks on (see <see cref="LockForWrite"/>) — taken before its
+    /// state is cleared, for <see cref="Unlock"/> to let go of once its commit's batch has ended or its rollback is
+    /// done. Empty for a channel that takes no locks.</summary>
+    private int[] LockedPages() => _cache.User is null
+        ? []
+        : [.. _commitBaselines.Where(kv => kv.Value is not null).Select(kv => kv.Key)];
+
+    private void Unlock(int[] pages)
+    {
+        foreach (int page in pages) _cache.User!.Unlock(JetLockRegion.WriteRead, page, exclusive: true);
+    }
+
+    // The table locks this channel holds (locking.md §4), each as its region, its table's definition page and whether
+    // it is exclusive, in the order taken. Those in `_transactionTableLocks` belong to the open transaction and go when
+    // it ends — a savepoint rollback letting go of those taken since its frame opened (Transaction.TableLockCountAt);
+    // those in `_statementTableLocks` belong to the statement and go when its outermost scope ends (`_scopeDepth`).
+    // Per channel, and so — as the overlay — owned by the channel's own thread.
+    private readonly List<(JetLockRegion Region, int Page, bool Exclusive)> _transactionTableLocks = [];
+    private readonly List<(JetLockRegion Region, int Page, bool Exclusive)> _statementTableLocks = [];
+    private int _scopeDepth;
+
+    /// <summary>Takes the table locks ACE takes for <paramref name="use"/> of the table whose definition is on
+    /// <paramref name="tdefPage"/> (locking.md §4): its shared byte in the table-read region to read it; to write it,
+    /// that and the table-write region's shared byte, taken under a momentary exclusive lock in the deny-write region;
+    /// for a design change, the table-read region exclusively. A lock the channel already holds is not taken twice.</summary>
+    /// <remarks>
+    /// <para>They belong to the open transaction, held until it commits or rolls back — for a statement on its own,
+    /// its implicit transaction, so ACE's DDL locks go inside the statement as measured, and in an explicit one until
+    /// <c>COMMIT</c>, as ACE holds a foreign key's tables (verified, <c>StatementExecutor.AddForeignKey</c>); outside
+    /// one, to the statement — the outermost <see cref="ReadConsistent{T}"/> or <see cref="WriteExclusive{T}"/> scope.
+    /// With neither — a table read or written through the Core API outside both — no table lock is taken, since
+    /// nothing would end it. Only a registered user takes them; a read-only channel takes its read locks only.</para>
+    /// <para>Refused, each lock is retried as ACE retries and then refused with ACE's 3211 naming
+    /// <paramref name="name"/>. One newly taken after another user's slot has moved since the statement's scope
+    /// looked throws <see cref="StaleReadException"/>, with what this call took let go: the other user may have changed
+    /// the table's design, and what the statement planned against is older than the file.</para>
+    /// </remarks>
+    internal void LockTable(int tdefPage, string name, TableUse use)
+    {
+        if (_cache.User is not { } user || _readOnly && use != TableUse.Read) return;
+        List<(JetLockRegion Region, int Page, bool Exclusive)>? owner =
+            _active is not null ? _transactionTableLocks : _scopeDepth > 0 ? _statementTableLocks : null;
+        if (owner is null) return;
+
+        int from = owner.Count;
+        bool took = false;
+        try
+        {
+            if (!HoldsTableLock(JetLockRegion.TableRead, tdefPage, use == TableUse.Design))
+            {
+                took |= user.Lock(JetLockRegion.TableRead, tdefPage, use == TableUse.Design, name);
+                owner.Add((JetLockRegion.TableRead, tdefPage, use == TableUse.Design));
+            }
+            if (use == TableUse.Write && !HoldsTableLock(JetLockRegion.TableWrite, tdefPage, exclusive: false))
+            {
+                user.Lock(JetLockRegion.TableDenyWrite, tdefPage, exclusive: true, name);
+                try
+                {
+                    took |= user.Lock(JetLockRegion.TableWrite, tdefPage, exclusive: false, name);
+                    owner.Add((JetLockRegion.TableWrite, tdefPage, false));
+                }
+                finally { user.Unlock(JetLockRegion.TableDenyWrite, tdefPage, exclusive: true); }
+            }
+        }
+        catch
+        {
+            UnlockTables(owner, from);
+            throw;
+        }
+
+        if (took && _cache.RefreshIfOthersCommitted())
+        {
+            UnlockTables(owner, from);
+            throw new StaleReadException(JetUserRegistration.TableInUseMessage(name));
+        }
+    }
+
+    private bool HoldsTableLock(JetLockRegion region, int page, bool exclusive) =>
+        _transactionTableLocks.Contains((region, page, exclusive)) || _statementTableLocks.Contains((region, page, exclusive));
+
+    /// <summary>Lets go of the table locks in <paramref name="held"/> from position <paramref name="from"/> on, the
+    /// newest first.</summary>
+    private void UnlockTables(List<(JetLockRegion Region, int Page, bool Exclusive)> held, int from)
+    {
+        for (int i = held.Count - 1; i >= from; i--)
+        {
+            (JetLockRegion region, int page, bool exclusive) = held[i];
+            held.RemoveAt(i);
+            _cache.User!.Unlock(region, page, exclusive);
+        }
+    }
+
+    /// <summary>
+    /// Publishes one batch of page writes — a transaction's commit, or a write outside one — as ACE does
+    /// (docs/format/locking.md §6), under the publish gate the caller holds. Pages appended to the file go first;
+    /// then, when two or more existing pages follow, this channel's commit slot is set to <c>00 00</c>; then the
+    /// existing pages; and the batch ends with the slot set to its counter plus one. A channel with no slot writes
+    /// the pages alone, in the same order.
+    /// </summary>
+    /// <remarks>
+    /// <para>If a write fails part-way, the pages already published are put back from <paramref name="baselineOf"/>
+    /// (an appended page by truncating it again), and the slot is put back to the value it had, since nothing the
+    /// batch wrote remains — the caller's transaction is still open, to retry or roll back. If a page cannot be put
+    /// back, the slot is left as the batch left it — <c>00 00</c> for a batch of two or more existing pages, which
+    /// says, truthfully, that the file is mid-write — and the failure says the file is left mid-publish.</para>
+    /// <para>Nothing here waits for another user: a registered user already holds the write lock on every existing
+    /// page the batch writes (<see cref="LockForWrite"/>), and its caller releases them after the closing slot
+    /// write.</para>
+    /// </remarks>
+    private void PublishBatch(int[] pages, Func<int, byte[]> imageOf, Func<int, byte[]?> baselineOf,
+        Func<int, object?> parsedOf)
+    {
+        // Appended pages first, each group ascending so the file grows monotonically.
+        int committedPages = (int)(_cache.FileLength / PageSize);
+        int[] ordered = [.. pages.Where(p => p >= committedPages).Order(), .. pages.Where(p => p < committedPages).Order()];
+        int existing = pages.Count(p => p < committedPages);
+
+        ushort? counter = _commitSlot is null
+            ? null
+            : BinaryPrimitives.ReadUInt16LittleEndian(ReadCommittedPageOrNull(0).AsSpan(_commitSlot.Value));
+        bool slotWritten = false;
+        var published = new List<int>(ordered.Length);
+        try
+        {
+            foreach (int page in ordered)
+            {
+                if (counter is not null && existing >= 2 && page < committedPages && !slotWritten)
+                {
+                    slotWritten = true;
+                    WriteCommitSlot(0);
+                }
+                WriteThroughUnderPublishLock(page, imageOf(page));
+                // The image is now the committed one, so a parse of it stays true: handed on, the next statement's
+                // read of the page does not decode it again — each SQL statement is a transaction of its own, and
+                // consecutive inserts write the same index leaves.
+                if (parsedOf(page) is { } parsed) _cache.SetParsed(page, parsed);
+                published.Add(page);
+            }
+
+            if (counter is { } previous && ordered.Length > 0)
+            {
+                slotWritten = true;
+                WriteCommitSlot(NextCommitCount(previous));
+            }
+        }
+        catch (Exception publishFailure)
+        {
+            // The restore writes to the same file that just failed to accept a write, so they can fail
+            // too — and if one does, the original cause must not be swallowed by the cleanup's exception.
+            // Collect both: the caller needs the publish failure to know why the commit failed, and the
+            // restore failure to know the file was left mid-publish rather than rolled back.
+            List<Exception>? restoreFailures = null;
+            for (int i = published.Count - 1; i >= 0; i--)
+            {
+                int page = published[i];
+                try
+                {
+                    if (baselineOf(page) is { } baseline)
+                    {
+                        WriteThroughUnderPublishLock(page, baseline);
+                    }
+                    else
+                    {
+                        // A null baseline is a tail page the batch appended. Validation proved no other writer
+                        // had claimed it, and the publish gate excludes one while we truncate it again.
+                        _stream.SetLength((long)page * PageSize);
+                        _cache.SetFileLength((long)page * PageSize);
+                        _cache.Remove(page);
+                    }
+                }
+                catch (Exception restoreFailure)
+                {
+                    (restoreFailures ??= []).Add(
+                        new IOException($"Could not restore page {page} after a failed commit publication.", restoreFailure));
+                }
+            }
+
+            if (restoreFailures is null && slotWritten)
+            {
+                try { WriteCommitSlot(counter!.Value); }
+                catch (Exception restoreFailure)
+                {
+                    restoreFailures = [new IOException("Could not restore the commit slot after a failed commit publication.", restoreFailure)];
+                }
+            }
+
+            if (restoreFailures is null) throw;
+            throw new AggregateException(
+                "A commit publication failed and the already-published pages could not all be restored; " +
+                "the file is left mid-publish.", [publishFailure, .. restoreFailures]);
+        }
+    }
+
+    /// <summary>The counter a batch stores after <paramref name="previous"/>: one more, little-endian 16-bit
+    /// (page-00 §2.2). What ACE stores after <c>FF FF</c> is not measured; the count wraps to <c>00 01</c>, the value
+    /// a fresh file's slot starts at, rather than into <c>00 00</c> or <c>01 00</c>, which mean mid-write and a
+    /// corrupted page. A slot left at either of those by a user that died is counted on from the same start.</summary>
+    private static ushort NextCommitCount(ushort previous) =>
+        previous is < 2 or ushort.MaxValue ? (ushort)0x0100 : (ushort)(previous + 1);
+
+    /// <summary>Writes <paramref name="value"/> to this channel's commit slot: a 2-byte write at its offset in the
+    /// file, handed to the OS at once as ACE's is, never by writing page 0 — every other user's slot is theirs —
+    /// and the same bytes into the cached image of page 0, so readers in this process see what the file holds.</summary>
+    private void WriteCommitSlot(ushort value)
+    {
+        int offset = _commitSlot!.Value;
+        Span<byte> bytes = stackalloc byte[sizeof(ushort)];
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes, value);
+        _stream.Seek(offset, SeekOrigin.Begin);
+        _stream.Write(bytes);
+        _stream.Flush(flushToDisk: false);
+
+        // Copy-on-write, as every cached image is replaced rather than written into; not resident, the next read
+        // takes it from the file, which already has it.
+        if (_cache.TryGetArray(0, out byte[] cached))
+        {
+            byte[] page0 = cached.AsSpan(0, PageSize).ToArray();
+            bytes.CopyTo(page0.AsSpan(offset));
+            _cache.Adopt(0, page0);
+        }
+    }
+
     /// <summary>Runs a logical read against one committed page-set generation. Shared: other readers on this
-    /// file run concurrently; only a publication excludes them.</summary>
-    internal T ReadConsistent<T>(Func<T> action) => _cache.ReadConsistent(action);
+    /// file run concurrently; only a publication excludes them. The outermost scope is a statement: the table locks
+    /// it took outside a transaction go when it ends (<see cref="LockTable"/>).</summary>
+    internal T ReadConsistent<T>(Func<T> action)
+    {
+        _scopeDepth++;
+        try { return _cache.ReadConsistent(action); }
+        finally { EndScope(); }
+    }
 
     /// <summary>Runs a logical write with every other reader and writer on this file excluded, so its pages
-    /// publish as one unit.</summary>
-    internal T WriteExclusive<T>(Func<T> action) => _cache.PublishLocked(action);
+    /// publish as one unit. A statement, as <see cref="ReadConsistent{T}"/> is.</summary>
+    internal T WriteExclusive<T>(Func<T> action)
+    {
+        _scopeDepth++;
+        try { return _cache.PublishLocked(action); }
+        finally { EndScope(); }
+    }
+
+    private void EndScope()
+    {
+        if (--_scopeDepth == 0 && _statementTableLocks.Count > 0) UnlockTables(_statementTableLocks, 0);
+    }
 
     /// <remarks><paramref name="source"/> is a whole page the cache takes over as it stands — this channel's own
     /// copy of a write, an overlay page, or a committed baseline — so it must be one nothing writes into again.</remarks>
@@ -471,6 +759,13 @@ public sealed class PageChannel : IDisposable
                 toDisk = encrypted;
             }
 
+            // Page 0 ends in the commit-slot table, and every slot but this user's own belongs to another user, who
+            // writes it with no lock (locking.md §6). So page 0 is written up to the table and no further, and its
+            // cached image takes the table from the file — every other user's slot as it is now, not as this
+            // image last saw it. Our own slot is the batch's to write (PublishBatch).
+            int table = pageNumber == 0 ? _format.CommitByteTableOffset : PageSize;
+            if (table < PageSize) toDisk = toDisk[..table];
+
             long offset = (long)pageNumber * PageSize;
             long length = _cache.FileLength;
             if (offset > length)
@@ -479,6 +774,20 @@ public sealed class PageChannel : IDisposable
             _stream.Write(toDisk);
             if (offset + PageSize > length)
                 _cache.SetFileLength(offset + PageSize);
+
+            if (table < PageSize)
+            {
+                // The partial write is shorter than the stream's buffer: hand it to the OS now, as a whole page's
+                // write would have gone, then take the table back as the file has it. The whole page is read —
+                // a read as long as the stream's buffer goes straight to the file, where a short one would leave
+                // the start of page 1 sitting in that buffer — and only the table is kept from it.
+                _stream.Flush(flushToDisk: false);
+                byte[] merged = new byte[PageSize];
+                _stream.Seek(0, SeekOrigin.Begin);
+                _stream.ReadExactly(merged);
+                source.AsSpan(0, table).CopyTo(merged);
+                source = merged;
+            }
 
             // Write through: the pool now holds the just-written (plaintext) image, so a subsequent read (this
             // channel or any other on the file) sees it without touching disk.
@@ -506,8 +815,8 @@ public sealed class PageChannel : IDisposable
     }
 
     /// <summary>Commits the current transaction: publishes every buffered overlay page to disk and the shared
-    /// cache — making the writes visible to other channels for the first time — in ascending page order so the
-    /// file grows monotonically. No-op if no transaction is open. <paramref name="flush"/> hands the stream's
+    /// cache — making the writes visible to other channels for the first time — as one batch
+    /// (<see cref="PublishBatch"/>). No-op if no transaction is open. <paramref name="flush"/> hands the stream's
     /// buffer to the OS before returning — used by an explicit user commit, which ACE writes synchronously; an
     /// implicit per-statement autocommit passes false. Neither forces the OS cache to disk: ACE never calls
     /// FlushFileBuffers, on commit or on close, so LibRed doesn't either.</summary>
@@ -525,7 +834,7 @@ public sealed class PageChannel : IDisposable
             {
                 byte[]? current = ReadCommittedPageOrNull(page);
                 byte[]? baseline = _commitBaselines[page];
-                if (!SamePage(baseline, current))
+                if (!SamePage(page, baseline, current))
                     throw new InvalidOperationException(
                         $"Transaction write conflict on page {page}: another connection committed a change to this page.");
             }
@@ -536,64 +845,20 @@ public sealed class PageChannel : IDisposable
                 if (!stillHolds())
                     throw new InvalidOperationException(violation);
 
-            // Keep the transaction open until every page has published. If a later page fails, restore the
-            // already-published prefix from its validated committed baselines so the caller can still roll back.
-            var published = new List<int>(pages.Length);
-            try
-            {
-                foreach (int page in pages)
-                {
-                    WriteThroughUnderPublishLock(page, _overlay[page]);
-                    // The overlay bytes are now the committed bytes, so a parse of them stays true: handed on, the
-                    // next statement's read of the page does not decode it again — each SQL statement is a
-                    // transaction of its own, and consecutive inserts write the same index leaves.
-                    if (_overlayParsed.TryGetValue(page, out object? parsed)) _cache.SetParsed(page, parsed);
-                    published.Add(page);
-                }
-            }
-            catch (Exception publishFailure)
-            {
-                // The restore writes to the same file that just failed to accept a write, so they can fail
-                // too — and if one does, the original cause must not be swallowed by the cleanup's exception.
-                // Collect both: the caller needs the publish failure to know why the commit failed, and the
-                // restore failure to know the file was left mid-publish rather than rolled back.
-                List<Exception>? restoreFailures = null;
-                for (int i = published.Count - 1; i >= 0; i--)
-                {
-                    int page = published[i];
-                    try
-                    {
-                        if (_commitBaselines[page] is { } baseline)
-                        {
-                            WriteThroughUnderPublishLock(page, baseline);
-                        }
-                        else
-                        {
-                            // A null baseline is a transaction-allocated tail page. Validation proved no other
-                            // writer had claimed it, and the publish gate excludes one while we truncate it again.
-                            _stream.SetLength((long)page * PageSize);
-                            _cache.SetFileLength((long)page * PageSize);
-                            _cache.Remove(page);
-                        }
-                    }
-                    catch (Exception restoreFailure)
-                    {
-                        (restoreFailures ??= []).Add(
-                            new IOException($"Could not restore page {page} after a failed commit publication.", restoreFailure));
-                    }
-                }
+            // Keep the transaction open until every page has published: a failure part-way puts the published
+            // ones back from their validated committed baselines, so the caller can still roll back.
+            PublishBatch(pages, page => _overlay[page], page => _commitBaselines[page],
+                page => _overlayParsed.GetValueOrDefault(page));
 
-                if (restoreFailures is null) throw;
-                throw new AggregateException(
-                    "A commit publication failed and the already-published pages could not all be restored; " +
-                    "the file is left mid-publish.", [publishFailure, .. restoreFailures]);
-            }
-
+            // The batch has ended with its slot write: its page locks go now, as ACE's do (locking.md §6).
+            int[] locked = LockedPages();
             _active = null;
             _released.AddRange(_releasing);   // the pages it freed are now the session's to hold until close
             _keptCounters.Clear();            // and the counters it kept are on its TDEF pages
             _pendingCounters.Clear();
             ClearTransactionState();
+            Unlock(locked);
+            UnlockTables(_transactionTableLocks, 0);   // and its table locks, as ACE's go at COMMIT (locking.md §5)
             if (_schemaDirty) _cache.MarkSchemaChanged();
             _schemaDirty = false;
         });
@@ -611,13 +876,24 @@ public sealed class PageChannel : IDisposable
     {
         if (_active is null) return;
         Storage.PageAllocator.AllocationState? allocation = _active.AllocationAt(new Savepoint(0));
+        // Its page locks go last: the kept counters below are written back onto TDEF pages it may hold, and a page
+        // still held is written without waiting for another user.
+        int[] locked = LockedPages();
         ClearTransactionState();   // including the staged releases: a rolled-back free frees nothing
         _schemaDirty = false;
         _active = null;
-        ResyncFormatVersion();   // a discarded format raise must not stay raised in memory
-        if (allocation is not null) Allocator.RollBackTo(allocation);
-        RestoreKeptCounters(failed);
-        _keptCounters.Clear();
+        try
+        {
+            ResyncFormatVersion();   // a discarded format raise must not stay raised in memory
+            if (allocation is not null) Allocator.RollBackTo(allocation);
+            RestoreKeptCounters(failed);
+            _keptCounters.Clear();
+        }
+        finally
+        {
+            Unlock(locked);
+            UnlockTables(_transactionTableLocks, 0);
+        }
     }
 
     /// <summary>Notes <paramref name="value"/> as the counter at <paramref name="offset"/> of TDEF page
@@ -775,7 +1051,7 @@ public sealed class PageChannel : IDisposable
     {
         if (_active is null)
             throw new InvalidOperationException("No transaction is in progress.");
-        return _active.Save(_txPageCount, _releasing.Count, _dependencies.Count, Allocator.State);
+        return _active.Save(_txPageCount, _releasing.Count, _dependencies.Count, Allocator.State, _transactionTableLocks.Count);
     }
 
     /// <summary>Rolls the transaction back to <paramref name="savepoint"/>: undoes every write made since it was
@@ -787,11 +1063,23 @@ public sealed class PageChannel : IDisposable
             throw new InvalidOperationException("No transaction is in progress.");
         int releaseCount = _active.ReleaseCountAt(savepoint);
         int dependencyCount = _active.DependencyCountAt(savepoint);
+        int tableLockCount = _active.TableLockCountAt(savepoint);
         Storage.PageAllocator.AllocationState? allocation = _active.AllocationAt(savepoint);
         var (before, pageCount) = _active.TakeForRollbackTo(savepoint);
-        RestoreOverlay(before, pageCount);
-        if (allocation is not null) Allocator.RollBackTo(allocation);
-        RestoreKeptCounters(failed);
+        int[] unlocked = RestoreOverlay(before, pageCount);
+        try
+        {
+            if (allocation is not null) Allocator.RollBackTo(allocation);
+            // Before the pages first written after the savepoint are let go: a kept counter goes back onto a TDEF
+            // page among them, which is then written again without waiting for another user.
+            RestoreKeptCounters(failed);
+        }
+        finally
+        {
+            Unlock(unlocked);
+            // The table locks the frame first took go with its writes; those taken before it stay.
+            UnlockTables(_transactionTableLocks, tableLockCount);
+        }
         _releasing.RemoveRange(releaseCount, _releasing.Count - releaseCount);
         // The writes that needed them are undone, so the conditions are no longer anything to hold the commit to —
         // and a key they held is free to be registered again by a write made after the rollback.
@@ -813,8 +1101,10 @@ public sealed class PageChannel : IDisposable
     /// <summary>Restores the overlay to a savepoint: each before-image is re-applied newest-first so the oldest
     /// snapshot wins for a page touched in several frames — a <c>null</c> image means the page was absent at the
     /// savepoint, so drop it. The logical page count is reset, dropping overlay pages the rolled-back frames
-    /// allocated. Nothing touches disk or the shared cache; the overlay never left this channel.</summary>
-    private void RestoreOverlay(List<KeyValuePair<int, byte[]?>> before, int pageCount)
+    /// allocated. Nothing touches disk or the shared cache; the overlay never left this channel. Returns the pages
+    /// whose write locks the dropped baselines held — those first written after the savepoint — for the caller to let
+    /// go of (see <see cref="LockForWrite"/>).</summary>
+    private int[] RestoreOverlay(List<KeyValuePair<int, byte[]?>> before, int pageCount)
     {
         foreach (var (page, image) in before)
         {
@@ -823,9 +1113,14 @@ public sealed class PageChannel : IDisposable
             _overlayParsed.Remove(page);
         }
         _txPageCount = pageCount;
+        var unlocked = new List<int>();
         foreach (int page in _commitBaselines.Keys.Where(p => !_overlay.ContainsKey(p)).ToArray())
+        {
+            if (_commitBaselines[page] is not null && _cache.User is not null) unlocked.Add(page);
             _commitBaselines.Remove(page);
+        }
         ResyncFormatVersion();   // page 0 may have been one of the restored images
+        return [.. unlocked];
     }
 
     private byte[]? ReadCommittedPageOrNull(int pageNumber)
@@ -854,9 +1149,13 @@ public sealed class PageChannel : IDisposable
 
     // One array is one image: the cache replaces an array rather than writing into it, so a baseline that is still
     // the committed array has not changed. Only a page reloaded since (evicted, read back) needs its bytes compared.
-    private static bool SamePage(byte[]? left, byte[]? right) =>
+    // Page 0's commit-slot table is not part of it: every batch, ours or another user's, changes a slot there, and
+    // no page write carries the table (WriteThroughUnderPublishLock), so a difference confined to it is no conflict.
+    private bool SamePage(int page, byte[]? left, byte[]? right) =>
         ReferenceEquals(left, right)
-        || left is not null && right is not null && left.AsSpan().SequenceEqual(right);
+        || left is not null && right is not null
+            && left.AsSpan(0, page == 0 ? _format.CommitByteTableOffset : PageSize)
+                .SequenceEqual(right.AsSpan(0, page == 0 ? _format.CommitByteTableOffset : PageSize));
 
     /// <summary>Retrieves a higher-layer parse of a page previously stored via <see cref="SetParsedPage"/>
     /// (e.g. an index page's decoded entries), or false if none is cached. The parse is dropped automatically
@@ -888,11 +1187,35 @@ public sealed class PageChannel : IDisposable
 
     public void Dispose()
     {
+        // A transaction left open publishes nothing; the pages it held are let go for the other channels and users.
+        if (_active is not null)
+        {
+            Unlock(LockedPages());
+            ClearTransactionState();
+            _active = null;
+        }
+        if (_cache.User is not null)
+        {
+            UnlockTables(_transactionTableLocks, 0);
+            UnlockTables(_statementTableLocks, 0);
+        }
         if (!_readOnly) _stream.Flush(flushToDisk: false);
         _stream.Dispose();
         PageCache.ReleaseKey(_identity); // last channel on this file drops the shared pool
         if (_ownsLocks) MonitorLockManager.ReleaseKey(_identity); // and the shared lock manager
     }
+}
+
+/// <summary>What a statement does with a table, which decides the table locks it takes
+/// (<see cref="PageChannel.LockTable"/>).</summary>
+internal enum TableUse
+{
+    /// <summary>Reads its rows.</summary>
+    Read,
+    /// <summary>Writes its rows.</summary>
+    Write,
+    /// <summary>Changes its design, creates it or drops it.</summary>
+    Design,
 }
 
 /// <summary>The kinds of write a read-only database refuses, each with its own message from ACE.</summary>

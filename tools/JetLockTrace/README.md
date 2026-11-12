@@ -45,7 +45,9 @@ for an unlock of nothing held.
 Two modes work on a live lock file instead of a trace. Both are **Windows only** for now (they take real
 `LockFileEx` locks, the kind Access takes), neither writes to the database or the lock file, and neither creates a
 lock file that is missing. They lock through LibRed.Core's `JetLockFile`, at offsets from `JetLockLayout` — the same
-copy of the layout the decoder below reads with.
+copy of the layout the decoder below reads with. `JetLockFile` opens the lock file as ACE does (read/write, shared for
+read and write but not delete), so while `probe` or `hold` has it open, a user closing last cannot delete it and the
+file stays behind until the next user's close.
 
 ```
 jetlocktrace probe <database>
@@ -56,7 +58,9 @@ Lists who is connected. The lock file is found beside the database (`.laccdb` fo
 group-0 byte (`0x10000000 + user`) and on its group-1 session byte (`0x10000100 + user - 1`), and releases each at once;
 a conflict on either means the user is connected. For each one it prints which of the two bytes are locked, the user's
 page-0 commit slot (hex, and as the little-endian counter), and the user's lock-file record (index `user - 1`:
-32-byte computer name + 32-byte security name). Commit slot 0, the exclusive-mode slot, is always printed.
+32-byte computer name + 32-byte security name, each NUL-terminated and space-padded). Commit slot 0, the
+exclusive-mode slot, is always printed. A LibRed process with the database open shared shows up here like any ACE
+user.
 
 ```
 jetlocktrace hold <database> --region <1-6> (--page <n> | --user-slot <n>) [--shared] [--as-user <n>]

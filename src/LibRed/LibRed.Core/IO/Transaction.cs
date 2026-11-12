@@ -29,6 +29,8 @@ public sealed class Transaction
         public int StartReleaseCount;
         // How many read dependencies the transaction had recorded when this frame opened.
         public int StartDependencyCount;
+        // How many table locks the transaction held when this frame opened.
+        public int StartTableLockCount;
         public PageAllocator.AllocationState? Allocation;
     }
 
@@ -55,16 +57,25 @@ public sealed class Transaction
     /// <summary>Opens a savepoint over the given current logical page count; returns a handle for
     /// <see cref="TakeForRollbackTo"/> / <see cref="Release"/>.</summary>
     internal Savepoint Save(int currentPageCount, int currentReleaseCount = 0, int currentDependencyCount = 0,
-        PageAllocator.AllocationState? allocation = null)
+        PageAllocator.AllocationState? allocation = null, int currentTableLockCount = 0)
     {
         _frames.Add(new Frame
         {
             StartPageCount = currentPageCount,
             StartReleaseCount = currentReleaseCount,
             StartDependencyCount = currentDependencyCount,
+            StartTableLockCount = currentTableLockCount,
             Allocation = allocation,
         });
         return new Savepoint(_frames.Count - 1);
+    }
+
+    /// <summary>How many table locks the transaction held when <paramref name="sp"/> was created — the count to let
+    /// go back to when rolling back to it, since the locks taken after it were taken for undone work.</summary>
+    internal int TableLockCountAt(Savepoint sp)
+    {
+        ValidateFrame(sp.Index);
+        return _frames[sp.Index].StartTableLockCount;
     }
 
     internal PageAllocator.AllocationState? AllocationAt(Savepoint sp)

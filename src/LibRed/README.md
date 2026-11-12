@@ -341,16 +341,35 @@ Format-level detail on each on-disk gap lives in `docs/format/`.
   headings, since the rest come from the data.
 - **Function surface** — the evaluator's whitelist isn't proven identical to ACE's JES, and `Format`'s named
   date/currency formats are locale-dependent by design (not byte-identical cross-locale).
-- **Single-writer concurrency** — LibRed is a **single-writer engine that merely tolerates extra open
-  handles**, not a concurrent multi-user one. `PageChannel.Open` opens the file `FileShare.ReadWrite`
-  (a Jet/ACE file is a shared-file database — Access/ODBC/OLE DB all open it with multiple handles, and
-  EF's own test infra keeps a store connection open alongside per-context connections), but there is **no
-  multi-user concurrency control**: no lock file — Access coordinates multi-user access via a side-car
-  `.laccdb`/`.ldb` with page/record locks, and LibRed writes and honours none of it. Safe: any number of
-  readers with no writer; one writer plus readers when access is **serialized** (the single-threaded app /
-  EF case). Unsafe: **two or more concurrent writers → file corruption** (unarbitrated page writes and
-  racing usage-map allocation). True multi-user support is its own project: a lock file, page/record
-  locking, and a shared or WAL-based write path. What the deferred-write overlay already rules out — a
+- **Partial multi-user concurrency** — LibRed tolerates extra open handles and, on Windows, takes part in
+  Access's page locking, but it is **not yet a safe concurrent writer for every statement**. `PageChannel.Open`
+  opens the file `FileShare.ReadWrite` (a Jet/ACE file is a shared-file database — Access/ODBC/OLE DB all open
+  it with multiple handles, and EF's own test infra keeps a store connection open alongside per-context
+  connections). On Windows a shared open **registers as a user** in the side-car `.laccdb`/`.ldb` exactly as
+  ACE does (user bytes and record, one user per process per file; the last close deletes the file when alone),
+  so Access sees LibRed in the file — it refuses an exclusive open, naming LibRed's machine. A writer writes its
+  own page-0 commit slot around every batch of page writes as ACE does, and a registered user notices another
+  user's commit by its slot moving and re-reads its cached pages on its next statement. It also takes **ACE's
+  page write lock** on every existing page it writes and honours Access's: a page the other holds is retried for
+  about 2 s and then refused with ACE's *"Could not update; currently locked."*, and a statement that got its
+  page only after the other committed is run again on the fresh pages — so LibRed and Access **updating rows
+  at the same time** each wait for the other and neither loses the other's change (measured against ACE 16).
+  And it takes **ACE's table locks**: a statement holds its shared byte on every table it reads or writes (for
+  itself, or for the transaction it runs in), and `ALTER TABLE`, `CREATE`/`DROP INDEX`, `CREATE`/`DROP TABLE`
+  lock the table exclusively — so a design change waits for, and after about 2 s is refused with ACE's 3211
+  *"…could not lock table 'T' because it is already in use…"* by, Access having the table in a transaction,
+  and the reverse; and a statement that waited for a table another user was redesigning is planned again
+  against the new design (measured against ACE 16). It takes **no allocation lock and no long-value read lock**
+  (`docs/format/locking.md` §4): two concurrent `INSERT`s that both allocate pages, and a LibRed transaction
+  that inserted (it holds page 1 and the table's definition page until it commits) are not covered, and after a
+  LibRed DDL statement that appends a page (`CREATE INDEX`) Access refuses reads of that table with 3159 for up
+  to 5 s. Off Windows it registers nothing, watches no slot and takes no lock, and two processes there are
+  unsafe. Safe: any number of readers with no writer; one writer plus readers when access is **serialized**;
+  concurrent row `UPDATE`s that allocate no page, and a design change against readers or writers of the same
+  table, LibRed and Access included (the concurrent cases measured). Unsafe or unmeasured: concurrent
+  allocation (`INSERT`s, an `UPDATE` that moves a row, long values, DDL that allocates), a `DELETE` that frees
+  pages, rows of a query read after the statement returned (they are read without the table lock), and anything
+  off Windows with a second process. What the deferred-write overlay already rules out — a
   reader seeing another handle's uncommitted pages, a rollback discarding another channel's committed work,
   and a stale writer corrupting silently rather than failing its commit — is described in
   `docs/design/transactions.md`.

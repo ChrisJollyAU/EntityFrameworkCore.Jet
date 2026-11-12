@@ -35,14 +35,22 @@ the current page.
   change (`JetCatalog.Invalidate` → `PageChannel.MarkSchemaChanged`). The current implementation then revalidates
   each entry against its catalog-row and TDEF page images; the accepted direction is the simpler rule of dropping
   the DDL cache wholesale on any schema change.
-- **Another process's writes** are not yet seen at all while LibRed holds the file open: the page cache is
-  discarded only when the last handle closes, and the DDL cache is only as fresh as the page cache. Detecting them
-  belongs to the multi-user locking work — page 0's commit bytes (`0xE00`) say that another user has committed,
-  which drops the affected pages and, on a schema change, the DDL cache.
+- **Another process's writes** are seen through page 0's commit slots (`0xE00`): every user ends each batch of
+  page writes by moving its own slot. A registered LibRed user (Windows) reads the slot table at the start of each
+  statement and each commit, and when a slot other than its own has moved it drops every cached page image and
+  marks the schema changed — coarse, since a slot says that a user wrote, not what — so the DDL cache revalidates
+  against fresh pages ([locking.md §6](../format/locking.md)). A change made without moving a slot is not seen
+  until the page cache is discarded at the last close; an exclusive or unregistered handle does not look, having
+  nobody to look for.
 
 ## Locking (future)
 
-Once LibRed takes ACE's locks, an insert locks the table's definition page before its single read and holds the
-lock until the transaction's commit has written that page. Releasing it earlier would let the next user read the
+LibRed writes its commit slot, watches the others', and takes ACE's page write lock on each page it writes — the
+definition page included, from its first write of it until the batch that writes it ends. It takes ACE's table
+locks — a statement that got one only after another user committed is planned again on the re-read catalog — but
+does not yet lock the definition page *before* its read for an insert: the counters an insert reads are checked
+only through another user's slot having moved by the time the write lock is taken. Once it does, an insert locks
+the table's definition page before its single read and holds the lock until the transaction's commit has written
+that page. Releasing it earlier would let the next user read the
 old counters, because the deferred-write overlay keeps the new ones in memory until commit. See
 [transactions.md](transactions.md).

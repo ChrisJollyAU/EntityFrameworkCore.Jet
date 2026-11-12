@@ -61,12 +61,48 @@ Status: **draft / accepted direction** · Date: 2026-07-18
 > missing is what the 5-second read compares, the slot of an exclusive holder and of a second concurrent user
 > during a multi-page batch, and what a kill while a slot holds `00 00` leaves for the next open. The values
 > themselves are measured: a multi-page batch writes `00 00`, the pages, then the user's counter plus one; a
-> one-page batch writes the page then counter plus one only. A wrong value in a slot is a signal Access reads as
-> corruption, so the remaining cases must be measured before they are written. LibRed
-> still takes none of these locks, writes no lock file and no slot, and is **single-writer**, as
-> `src/LibRed/README.md` states: every mention of commit bytes, `.laccdb` records and cross-process recovery
-> below is **roadmap, not code**. What ships today is the deferred-write overlay, the write-conflict check on
-> commit, and process-local page locks.
+> one-page batch writes the page then counter plus one only. LibRed now does the **registration** (on Windows):
+> a shared or read-only open takes a user number in the `.laccdb` exactly as ACE does — the group-0 and group-1
+> bytes, the 64-byte record — and the last close in the process deregisters and deletes the file when nobody
+> else is connected (`JetUserRegistration`, held by the per-file `PageCache` so every channel in a process is
+> one user). And it does the **commit slots**: `PageChannel.PublishBatch`, which every publication goes through —
+> a commit's overlay and a write outside a transaction alike — writes appended pages, then `00 00` before two or
+> more existing pages, the pages, and the counter plus one, to slot *n* as shared user *n* or slot 0 holding the
+> file exclusively; page 0 is written only up to the table. A registered user's `PageCache` reads the table at
+> the start of each outermost read or write scope (each statement, each commit) and, when another user's slot has
+> moved, drops every cached page and marks the schema changed. The exclusive holder's use of slot 0 follows the
+> shared rule unmeasured — its values cannot be sampled while it holds the file. And it takes **ACE's page write
+> locks**: a registered user locks each page already in the file when it is first written — in a transaction, at
+> the point its commit baseline is recorded, so the baseline is read under the lock; outside one, inside the
+> one-page publication — with ACE's exclusive range on the `.laccdb` handle, and lets go after the batch that
+> writes it has ended with its slot write, or when the transaction, or the savepoint frame that first wrote it, is
+> rolled back. The baseline map is the record of what is held (a page with a baseline is a locked page). The OS
+> lock belongs to the process: `JetUserRegistration` counts the channels holding each page, under a lock of its
+> own, takes the range when the count leaves zero and releases it when it returns there — so channels of one
+> process stay optimistic among themselves exactly as before. A refused lock is retried as ACE retries it (21
+> attempts, 100 ms apart, then ACE's 3218 *"Could not update; currently locked."*), with the statement's publish
+> gate held throughout: in-process readers and writers of the file wait with it, up to about 2 s. A lock newly
+> taken after another user's slot has moved since the statement's scope looked throws `StaleReadException` with
+> the cache already dropped; `QueryEngine` rolls the statement back (its implicit transaction or savepoint frame,
+> keeping nothing a failure keeps) and runs it again, up to three runs. A caller writing through the Core API
+> cannot be re-run and sees the exception. And it takes **ACE's table locks**: `JetDatabase.OpenTable` — where
+> every table a statement reads or writes is opened, and the catalog's own reads are not — takes the region-4
+> shared byte, and `Table`'s write path the region-5 byte under a momentary region-6 lock; the schema editor's
+> table resolution (`DesignTable`, and `DropTable`, `RenameTable`, `Create`) takes region 4 exclusively.
+> `PageChannel.LockTable` decides the owner: every table lock belongs to the open transaction — a lone writing
+> statement's implicit one included, so its DDL locks go inside it — released at commit and rollback, a savepoint
+> rollback truncating them to the frame's count (the per-frame counts `Transaction` already keeps for releases and
+> dependencies); outside one, to the statement, the outermost `ReadConsistent`/`WriteExclusive` scope. The
+> process's lock table
+> (`JetUserRegistration`) carries every lock by region and page with its shared and exclusive holder counts, and
+> takes a table's exclusive lock over the process's own shared byte, as ACE's upgrade, so the process's
+> connections never stand in each other's way. A table lock newly taken after another user's slot moved throws
+> `StaleReadException` too, and `QueryEngine` re-runs every statement — reads included — in a new scope, bound
+> and planned afresh on the re-read catalog. **No allocation lock is taken, and a long-value read takes no shared
+> byte** — see [locking.md §4](../format/locking.md) for what that still leaves unsafe; LibRed is not a safe
+> concurrent writer alongside ACE for two `INSERT`s that allocate. What ships today is the deferred-write
+> overlay, the write-conflict check on commit, process-local page locks, the user registration, the commit slots,
+> ACE's page write locks and its table locks.
 
 This is the ground-up design for LibRed's transaction support and the concurrency
 infrastructure it sits on. It replaced the ad-hoc page-level undo log that used to be in
@@ -149,9 +185,15 @@ public interface ILockManager
 }
 ```
 
-The commit-byte and user-registry members the Jet coordinator will need — mark our slot mid-write and idle, claim
-and release a user index — are **roadmap**: they arrive with the lock-file registration (see the deferral note
-above), not before.
+The interface stays the **in-process** seam: `MonitorLockManager` behind it, and the test doubles. None of the
+cross-process work went into it. Claiming and releasing a user index is `JetUserRegistration`, whose number
+`PageChannel.UserNumber` exposes; the commit slot is part of publishing a batch (`PageChannel.PublishBatch`), and
+watching the other users' slots is part of entering a scope (`PageCache.ReadConsistent` / `PublishLocked`); the
+page write locks and the table locks are `JetUserRegistration.Lock` / `Unlock` — the page locks taken by
+`PageChannel.LockForWrite` when a page is first written and let go at commit, rollback, savepoint rollback and the
+end of a write outside a transaction, the table locks by `PageChannel.LockTable` and let go at the end of the
+transaction or the statement.
+See the deferral note above.
 
 - **`SelfConsistentLockManager` (initial):** page locks via `FileStream.Lock` on the
   main handle at *our own* deterministic offset band (`page → base + page*stride`);
@@ -294,7 +336,9 @@ Two orderings hold in every mode, and they are the ones that matter for concurre
 **What LibRed does.** The same, deliberately: a commit publishes every overlay page to the
 OS under the publish lock, and neither a commit nor a close forces them to disk. An
 autocommit statement writes its pages immediately rather than deferring them — stricter
-than ACE's default, and the deferral is what the engine-settings work would add. Never
+than ACE's default, and the deferral is what the engine-settings work would add. Each publication is one
+batch with ACE's slot writes around it (`PageChannel.PublishBatch`, [locking.md §6](../format/locking.md)):
+the closing slot write goes to the OS at once, and with it everything the batch wrote. Never
 leave a header pointing at pages the OS has not been given. No structure is written that
 Access cannot parse — the commit-byte table and lock offsets are the only
 concurrency-visible state, exactly as Jet uses them.
@@ -333,10 +377,12 @@ Build correctness first with lock seams stubbed; drop the Jet lock manager in la
    SQL-then-ADO consistency, control statements not self-wrapped.
 7. **L0 `SelfConsistentLockManager`.** Real byte-range page locks (our offsets) + presence
    map; multi-*process* single-writer LibRed↔LibRed.
-8. **(Concurrency phase) `JetLockManager`.** Jet-exact offsets, commit-byte polling,
+8. **(Concurrency phase) Jet-exact locking.** Jet-exact offsets, commit-byte polling,
    `.laccdb` records → live co-residency with `MSACCESS.EXE`. The lock bands and shapes, the
    `.laccdb` record, the poll interval (5 s) and the slot write order and values are measured
-   ([locking.md](../format/locking.md)); characterize the remaining unknowns first — what the
+   ([locking.md](../format/locking.md)). Done: the registration, the commit slots, the page write locks and the
+   table locks (see the deferral note). Left: page 1 and the TDEF page as an allocation /
+   counter lock, the long-value shared byte, the released-pages handling at close; and the unknowns — what the
    poll compares, the slot of an exclusive holder and of a second user during a multi-page batch,
    the `.ldb` of an `.mdb`, and what the next open does after a kill while a slot holds `00 00`.
 
@@ -356,12 +402,15 @@ don't move.
   exclusive scope — the shared scope cannot be upgraded and says so rather than deadlocking. Parsing happens
   before the scope is taken (it touches no pages). See `ReaderWriterIsolationTests`.
 - **Implicit-txn cost:** per-statement begin/commit must be cheap for read-only statements
-  (no dirty pages ⇒ commit is just lock release). Ensure a read-only statement never
-  touches the commit-byte.
-- **Deadlock policy** once multiple pages lock in different orders: initial mitigation is
-  a global writer lock (one writer at a time), so no page-order deadlock exists yet;
-  revisit when finer locking arrives.
+  (no dirty pages ⇒ commit is just lock release). A read-only statement, and a commit with
+  nothing in its overlay, publishes no batch and so never touches the commit slot.
+- **Deadlock policy:** within a process there is a global writer lock (one writing statement at a time per
+  file), so no page-order deadlock exists between LibRed's own connections. Against another user, two writers
+  each holding a page the other wants do not deadlock forever: each waits out ACE's retries (about 2 s) and fails
+  with 3218, as ACE itself does.
 - **`.ldb`/`.laccdb` lifecycle** — measured for the `.laccdb` (created by the first shared user,
   deleted by a user that closes cleanly and finds no other; left behind by a kill and reused —
-  [locking.md](../format/locking.md)); the `.ldb` of an `.mdb` is not measured. LibRed creates
-  and deletes none of it: that belongs to steps 7–8 and is not needed for in-process correctness.
+  [locking.md](../format/locking.md)); the `.ldb` of an `.mdb` is not measured. LibRed follows the
+  `.laccdb` lifecycle on Windows (a shared open creates or reuses it, the last close deletes it when alone, an
+  exclusive open creates none), and takes the `.ldb` beside an `.mdb` the same way, unmeasured. When the lock file
+  cannot be created or opened it carries on unregistered — what ACE does then is not measured.

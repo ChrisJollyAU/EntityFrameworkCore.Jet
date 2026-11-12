@@ -19,7 +19,8 @@ namespace LibRed.IO;
 /// including one taken through another handle in the same process. A range past end-of-file can be locked. Locks
 /// belong to the handle; closing it releases whatever it still holds, though Windows does not promise to do so
 /// immediately.</para>
-/// <para>Deliberately minimal: no waiting, no retry, no record of what is held.</para>
+/// <para>Deliberately minimal: no waiting, no retry, no record of what is held. Registering as a user through it is
+/// <see cref="JetUserRegistration"/>'s job.</para>
 /// </remarks>
 internal sealed class JetLockFile : IDisposable
 {
@@ -47,8 +48,10 @@ internal sealed class JetLockFile : IDisposable
         return lockExtension is null ? null : Path.ChangeExtension(databasePath, lockExtension);
     }
 
-    /// <summary>Opens the lock file at <paramref name="path"/> for locking. It is opened read-only and shared for
-    /// read, write and delete, so it never stands in the way of Access opening, writing or deleting it.</summary>
+    /// <summary>Opens the lock file at <paramref name="path"/> for locking and for writing a user record, as ACE
+    /// opens it: read/write, shared for read and write. Not shared for delete, also as ACE: a user that closes and
+    /// finds nobody else connected deletes the file, and a handle another user still has open on it is what makes
+    /// that delete fail rather than pull the file out from under them.</summary>
     /// <param name="path">The lock file.</param>
     /// <param name="createIfMissing">Create the file when it does not exist; otherwise a missing file throws
     /// <see cref="FileNotFoundException"/>.</param>
@@ -57,12 +60,20 @@ internal sealed class JetLockFile : IDisposable
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Jet lock-file locking is only implemented on Windows.");
 
-        // Read access is enough: LockFileEx needs the handle to have either read or write access.
         return new JetLockFile(File.OpenHandle(
             path,
             createIfMissing ? FileMode.OpenOrCreate : FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete));
+            FileAccess.ReadWrite,
+            FileShare.ReadWrite));
+    }
+
+    /// <summary>Writes <paramref name="bytes"/> at <paramref name="offset"/> of the lock file — a user's record
+    /// (<see cref="JetLockLayout.UserRecord"/>), the only content the file has.</summary>
+    public void Write(long offset, ReadOnlySpan<byte> bytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        RandomAccess.Write(_handle, bytes, offset);
     }
 
     /// <summary>Tries to lock <paramref name="length"/> bytes at <paramref name="offset"/> exclusively, without

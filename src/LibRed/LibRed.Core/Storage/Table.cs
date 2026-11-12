@@ -10,16 +10,24 @@ namespace LibRed.Storage;
 /// </summary>
 public sealed class Table
 {
-    internal Table(PageChannel channel, TableDefinition definition, JetCatalog catalog)
+    /// <param name="channel">The channel the table is read and written through.</param>
+    /// <param name="definition">The table's definition.</param>
+    /// <param name="catalog">The catalog it was found in.</param>
+    /// <param name="locked">The table was opened for a statement (<see cref="JetDatabase.OpenTable"/>), which holds its
+    /// table locks: writing it takes ACE's table-write locks too. False for the catalog's own reads and writes of its
+    /// tables, which ACE makes under page locks alone (locking.md §4).</param>
+    internal Table(PageChannel channel, TableDefinition definition, JetCatalog catalog, bool locked = false)
     {
         Channel = channel;
         _catalog = catalog;
         Definition = definition;
         UsageMap = new UsageMap(channel, definition);
+        _locked = locked;
     }
 
     internal PageChannel Channel { get; }
     private readonly JetCatalog _catalog;
+    private readonly bool _locked;
     public TableDefinition Definition { get; }
     internal UsageMap UsageMap { get; }
 
@@ -298,6 +306,7 @@ public sealed class Table
         if (ownTransaction) Channel.BeginTransaction();
         try
         {
+            if (_locked) Channel.LockTable(Definition.DefinitionPage, Name, TableUse.Write);
             action();
             if (ownTransaction) Channel.CommitTransaction(flush: false);
         }

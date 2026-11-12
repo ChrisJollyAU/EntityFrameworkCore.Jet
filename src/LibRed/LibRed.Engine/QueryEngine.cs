@@ -43,19 +43,33 @@ public sealed class QueryEngine
         // Parse outside the gate — it touches no pages, and holding a file-wide scope across it would
         // serialize parsing for no isolation benefit. The parsed shape then picks the scope.
         SqlStatement parsed = _parser.ParseStatement(sql);
-        return Scoped(parsed, () => ExecuteQueryCore(parsed, parameters));
+        return Scoped(CannotWrite(parsed), () => ExecuteQueryCore(parsed, parameters));
     }
 
-    /// <summary>Runs <paramref name="action"/> in the page scope <paramref name="statement"/> needs: shared
-    /// (concurrent with other readers) for a statement that cannot write, exclusive otherwise so its pages
-    /// publish as one unit. Anything not provably read-only takes the exclusive scope — a shared scope that
-    /// then writes is rejected, not silently upgraded.</summary>
-    private T Scoped<T>(SqlStatement statement, Func<T> action) =>
-        // A SELECT with INTO is a make-table query: it looks like a read and writes a table, so it takes the
-        // exclusive scope with the other writers. The guard above caught this rather than letting it through.
-        statement is SelectStatement { Into: null } or SetOperationStatement or SystemVariableSelectStatement or TransformStatement
-            ? _database.ReadConsistent(action)
-            : _database.WriteExclusive(action);
+    /// <summary>Runs <paramref name="action"/> in the page scope its statement needs: shared (concurrent with other
+    /// readers) when it <paramref name="reads"/> only — a statement that cannot write (<see cref="CannotWrite"/>) —
+    /// exclusive otherwise so its pages publish as one unit. Anything not provably read-only takes the exclusive scope
+    /// — a shared scope that then writes is rejected, not silently upgraded.</summary>
+    /// <remarks>A statement that took a lock only after another user committed (<see cref="StaleReadException"/>) —
+    /// a page's write lock, or a table's lock — read or planned against what may be older than the file: a page the
+    /// other user changed, a table whose design it changed. A writing statement has been rolled back as though it had
+    /// never run (<see cref="RunAtomically"/>), and the statement is run again in a new scope, which looks at the other
+    /// users' slots, re-reads the catalog, and binds and plans afresh — as ACE in its place waits for the lock and goes
+    /// ahead on top of the other user's change. After <see cref="StaleReadAttempts"/> runs the exception stands, with
+    /// ACE's message for what could not be locked.</remarks>
+    private T Scoped<T>(bool reads, Func<T> action)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            try { return reads ? _database.ReadConsistent(action) : _database.WriteExclusive(action); }
+            catch (StaleReadException) when (attempt < StaleReadAttempts) { }
+        }
+    }
+
+    /// <summary>Whether <paramref name="statement"/> is one that cannot write. A SELECT with INTO is a make-table
+    /// query: it looks like a read and writes a table, so it is not one.</summary>
+    private static bool CannotWrite(SqlStatement statement) =>
+        statement is SelectStatement { Into: null } or SetOperationStatement or SystemVariableSelectStatement or TransformStatement;
 
     private ResultSet ExecuteQueryCore(SqlStatement parsed, IReadOnlyDictionary<string, object?>? parameters)
     {
@@ -91,7 +105,7 @@ public sealed class QueryEngine
         SqlStatement parsed = _parser.ParseStatement(sql);
         // The shared scope always: describing reads the catalog and writes nothing, whatever the statement
         // would have done had it run.
-        return _database.ReadConsistent(() => DescribeCore(parsed, parameters));
+        return Scoped(reads: true, () => DescribeCore(parsed, parameters));
     }
 
     private ResultSet DescribeCore(SqlStatement parsed, IReadOnlyDictionary<string, object?>? parameters)
@@ -108,7 +122,7 @@ public sealed class QueryEngine
 
         // Everything that writes — DML, DDL, a make-table SELECT, transaction control — returns no rows and
         // does not run.
-        if (parsed is not (SelectStatement { Into: null } or SetOperationStatement or SystemVariableSelectStatement or TransformStatement))
+        if (!CannotWrite(parsed))
             return ResultSet.Empty;
 
         BoundStatement bound = _binder.Bind(ViewExpander.Expand(parsed, _database, _parser));
@@ -157,7 +171,7 @@ public sealed class QueryEngine
         if (_parser.IsStatementless(sql)) return new CommandResult(ResultSet.Empty, RecordsAffected: 0);
 
         SqlStatement parsed = _parser.ParseStatement(sql);
-        return Scoped(parsed, () => ExecuteCore(parsed, parameters));
+        return Scoped(CannotWrite(parsed), () => ExecuteCore(parsed, parameters));
     }
 
     private CommandResult ExecuteCore(SqlStatement parsed, IReadOnlyDictionary<string, object?>? parameters)
@@ -214,28 +228,36 @@ public sealed class QueryEngine
     /// an implicit transaction (commit on success, roll back on any failure — a late constraint/I/O error can
     /// never leave a half-written row, index, LVAL chain, or catalog entry); inside a user transaction it runs
     /// under a savepoint, so a statement failure undoes just that statement and leaves the user's transaction
-    /// intact. Only writing statements reach here — reads never open a transaction.
+    /// intact. Only writing statements reach here — reads never open a transaction. A statement that took a lock only
+    /// after another user committed is rolled back as though it had never run — nothing a failure keeps is kept — and
+    /// <see cref="Scoped"/> runs it again.
     /// </summary>
-    private CommandResult ExecuteWritingStatement(SqlStatement statement, IReadOnlyDictionary<string, object?>? parameters)
-    {
-        int Run() => new StatementExecutor(_database, parameters, _parser, _session).Execute(statement);
+    private CommandResult ExecuteWritingStatement(SqlStatement statement, IReadOnlyDictionary<string, object?>? parameters) =>
+        new(ResultSet.Empty, RunAtomically(() => new StatementExecutor(_database, parameters, _parser, _session).Execute(statement)));
 
+    /// <summary>How many times a statement is run when each run meets another user's commit (see
+    /// <see cref="Scoped"/>). Chosen, not measured: ACE waits for a lock rather than re-running.</summary>
+    private const int StaleReadAttempts = 3;
+
+    /// <summary>One run of a writing statement, atomic on its own (see <see cref="ExecuteWritingStatement"/>).</summary>
+    private int RunAtomically(Func<int> run)
+    {
         if (_database.InTransaction)
         {
             Savepoint savepoint = _database.CreateSavepoint();
             try
             {
-                int affected = Run();
+                int affected = run();
                 _database.ReleaseSavepoint(savepoint);
-                return new CommandResult(ResultSet.Empty, affected);
+                return affected;
             }
-            catch
+            catch (Exception failure)
             {
                 // Rolling back to a savepoint leaves it open for reuse, so the statement's own frame has to be
                 // closed too. Left open it sits above the savepoint the enclosing BEGIN pushed, and that level's
                 // COMMIT then refuses — only the innermost savepoint can be released — so one failed statement
                 // makes every later nested COMMIT throw.
-                _database.RollbackToSavepoint(savepoint, failed: true);
+                _database.RollbackToSavepoint(savepoint, failed: failure is not StaleReadException);
                 _database.ReleaseSavepoint(savepoint);
                 throw;
             }
@@ -244,13 +266,13 @@ public sealed class QueryEngine
         _database.BeginTransaction();
         try
         {
-            int affected = Run();
+            int affected = run();
             _database.Commit(flush: false); // autocommit: durability stays on Dispose, as before transactions existed
-            return new CommandResult(ResultSet.Empty, affected);
+            return affected;
         }
-        catch
+        catch (Exception failure)
         {
-            _database.Rollback(failed: true);
+            _database.Rollback(failed: failure is not StaleReadException);
             throw;
         }
     }

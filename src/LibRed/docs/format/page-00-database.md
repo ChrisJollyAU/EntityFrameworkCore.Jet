@@ -365,8 +365,10 @@ byte of the new page, then the full page(s) — before that leading slot write (
 slot write** storing the user's commit counter plus one, and the batch's page locks are released after it. This
 holds for a lone statement, an explicit transaction's commit (two or more existing pages: `00 00`, pages,
 counter + 1) and the final writes at close (a one-page batch: counter + 1 only). The counter rises by exactly one
-per batch; the other users' slots and slot 0 are untouched. The slot of an exclusive holder (slot 0) and of a
-second concurrent user during a multi-page batch are not known.
+per batch; the other users' slots and slot 0 are untouched. An exclusive holder's slot 0 counts the same way
+across a session — reads and an open/close leave it, an `INSERT` raises it by one (measured before and after; it
+cannot be read meanwhile, [locking.md §6](locking.md#6-commit-slots-and-page-writes)). The slot of an exclusive
+holder and of a second concurrent user during a multi-page batch are not known.
 
 **Idle reads.** An idle shared user reads the whole 512-byte table every 5 seconds (measured); what it compares
 and which process's read leads to a cache refresh are not known.
@@ -375,8 +377,11 @@ and which process's read leads to a cache refresh are not known.
 DAO `CompactDatabase` writes a whole new file and its slot 1 starts at **256**, the idle value, then counts
 normally from there.
 
-LibRed does not read or maintain the table — ACE opens and queries LibRed-created tables with the counter
-untouched.
+**LibRed** writes its own slot with the same rule — slot *n* as shared user *n*, slot 0 holding the file
+exclusively, none when it is neither — and writes page 0 only up to `0xE00`, so every other user's slot stays
+as it is on the file. A registered LibRed user reads the table at the start of each statement and commit, and
+drops its cached pages when a slot other than its own has moved ([locking.md §6](locking.md#6-commit-slots-and-page-writes)).
+After `FF FF` it goes on from `00 01`; what ACE does there is not measured.
 
 mdbtools does not document this region. The Microsoft **LDBView** utility (Jet 2/3 only) shows `1` for every
 unregistered slot — matching the idle `00 01`.
