@@ -52,7 +52,8 @@ internal sealed class PageAllocator
     {
         int start = _reservationStart;
         uint bits = _reservationBits, before = state.Start == start ? state.Bits : 0;
-        (MapRecord free, MapRecord released) = ReadGlobalMaps();
+        // Locked, where it writes them, by LockGlobalMapsFor before the rollback began.
+        (MapRecord free, MapRecord released) = ReadGlobalMaps(claim: false);
         // The reservation stays, unless it lies in pages the restored map has no bit for: then it came with map growth
         // the rollback undid, and goes with it.
         if (Enumerable.Range(0, 32).Any(bit => (bits & 1u << bit) != 0 && FreeBit(start + bit, free) is null))
@@ -71,7 +72,7 @@ internal sealed class PageAllocator
         uint taken = state.Start == start ? state.Bits & ~bits : state.Bits;
         for (int bit = 0; bit < 32; bit++)
             if ((taken & 1u << bit) != 0) Free(state.Start + bit);
-        (free, released) = ReadGlobalMaps();
+        (free, released) = ReadGlobalMaps(claim: false);
         for (int bit = 0; bit < 32; bit++)
         {
             if ((bits & ~before & 1u << bit) == 0) continue;
@@ -79,6 +80,19 @@ internal sealed class PageAllocator
             if (FreeBit(start + bit, free) == true) WriteFreeBit(free, released, start + bit, false);
             else _reservationBits &= ~(1u << bit);
         }
+    }
+
+    /// <summary>Locks the global maps' holder pages ahead of a rollback to <paramref name="state"/> that will change
+    /// them — one whose shared reservation differs from <paramref name="state"/>'s, so that <see cref="RollBackTo"/>
+    /// frees what the undone writes took from it, or reserves pages again — while the transaction is still open to
+    /// hold them (<see cref="ReadGlobalMaps"/>). The rollback reads the maps only after this, so a lock taken after
+    /// another user committed only drops the cache. Refused past ACE's retries, it is left to each write of the
+    /// rollback to wait for the page as it comes, as a write outside a transaction does.</summary>
+    internal void LockGlobalMapsFor(AllocationState state)
+    {
+        if (state.Start == _reservationStart && state.Bits == _reservationBits) return;
+        try { ReadGlobalMaps(claim: true, refuseStale: false); }
+        catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }   // the rollback meets it
     }
 
     internal PageAllocator(PageChannel channel) => _channel = channel;
@@ -111,7 +125,11 @@ internal sealed class PageAllocator
     public int Allocate((int Row, int Page)? owner = null, int previousPage = -1, (int Row, int Page)? data = null,
         bool leaf = false, bool materialize = true, int? rangeStart = null)
     {
-        (MapRecord free, MapRecord released) = ReadGlobalMaps();
+        // A page from the shared reservation changes no map, and ACE locks page 1 only when it reserves a new run
+        // (locking.md §4): only an allocation that may change the maps — every other — locks their page first.
+        bool fromReservation = _reservationBits != 0
+            && !(data is not null && leaf && owner is { } leafOwner && _groups.ContainsKey(leafOwner));
+        (MapRecord free, MapRecord released) = ReadGlobalMaps(claim: !fromReservation);
         var releasedPages = new ReleasedPages(this, released);
         (int Page, int Held) dataGroup = data is { } dataOwner
             ? (_owners.TryGetValue(dataOwner, out int dataPage) ? dataPage & ~7 : -1,
@@ -429,7 +447,7 @@ internal sealed class PageAllocator
     /// </summary>
     public void Release(int page, bool untilCommit = false)
     {
-        (MapRecord free, MapRecord released) = ReadGlobalMaps();
+        (MapRecord free, MapRecord released) = ReadGlobalMaps(claim: false);   // only checked: the release is held
         ValidateReusablePage(page, "page being released", free, released, _channel.PageCount - 1);
         if (untilCommit) _heldUntilCommit.Add(page);
         else _channel.ReleaseAtClose(page);
@@ -452,16 +470,22 @@ internal sealed class PageAllocator
         // could commit page 1 after this transaction first wrote it, and the commit would fail as a write conflict.
         _channel.WriteExclusive(() =>
         {
-            (_, MapRecord released) = ReadGlobalMaps();
-            // Every bit kept, none bounded by the file: a released page past its end was never materialized, and is
-            // skipped below.
-            pages.UnionWith(UsageMap.PagesInRecord(_channel, released.Record, rejectBeyond: null, "The global released-pages map"));
-            if (pages.Count == 0 && _reservationBits == 0 && _groups.Count == 0) return false;
-
             bool ownTransaction = !_channel.InTransaction;
             if (ownTransaction) _channel.BeginTransaction();
             try
             {
+                // Page 1 locked before it is read, as ACE locks it at close (locking.md §3): nothing used here was read
+                // before, so a lock taken after another user committed only means reading it afresh.
+                (_, MapRecord released) = ReadGlobalMaps(refuseStale: false);
+                // Every bit kept, none bounded by the file: a released page past its end was never materialized, and
+                // is skipped below.
+                pages.UnionWith(UsageMap.PagesInRecord(_channel, released.Record, rejectBeyond: null, "The global released-pages map"));
+                if (pages.Count == 0 && _reservationBits == 0 && _groups.Count == 0)
+                {
+                    if (ownTransaction) _channel.CommitTransaction(flush: false);   // writes nothing; lets page 1 go
+                    return false;
+                }
+
                 // Sized before the merge: a conversion allocates its bitmap pages from the free map as it stands,
                 // without the pages being released.
                 if (pages.Count != 0) SizeReleasedMap(pages);
@@ -616,7 +640,7 @@ internal sealed class PageAllocator
     /// file. A pointer past the end of the file makes ACE mark the database corrupt, and one naming anything
     /// other than a usage map fails at the first allocation, so a writable open refuses both up front.
     /// </summary>
-    public void ValidateGlobalMaps() => ReadGlobalMaps();
+    public void ValidateGlobalMaps() => ReadGlobalMaps(claim: false);
 
     /// <summary>Allocates from a reference-type global free map (huge databases): the record is a list of
     /// pointers to dedicated bitmap pages (type 0x0105), pointer <c>k</c> covering the page range starting at
@@ -804,7 +828,14 @@ internal sealed class PageAllocator
 
     /// <summary>Reads both global map records through page 0's pointers, and refuses pointers that are equal,
     /// name a page outside the file, or name anything other than a usage-map record.</summary>
-    private (MapRecord Free, MapRecord Released) ReadGlobalMaps()
+    /// <remarks>A change to the global maps is a read-modify-write of their holder page — page 1 where ACE creates
+    /// them — which ACE makes under that page's write lock, reading the page again once it holds it (locking.md §4).
+    /// So with <paramref name="claim"/> — every caller that may change the maps — the holder pages are locked
+    /// (<see cref="PageChannel.LockForUpdate"/>) before the records are read: a lock newly taken after another user
+    /// committed drops the cache, so what is read is no older than the lock, and refuses the statement unless
+    /// <paramref name="refuseStale"/> is false — for a caller that reads nothing it uses before this. Held to the end
+    /// of the transaction. Outside one it does nothing, and each map write locks its page as it is written.</remarks>
+    private (MapRecord Free, MapRecord Released) ReadGlobalMaps(bool claim = true, bool refuseStale = true)
     {
         ReadOnlySpan<byte> page0 = _channel.ReadPage(0).Span;
         JetFormatBase format = _channel.Format;
@@ -816,6 +847,11 @@ internal sealed class PageAllocator
             throw new InvalidDataException(
                 $"Page 0 names the same record (page {freePointer.Page}, row {freePointer.Row}) for the global " +
                 "free-pages and released-pages maps; they must be distinct.");
+        if (claim && freePointer.Page > 0 && releasedPointer.Page > 0)
+        {
+            _channel.LockForUpdate(freePointer.Page, refuseStale);
+            _channel.LockForUpdate(releasedPointer.Page, refuseStale);
+        }
 
         MapRecord free = ReadMapRecord("free-pages", freePointer);
         MapRecord released = ReadMapRecord("released-pages", releasedPointer);

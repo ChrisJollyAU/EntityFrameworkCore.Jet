@@ -262,6 +262,51 @@ public class PageLockTests
     }
 
     [Fact]
+    public void An_appended_zero_page_another_user_has_since_written_is_left_as_that_user_wrote_it()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-pagelock-");
+
+        using var channel = PageChannel.Open(copy.Path, readOnly: false);
+        channel.BeginTransaction();
+        int filler = channel.Allocator.Append();   // zeros, to keep the file contiguous below the page this user takes
+        int mine = channel.Allocator.Append();
+        WriteMarker(channel, mine, 0x71);
+
+        // Meanwhile another user writes the filler's page — one of a run it reserved — and one past this user's.
+        WriteAsOtherUser(copy.Path, filler, Filled(0xAB));
+        WriteAsOtherUser(copy.Path, mine + 1, Filled(0xCD));
+        channel.CommitTransaction();
+
+        Assert.Equal(Filled(0xAB), TestDatabases.ReadPage(copy.Path, filler));
+        Assert.Equal(0x71, TestDatabases.ReadPage(copy.Path, mine)[100]);
+        Assert.Equal(Filled(0xCD), TestDatabases.ReadPage(copy.Path, mine + 1));
+        Assert.Equal((long)(mine + 2) * Format.PageSize, new FileInfo(copy.Path).Length);
+    }
+
+    [Fact]
+    public void Growing_the_file_to_a_page_never_cuts_off_pages_another_user_appended_past_it()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-pagelock-");
+
+        using var channel = PageChannel.Open(copy.Path, readOnly: false);
+        int end = channel.PageCount;
+        channel.BeginTransaction();
+        byte[] mine = new byte[Format.PageSize];
+        mine[100] = 0x71;
+        channel.WritePage(end + 3, mine);
+
+        WriteAsOtherUser(copy.Path, end + 6, Filled(0xCD));   // another user's append, past this user's page
+        channel.CommitTransaction();
+
+        Assert.Equal((long)(end + 7) * Format.PageSize, new FileInfo(copy.Path).Length);
+        Assert.Equal(Filled(0xCD), TestDatabases.ReadPage(copy.Path, end + 6));
+        Assert.Equal(0x71, TestDatabases.ReadPage(copy.Path, end + 3)[100]);
+        Assert.True(channel.PageCount >= end + 7);
+    }
+
+    [Fact]
     public void An_exclusive_open_takes_no_lock()
     {
         using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-pagelock-");
@@ -344,6 +389,21 @@ public class PageLockTests
         byte[] bytes = channel.ReadPage(page).Span.ToArray();
         bytes[100] = marker;
         channel.WritePage(page, bytes);
+    }
+
+    // A page written into the file while LibRed has it open, as another process's write lands.
+    private static void WriteAsOtherUser(string path, int page, byte[] bytes)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+        stream.Seek((long)page * Format.PageSize, SeekOrigin.Begin);
+        stream.Write(bytes);
+    }
+
+    private static byte[] Filled(byte value)
+    {
+        byte[] page = new byte[Format.PageSize];
+        page.AsSpan().Fill(value);
+        return page;
     }
 
     private static int Slot(string path, int user) =>

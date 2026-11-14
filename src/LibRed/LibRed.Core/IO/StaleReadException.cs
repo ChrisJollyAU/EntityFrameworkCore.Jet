@@ -1,8 +1,9 @@
 namespace LibRed.IO;
 
 /// <summary>
-/// A statement took a lock only after another user had committed — a page's write lock, or one of a table's locks:
-/// what the statement read or planned against before it may be older than the file, so it cannot go ahead on it
+/// A statement took a lock only after another user had committed — a page's write lock on a page that user changed
+/// since this process read it, or one of a table's locks: what the statement read or planned against before it may be
+/// older than the file, so it cannot go ahead on it
 /// (<c>docs/format/locking.md</c> §4). Thrown by <see cref="PageChannel"/> with what that call took let go; the
 /// caller rolls back what the statement did — its transaction, or its savepoint frame — and runs it again, bound and
 /// planned afresh, as ACE in its place would have waited for the lock and then read. <c>QueryEngine</c> does that for

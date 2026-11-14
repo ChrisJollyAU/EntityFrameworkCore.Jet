@@ -97,7 +97,10 @@ public class StatementAtomicityTests : TempDatabaseTest
                 Assert.Equal("k900", e.ExecuteQuery("SELECT Code FROM AtomicSplit WHERE Id = 900").Rows.Single()[0]);
             }
 
-            Assert.Equal(before, File.ReadAllBytes(path));
+            // ACE's own session on this file, the same failed UPDATE and a close, moves its commit slot by two (measured:
+            // 1625 to 1627) — a batch for the rollback, which puts the global map right for the run it reserved, and one
+            // at close, which gives the run back.
+            Core.Tests.TestDatabases.AssertUnchangedButOneCommitSlotRisenBy(before, File.ReadAllBytes(path), 2);
             using var connection = AceTestDatabase.Open(path);
             AssertScalar(connection, "SELECT COUNT(*) FROM AtomicSplit", 900);
             AssertScalar(connection, "SELECT COUNT(*) FROM AtomicSplit WHERE Code LIKE 'expanded-%'", 0);
@@ -135,7 +138,10 @@ public class StatementAtomicityTests : TempDatabaseTest
                 Assert.Equal("second", row.Rows.Single(r => Convert.ToInt32(r[0]) == 2)[1]);
             }
 
-            Assert.Equal(before, File.ReadAllBytes(path));
+            // ACE's own session on this file, the same failed UPDATE and a close, moves its commit slot by two (measured:
+            // 727 to 729) — a batch for the rollback, which puts the global map right for the run it reserved, and one at
+            // close, which gives the run back.
+            Core.Tests.TestDatabases.AssertUnchangedButOneCommitSlotRisenBy(before, File.ReadAllBytes(path), 2);
             using var connection = AceTestDatabase.Open(path);
             AssertScalar(connection, "SELECT COUNT(*) FROM AtomicLval", 2);
             AssertScalar(connection, "SELECT COUNT(*) FROM AtomicLval WHERE Code = 99", 0);

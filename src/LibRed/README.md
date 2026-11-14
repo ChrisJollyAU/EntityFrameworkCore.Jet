@@ -359,17 +359,24 @@ Format-level detail on each on-disk gap lives in `docs/format/`.
   lock the table exclusively — so a design change waits for, and after about 2 s is refused with ACE's 3211
   *"…could not lock table 'T' because it is already in use…"* by, Access having the table in a transaction,
   and the reverse; and a statement that waited for a table another user was redesigning is planned again
-  against the new design (measured against ACE 16). It takes **no allocation lock and no long-value read lock**
-  (`docs/format/locking.md` §4): two concurrent `INSERT`s that both allocate pages, and a LibRed transaction
-  that inserted (it holds page 1 and the table's definition page until it commits) are not covered, and after a
-  LibRed DDL statement that appends a page (`CREATE INDEX`) Access refuses reads of that table with 3159 for up
-  to 5 s. Off Windows it registers nothing, watches no slot and takes no lock, and two processes there are
-  unsafe. Safe: any number of readers with no writer; one writer plus readers when access is **serialized**;
-  concurrent row `UPDATE`s that allocate no page, and a design change against readers or writers of the same
-  table, LibRed and Access included (the concurrent cases measured). Unsafe or unmeasured: concurrent
-  allocation (`INSERT`s, an `UPDATE` that moves a row, long values, DDL that allocates), a `DELETE` that frees
-  pages, rows of a query read after the statement returned (they are read without the table lock), and anything
-  off Windows with a second process. What the deferred-write overlay already rules out — a
+  against the new design (measured against ACE 16). Its counters and allocation are **ACE's locked
+  read-modify-writes**: an `INSERT` locks the table's definition page before anything else and draws its
+  AutoNumber under the lock, and every change to the global page maps locks page 1 before reading them — so
+  LibRed and Access **inserting into one table at the same time**, long values included, draw distinct
+  AutoNumbers, lose no row and never take the same page (measured against ACE 16, as is either inserting while
+  the other creates and drops tables). A lock got after another user's commit re-runs the statement only when
+  that page itself changed. It takes **no long-value read lock**, and inside an explicit transaction it holds an
+  `INSERT`'s definition page and page 1 until `COMMIT` (Access lets them go shortly after the `INSERT`): while
+  such a LibRed transaction is open, Access's `INSERT`s into that table are refused with 3218
+  (`docs/format/locking.md` §4). After any user's `CREATE INDEX`, Access refuses reads of that table with 3159
+  for up to 5 s — Access's own behaviour between two Access users. Off Windows it registers nothing, watches no
+  slot and takes no lock, and two processes there are unsafe. Safe: any number of readers with no writer; one
+  writer plus readers when access is **serialized**; concurrent row `UPDATE`s, concurrent `INSERT`s, and a
+  design change against readers or writers of the same table, LibRed and Access included (the concurrent cases
+  measured). Unmeasured against Access: concurrent `UPDATE`s that move a row, index page splits and DDL that
+  allocates beside another user's writes, `DELETE`s that free pages, and the close-time release of held pages
+  with another user connected (each follows the same page-1 rule). Unsafe: rows of a query read after the
+  statement returned (they are read without the table lock), and anything off Windows with a second process. What the deferred-write overlay already rules out — a
   reader seeing another handle's uncommitted pages, a rollback discarding another channel's committed work,
   and a stale writer corrupting silently rather than failing its commit — is described in
   `docs/design/transactions.md`.

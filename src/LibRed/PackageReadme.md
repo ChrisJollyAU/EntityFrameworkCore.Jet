@@ -76,10 +76,13 @@ been through production use.
   it marks its commits in the database header as Access does and notices Access's; and it takes and honours
   Access's page write locks, so LibRed and Access updating rows at the same time wait for each other and lose
   neither change; and its table locks, so a schema change waits for (and is refused, as Access refuses it, while)
-  the other has the table in use. It does not yet take Access's allocation locks: concurrent inserts, and other
-  writes or schema changes that allocate pages, are not safe — two such writers, LibRed and Access included, can
-  corrupt the file. Off Windows it takes no locks at all. Safe for any number of readers with no
-  writer, or one writer with serialized access; not yet the library for a busy shared network database.
+  the other has the table in use; and Access's locks on a table's counters and on the page maps, so LibRed and
+  Access inserting into one table at the same time draw distinct AutoNumbers and never take the same page.
+  Inside an open LibRed transaction that inserted into a table, Access cannot insert into that table until it
+  commits. Updates that move rows, deletes that free pages and schema changes that allocate pages follow the same
+  rules but have not been tested against Access under contention. Off Windows it takes no locks at all. Safe
+  for any number of readers with no writer, or one writer with serialized access; not yet the library for a
+  busy shared network database.
 - Jet 3 (Access 97) files are not supported.
 - **Validation rules authored in the Access UI are not enforced**: LibRed will accept a row that Access would
   have rejected.

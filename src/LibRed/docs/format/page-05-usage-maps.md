@@ -380,8 +380,12 @@ This is allocation policy, not an on-disk requirement; see `docs/design/page-all
 > intervening pages contiguously before returning the selected page — free, released, or reserved, its own
 > session's or, with the free bit clear, another handle's. A session's reservation and an owner's group take
 > pages from the map before they are written (measured: a reservation opened at the end of the file clears its
-> whole window past it, and another owner passes over a group's unwritten held pages). *Unverified:* that a second handle — a
-> second ACE process, or a second LibRed connection — sees and treats another's past-EOF reservation this way.
+> whole window past it, and another owner passes over a group's unwritten held pages). Two users inserting at once
+> each append into a run of their own, with unwritten pages between the runs; reserving a run is a
+> read-modify-write of the global map's holder page under its write lock, re-read once locked
+> ([locking.md §4](locking.md)). An intervening page another user has reserved, and since written, is not written
+> over: LibRed writes such a zero page only while it lies past the file's end. *Unverified:* where one user's run
+> is placed relative to another's.
 > Repeated allocations can therefore consume an ACE-authored run
 > of future bits without creating a sparse file. For the same reason a covered page past the end of the file
 > whose bit is clear is never handed out as unused: when nothing eligible is free, the map is grown past every

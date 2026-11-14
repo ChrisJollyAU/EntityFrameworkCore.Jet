@@ -98,11 +98,26 @@ Status: **draft / accepted direction** · Date: 2026-07-18
 > takes a table's exclusive lock over the process's own shared byte, as ACE's upgrade, so the process's
 > connections never stand in each other's way. A table lock newly taken after another user's slot moved throws
 > `StaleReadException` too, and `QueryEngine` re-runs every statement — reads included — in a new scope, bound
-> and planned afresh on the re-read catalog. **No allocation lock is taken, and a long-value read takes no shared
-> byte** — see [locking.md §4](../format/locking.md) for what that still leaves unsafe; LibRed is not a safe
-> concurrent writer alongside ACE for two `INSERT`s that allocate. What ships today is the deferred-write
+> and planned afresh on the re-read catalog. A page lock newly taken after another user's commit is narrower:
+> `PageCache.RefreshAtLock` sets the dropped images aside for the rest of the writing scope rather than discarding
+> them, and `LockForWrite` re-runs the statement only when the locked page, read again, differs from the image the
+> process held before (or that image is unknowable: an eviction since the scope began, a read-only scope) — ACE's
+> own discipline of lock, re-read, change; without it a statement taking several locks starves while another user
+> commits steadily. **Counters and allocation are locked read-modify-writes:** `PageChannel.LockForUpdate` — the
+> lock-and-baseline step `WritePage` takes before a page's first write in a transaction, split out — is called
+> before the read wherever a page's current contents decide the change: `RowInserter` locks the table's TDEF page
+> before it reads the counters (an `INSERT` before anything else), and `PageAllocator.ReadGlobalMaps`, the
+> allocator's one read of the global maps, locks their holder page first for every caller that may change them
+> (a take from the run already reserved changes no map and locks nothing). Held to the end of the transaction —
+> so in an explicit transaction to `COMMIT`, where ACE writes them and lets them go about 500 ms after the
+> `INSERT`; doing that needs the overlay to keep those two pages' changes as deltas applied at commit (see
+> `verification-backlog.md`). A rollback's frees and the close-time merge lock page 1 up front and read it under
+> the lock, never refusing. Pages appended past the end of the file are the user's own (the map gave them); a
+> zero page appended only to keep the file contiguous is not written once the file reaches it, and growth and a
+> failed publication's cut-back are measured against the file. **A long-value read takes no shared byte** — see
+> [locking.md §4](../format/locking.md) for what that leaves unsafe. What ships today is the deferred-write
 > overlay, the write-conflict check on commit, process-local page locks, the user registration, the commit slots,
-> ACE's page write locks and its table locks.
+> ACE's page write locks, its table locks, and its TDEF-first and page-1 discipline for counters and allocation.
 
 This is the ground-up design for LibRed's transaction support and the concurrency
 infrastructure it sits on. It replaced the ad-hoc page-level undo log that used to be in
@@ -403,7 +418,10 @@ don't move.
   before the scope is taken (it touches no pages). See `ReaderWriterIsolationTests`.
 - **Implicit-txn cost:** per-statement begin/commit must be cheap for read-only statements
   (no dirty pages ⇒ commit is just lock release). A read-only statement, and a commit with
-  nothing in its overlay, publishes no batch and so never touches the commit slot.
+  nothing in its overlay, publishes no batch and so never touches the commit slot; nor does a commit whose pages
+  all hold what is committed (`PublishBatch` writes only a page it changes). A rollback's own writes — the counters
+  it keeps, the global maps put right — are gathered in a transaction of their own and published as at most two
+  batches, the AutoNumbers drawn first, as ACE's failed statements write them ([locking.md §6](../format/locking.md)).
 - **Deadlock policy:** within a process there is a global writer lock (one writing statement at a time per
   file), so no page-order deadlock exists between LibRed's own connections. Against another user, two writers
   each holding a page the other wants do not deadlock forever: each waits out ACE's retries (about 2 s) and fails

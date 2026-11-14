@@ -51,7 +51,11 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         // final id drives both the row encoding and the high-water update below. A row refused from here on
         // keeps its drawn ids used, which a rollback writes back (PageChannel.KeepThroughRollback).
         // The definition page is read once: its counters are drawn from and advanced in this one copy, and
-        // nothing between here and UpdateTdefCounters writes that page.
+        // nothing between here and UpdateTdefCounters writes that page. It is locked before it is read, and before
+        // any other page of the row is touched, as ACE's INSERT takes the table's definition page first and reads it
+        // again under the lock (locking.md §4): two users never draw from one counter, and a statement that gets the
+        // page only after another user committed is run again before it has done anything else.
+        _channel.LockForUpdate(_table.DefinitionPage);
         byte[] tdef = _channel.ReadPageShared(_table.DefinitionPage).Span.ToArray();
         bool[]? generatedAutoNumbers = AssignAutoNumbers(format, values, tdef);
         validate?.Invoke(values);
@@ -423,6 +427,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         byte[] tdef = ArrayPool<byte>.Shared.Rent(format.PageSize);
         try
         {
+            _channel.LockForUpdate(_table.DefinitionPage);   // its counters: locked, then read (see Insert)
             _channel.ReadPage(_table.DefinitionPage, tdef);
             TableDefinition.WriteRowCount(tdef, format, TableDefinition.ReadRowCount(tdef, format) - 1);
 
@@ -496,6 +501,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         byte[] tdef = ArrayPool<byte>.Shared.Rent(format.PageSize);
         try
         {
+            _channel.LockForUpdate(_table.DefinitionPage);   // its counters: locked, then read (see Insert)
             _channel.ReadPage(_table.DefinitionPage, tdef);
             TableDefinition.WriteRowCount(tdef, format, 0);
             foreach (IndexDef index in realIndexes)
@@ -515,6 +521,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         byte[] tdef = ArrayPool<byte>.Shared.Rent(format.PageSize);
         try
         {
+            _channel.LockForUpdate(_table.DefinitionPage);   // its counters: locked, then read (see Insert)
             _channel.ReadPage(_table.DefinitionPage, tdef);
             (int total, int unique) = TableDefinition.ReadIndexCounts(tdef, format, index.RealIndexOrdinal);
             if (total == 0) return;
@@ -1445,6 +1452,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
     {
         HashSet<int> gaining = IndexesGainingANewKey(values, refusing);
         if (gaining.Count == 0) return;
+        _channel.LockForUpdate(_table.DefinitionPage);   // its counters: locked, then read (see Insert)
         WriteNewKeyCounts(_channel.ReadPageShared(_table.DefinitionPage).Span.ToArray(), gaining);
         _channel.AcceptCounters();
     }

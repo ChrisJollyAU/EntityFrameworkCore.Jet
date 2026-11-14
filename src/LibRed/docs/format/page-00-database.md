@@ -370,6 +370,12 @@ across a session — reads and an open/close leave it, an `INSERT` raises it by 
 cannot be read meanwhile, [locking.md §6](locking.md#6-commit-slots-and-page-writes)). The slot of an exclusive
 holder and of a second concurrent user during a multi-page batch are not known.
 
+**A failed statement** moves the slot only by the batches it still writes (measured: ACE 16): none for a
+single-row `UPDATE` refused at a unique index; one, after the statement has returned, for a multi-row `UPDATE`
+that fails part-way, plus one at close when it had reserved a run of pages; one for a refused `INSERT`'s
+AutoNumber, written before the statement returns, and one more after it when the row was refused at a unique
+index. The cases are in [locking.md §6](locking.md#6-commit-slots-and-page-writes).
+
 **Idle reads.** An idle shared user reads the whole 512-byte table every 5 seconds (measured); what it compares
 and which process's read leads to a cache refresh are not known.
 

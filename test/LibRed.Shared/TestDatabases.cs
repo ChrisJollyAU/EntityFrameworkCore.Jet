@@ -52,6 +52,23 @@ internal static class TestDatabases
         stream.Write(bytes);
     }
 
+    /// <summary>Asserts that <paramref name="after"/> is <paramref name="before"/> byte for byte but for one user's
+    /// commit slot (page 0's commit-byte table), whose counter is <paramref name="rise"/> higher — a session's batches
+    /// that left every page as it was.</summary>
+    public static void AssertUnchangedButOneCommitSlotRisenBy(byte[] before, byte[] after, int rise)
+    {
+        using var stream = new MemoryStream(before, writable: false);
+        Formats.JetFormatBase format = Formats.JetFormatBase.Detect(stream);
+        Assert.Equal(before.Length, after.Length);
+        int[] differing = [.. Enumerable.Range(0, before.Length).Where(i => before[i] != after[i])];
+        Assert.NotEmpty(differing);
+        int slot = format.CommitByteTableOffset
+            + (differing[0] - format.CommitByteTableOffset) / format.CommitByteSlotSize * format.CommitByteSlotSize;
+        Assert.InRange(differing[0], format.CommitByteTableOffset, format.PageSize - 1);
+        Assert.All(differing, i => Assert.InRange(i, slot, slot + format.CommitByteSlotSize - 1));
+        Assert.Equal(BitConverter.ToUInt16(before, slot) + rise, BitConverter.ToUInt16(after, slot));
+    }
+
     /// <summary>Points page 0's global map pointer at <paramref name="pointerOffset"/> at
     /// <paramref name="page"/>:<paramref name="row"/>, under the header mask.</summary>
     public static void WriteMapPointer(string path, int pointerOffset, int row, int page)

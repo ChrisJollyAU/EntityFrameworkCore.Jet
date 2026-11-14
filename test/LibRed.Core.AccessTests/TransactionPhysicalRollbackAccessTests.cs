@@ -44,7 +44,10 @@ public class TransactionPhysicalRollbackAccessTests
                 Assert.Equal("base-10", Value(table, table.SeekRows(restoredPk, [10]).Single(), "S"));
             }
 
-            Assert.Equal(before, File.ReadAllBytes(path));
+            // ACE's own session on this file — BEGIN, the same 1290 INSERTs, ROLLBACK, close — leaves every page as it
+            // was and its commit slot two higher (measured: 750 to 752): a batch writing page 1 when the INSERTs reserve
+            // a run, which the rollback keeps, and one at close giving the run back.
+            TestDatabases.AssertUnchangedButOneCommitSlotRisenBy(before, File.ReadAllBytes(path), 2);
             using var connection = AceTestDatabase.Open(path);
             AssertScalar(connection, "SELECT COUNT(*) FROM SplitTxn", 10);
             AssertScalar(connection, "SELECT COUNT(*) FROM SplitTxn WHERE Id = 1300", 0);
@@ -152,7 +155,10 @@ public class TransactionPhysicalRollbackAccessTests
                 Assert.Equal(ownedBefore, table.UsageMap.DataPages().ToArray());
             }
 
-            Assert.Equal(before, File.ReadAllBytes(path));
+            // ACE's own session on this file — BEGIN, the same UPDATE and INSERT, ROLLBACK, close — leaves every page as
+            // it was and its commit slot two higher (measured: 741 to 743): a batch writing page 1 when the long values
+            // reserve a run, which the rollback keeps, and one at close giving the run back.
+            TestDatabases.AssertUnchangedButOneCommitSlotRisenBy(before, File.ReadAllBytes(path), 2);
             using var connection = AceTestDatabase.Open(path);
             AssertScalar(connection, "SELECT COUNT(*) FROM LvalTxn", 1);
             Assert.Equal(original, ExecuteScalar(connection, "SELECT M FROM LvalTxn WHERE Id = 1"));

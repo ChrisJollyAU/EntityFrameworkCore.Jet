@@ -54,6 +54,15 @@ internal sealed class PageCache : IDisposable
     private readonly Dictionary<int, LinkedListNode<Entry>> _map = [];
     private readonly LinkedList<Entry> _lru = new(); // first = most-recently-used
 
+    // The images a refresh at a newly taken lock dropped, set aside for the rest of the writing scope: what this process
+    // may have read of each page before another user's commit, which the page is compared with when it is locked (see
+    // ImageBeforeOthersCommitted). `_evictions` counts pages evicted, and `_scopeEvictions` the count when the scope
+    // began: a page evicted since may have been read and is in neither set, so the comparison cannot be trusted then.
+    // All under _gate, but for the reset at a scope's start, made under the exclusive publish gate.
+    private Dictionary<int, byte[]>? _setAside;
+    private long _evictions;
+    private long _scopeEvictions;
+
     // This process's registration as a Jet user of the file (null when it has none: an exclusive open, off Windows,
     // or a lock file that could not be opened). It lives here because a Jet user is per process per file, exactly
     // the scope and lifetime of this pool: registered by the first channel to open the file, deregistered when the
@@ -232,6 +241,7 @@ internal sealed class PageCache : IDisposable
                 LinkedListNode<Entry> lruNode = _lru.Last!;
                 _lru.RemoveLast();
                 _map.Remove(lruNode.Value.Page);
+                _evictions++;
             }
         }
     }
@@ -268,8 +278,17 @@ internal sealed class PageCache : IDisposable
         try
         {
             // The outermost scope looks at the other users' slots first, so a commit validates and a statement
-            // reads against what they have written since (see RefreshIfOthersCommitted).
-            if (_publishGate.RecursiveWriteCount == 1) RefreshIfOthersCommitted();
+            // reads against what they have written since (see RefreshIfOthersCommitted). What an earlier scope set
+            // aside is nothing this one has read.
+            if (_publishGate.RecursiveWriteCount == 1)
+            {
+                lock (_gate)
+                {
+                    _setAside = null;
+                    _scopeEvictions = _evictions;
+                }
+                RefreshIfOthersCommitted();
+            }
             return action();
         }
         finally { _publishGate.ExitWriteLock(); }
@@ -332,26 +351,60 @@ internal sealed class PageCache : IDisposable
     /// images the drop would pull from under them. The caller then gives up the scope, and the next one's look drops
     /// the cache (<see cref="ReadConsistent{T}"/>).</remarks>
     /// <returns>Whether another user had committed — and, outside a shared scope, the cache was dropped.</returns>
-    public bool RefreshIfOthersCommitted()
+    public bool RefreshIfOthersCommitted() => Refresh(setAside: false) is not Freshness.Unchanged;
+
+    /// <summary>At a lock this process has just taken on <paramref name="page"/>, which no other user can now change
+    /// until it is let go: refreshes as <see cref="RefreshIfOthersCommitted"/> does, but sets the dropped images aside
+    /// for the rest of the writing scope rather than discarding them, and hands back in <paramref name="before"/> the
+    /// image of the page this process held before any such drop in the scope — what the caller may have read of it,
+    /// to compare with the page as the file now has it (null: it held none, so nothing it read of the page can be
+    /// stale). That is ACE's discipline (locking.md §4): lock the page, read it again, then change it.</summary>
+    /// <returns>False when the comparison cannot be trusted and the caller must take what it read as stale: inside a
+    /// shared scope after another user committed (nothing can be dropped there), or when a page has been evicted since
+    /// the scope began, so may have been read and is in neither set.</returns>
+    public bool RefreshAtLock(int page, out byte[]? before)
     {
-        if (_database is null) return false;
+        before = null;
+        Freshness freshness = Refresh(setAside: true);
+        if (freshness is Freshness.Unknown) return false;
+        lock (_gate)
+        {
+            if (_setAside is not null && _setAside.Remove(page, out byte[]? image)) before = image;
+        }
+        return true;
+    }
+
+    private enum Freshness { Unchanged, SetAside, Unknown }
+
+    private Freshness Refresh(bool setAside)
+    {
+        if (_database is null) return Freshness.Unchanged;
         if (_publishGate.IsReadLockHeld && !_publishGate.IsWriteLockHeld)
-            return OthersCommitted(stackalloc byte[_seenCommitTable!.Length]);
+            return OthersCommitted(stackalloc byte[_seenCommitTable!.Length]) ? Freshness.Unknown : Freshness.Unchanged;
         _publishGate.EnterWriteLock();
         try
         {
             Span<byte> table = stackalloc byte[_seenCommitTable!.Length];
-            if (!OthersCommitted(table)) return false;
+            if (!OthersCommitted(table)) return Freshness.Unchanged;
 
+            bool trusted;
             lock (_gate)
             {
+                trusted = setAside && _evictions == _scopeEvictions;
+                if (trusted)
+                {
+                    // The oldest image of a page wins: it is the one the scope may have read before the first drop.
+                    _setAside ??= [];
+                    foreach (Entry entry in _lru) _setAside.TryAdd(entry.Page, entry.Bytes);
+                }
+                else _setAside = null;
                 _map.Clear();
                 _lru.Clear();
             }
             SetFileLength(RandomAccess.GetLength(_database));
             MarkSchemaChanged();
             table.CopyTo(_seenCommitTable);
-            return true;
+            return trusted ? Freshness.SetAside : Freshness.Unknown;
         }
         finally { _publishGate.ExitWriteLock(); }
     }
