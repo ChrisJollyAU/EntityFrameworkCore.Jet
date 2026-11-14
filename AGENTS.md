@@ -185,7 +185,11 @@ test/
 
 tools/
   sortkey-table/        Generates the Windows NLS sort-weight table LibRed's index keys use
-  JetLockTrace/         Decodes ACE .laccdb/.ldb locking from a ProcMon capture
+  JetLockTrace/         Decodes ACE .laccdb/.ldb locking from a ProcMon capture; also `probe` (who is
+                        connected), `hold` (take one lock as another user) and `watch` (sample the
+                        commit slots)
+  JetLockScenario/      Drives real ACE over OLE DB one command at a time and marks each step in a
+                        ProcMon trace — for measuring ACE's locking            [Windows + ACE]
   Resources.tt          Resource generation template
 ```
 
@@ -332,6 +336,8 @@ the `appendix-structures.md` bare field-layout reference. It is the source of tr
 updated as the format understanding grows. (`docs/jet-ace-file-format.md` is now just a redirect
 stub to that folder.) Alongside it: `docs/functions.md` catalogs the supported VBA/Access function surface,
 `docs/design/transactions.md` covers the deferred-write page overlay,
+`docs/format/locking.md` is the measured multi-user protocol — the lock file, lock offsets, commit slots — and
+what LibRed does and does not do of it,
 `docs/design/index-key-checksum.md` records how the index-key truncation checksum was pinned down (and why the
 rule it replaced looked verified for years), and `docs/verification-backlog.md` lists every claim the docs
 still call unverified, with how to settle each.
@@ -352,13 +358,41 @@ parser: the lexer/parser are pre-generated and committed under `LibRed.Sql/Gramm
 (managed `Antlr4.Runtime.Standard` runtime only, no build-time codegen), regenerated via
 `LibRed.Sql/Grammar/generate.ps1` after editing `AccessSql.g4`.
 
-> **LibRed is a single-writer engine.** It tolerates extra open handles (a `.accdb` is a shared-file database and
-> EF's own test infra keeps a store connection open), but there is no lock file and no cross-process page/record locking (its page locks are process-local), so
-> two concurrent writers corrupt the file. Transactions use a **deferred-write overlay** per `PageChannel`, not
-> an undo log: writes buffer until commit and publish under a lock, so a reader cannot see another handle's
-> uncommitted pages and a rollback cannot discard another channel's committed work, and a stale writer fails
-> commit with a write-conflict error. See `src/LibRed/README.md` for the full statement of what is and isn't safe
-> before designing anything concurrent on top of it.
+> **LibRed takes part in Jet's multi-user locking on Windows, and nowhere else.** On a shared (non-exclusive)
+> open on Windows it does what ACE does, as measured against ACE 16 (`src/LibRed/docs/format/locking.md` is the
+> specification): it registers as a Jet user in the `.laccdb`/`.ldb` beside the database; writes its commit slot on
+> page 0 around every batch of page writes; reads the slot table at the start of each statement and drops its
+> cached pages when another user's slot has moved; takes ACE's exclusive page lock when a statement first changes
+> a page (the table's TDEF page first for an INSERT, the global maps' page before reserving pages); and takes
+> table locks — shared for reads and writes, exclusive for a design change. A refused lock is retried as ACE
+> retries it and then fails with ACE's own message, and a statement that got a lock on a page another user has
+> since changed is rolled back and run again. So LibRed and Access can write one file at the same time.
+>
+> - **Where it lives:** `LibRed.Core/IO/JetLockLayout.cs` (the one copy of the lock offsets), `JetLockFile.cs`
+>   (the OS range-lock primitive), `JetUserRegistration.cs` (the user, and the per-process table of held locks),
+>   and the lock and publish paths in `PageChannel` / `PageCache` (`PublishBatch` is the one place a batch and
+>   its slot writes go through). One Jet user per process per file, held by the `PageCache`. `ILockManager` /
+>   `MonitorLockManager` are only the in-process seam.
+> - **What takes no part:** an exclusive open (no lock file, no range locks — the OS share mode does it, as
+>   ACE's does); every non-Windows platform; and a channel whose lock file could not be opened. There LibRed is
+>   still a **single-writer** engine, and two processes writing one file corrupt it.
+> - **Inside one process nothing changed:** connections stay optimistic among themselves. Transactions use a
+>   **deferred-write overlay** per `PageChannel`, not an undo log: writes buffer until commit and publish under a
+>   lock, so a reader cannot see another handle's uncommitted pages, and a stale writer fails commit with a
+>   write-conflict error.
+> - **Still unlike ACE, or unsafe, even on Windows:** a LibRed transaction that inserted holds the TDEF page and
+>   page 1 until it commits, where ACE lets them go after the statement; long-value reads take no lock; rows
+>   enumerated after a statement has returned, and Core API calls made outside both a statement and a
+>   transaction, hold no table lock. Read `locking.md` and `docs/verification-backlog.md` before relying on any
+>   of it — they also list every behaviour chosen without a measurement.
+> - **Measuring and testing it:** ACE's behaviour is measured from a ProcMon capture decoded by
+>   `tools/JetLockTrace`, with `tools/JetLockScenario` driving ACE (the user runs ProcMon). A plain test plays
+>   another user with a second `JetLockFile` handle, guarded to Windows; a test against real ACE goes in the
+>   `*.AccessTests` projects. ACE's autocommit statements keep their locks for about half a second after they
+>   return, and sometimes until ACE's next statement — a test that waits on an idle ACE will time out.
+>
+> See `src/LibRed/README.md` for the full statement of what is and isn't safe before designing anything concurrent
+> on top of it.
 
 ## Working in This Repo
 
