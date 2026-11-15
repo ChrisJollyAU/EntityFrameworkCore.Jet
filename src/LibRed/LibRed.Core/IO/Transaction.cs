@@ -54,6 +54,10 @@ public sealed class Transaction
     /// returned true.</summary>
     internal void RecordBeforeImage(int page, byte[]? priorOverlay) => _frames[^1].Before[page] = priorOverlay;
 
+    /// <summary>Whether a rollback to an open frame would put an image of <paramref name="page"/> back into the
+    /// overlay — some frame recorded one as the page's before-image — rather than only drop the page from it.</summary>
+    internal bool RestoresImageOf(int page) => _frames.Any(f => f.Before.TryGetValue(page, out byte[]? image) && image is not null);
+
     /// <summary>Opens a savepoint over the given current logical page count; returns a handle for
     /// <see cref="TakeForRollbackTo"/> / <see cref="Release"/>.</summary>
     internal Savepoint Save(int currentPageCount, int currentReleaseCount = 0, int currentDependencyCount = 0,

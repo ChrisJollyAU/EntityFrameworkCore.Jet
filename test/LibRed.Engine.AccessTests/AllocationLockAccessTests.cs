@@ -50,8 +50,10 @@ public class AllocationLockAccessTests
                 engine.ExecuteNonQuery("BEGIN TRANSACTION");
                 engine.ExecuteNonQuery("INSERT INTO T (Who) VALUES ('libred')");
 
-                // LibRed holds the table's definition page to COMMIT (ACE lets its own go about 500 ms after the
-                // INSERT; LibRed does not, see verification-backlog.md): ACE's INSERT is refused with 3218.
+                // ACE's INSERT is refused with 3218, as it is beside another ACE user's open transaction that inserted
+                // into the table: LibRed has written the AutoNumber it drew and let the definition page go, as ACE's
+                // transaction does, so ACE draws the next id and is refused at the data and index pages LibRed holds to
+                // COMMIT, its refused batch writing the id it drew (measured ACE beside ACE, locking.md §5).
                 var refused = Assert.Throws<OleDbException>(() => Exec(ace, "INSERT INTO T (Who) VALUES ('ace')"));
                 Assert.Equal("3218", refused.Errors[0].SQLState);
 
@@ -59,13 +61,189 @@ public class AllocationLockAccessTests
                 Exec(ace, "INSERT INTO T (Who) VALUES ('ace')");
                 Assert.True(Poll(AceSees, () => Count(ace) == 3), "ACE did not read every row.");
                 Assert.True(Poll(AceSees, () => Ids(engine).Length == 3), "LibRed did not read ACE's row.");
-                int[] ids = Ids(engine);
-                Assert.Equal(ids.Length, ids.Distinct().Count());
+                // The id ACE's refused INSERT drew is never issued, as beside an ACE transaction (measured: the other
+                // user's refused INSERT drew 202 beside the transaction's 201, and the transaction's COMMIT kept it).
+                Assert.Equal([1, 2, 4], Ids(engine));
             }
             AssertOpensCleanly(path, 3);
         }
         finally { TemporaryDatabase.Delete(path); }
     }
+
+    // The reverse: ACE's INSERT in its open transaction writes the AutoNumber it drew and lets the table's definition page
+    // go about 500 ms after (measured, locking.md §5); LibRed's INSERT into the table then draws the next id and is refused
+    // with 3218 at the data and index pages ACE holds to COMMIT, keeping the id it drew, as another ACE user's is.
+    [Fact]
+    public void An_INSERT_in_ACEs_open_transaction_lets_LibRed_draw_the_next_AutoNumber_and_keeps_its_INSERT_out_until_COMMIT()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-alloclock-ace-");
+        try
+        {
+            using (JetDatabase database = JetDatabase.Open(path, readOnly: false))
+            {
+                var engine = new QueryEngine(database);
+                engine.ExecuteNonQuery("CREATE TABLE T (Id AUTOINCREMENT PRIMARY KEY, Who TEXT(10), A MEMO)");
+                engine.ExecuteNonQuery("INSERT INTO T (Who) VALUES ('first')");
+                using OleDbConnection ace = AceTestDatabase.Open(path);
+                Assert.Equal(1, Count(ace));
+
+                using (OleDbTransaction transaction = ace.BeginTransaction())
+                {
+                    using (OleDbCommand insert = ace.CreateCommand())
+                    {
+                        insert.Transaction = transaction;
+                        insert.CommandText = "INSERT INTO T (Who) VALUES ('ace')";
+                        insert.ExecuteNonQuery();
+                        Thread.Sleep(1000);   // ACE's early write, about 500 ms after the INSERT
+                        insert.CommandText = "SELECT COUNT(*) FROM T";
+                        insert.ExecuteScalar();
+                    }
+
+                    var refused = Assert.Throws<InvalidOperationException>(() => engine.ExecuteNonQuery("INSERT INTO T (Who) VALUES ('libred')"));
+                    Assert.Equal(CurrentlyLocked, refused.Message);
+                    transaction.Commit();
+                }
+
+                Assert.True(Poll(AceSees, () => Ids(engine).Length == 2), "LibRed did not read ACE's row.");
+                Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (Who) VALUES ('libred')"));
+                // The id LibRed's refused INSERT drew is never issued, as another ACE user's is not.
+                Assert.Equal([1, 2, 4], Ids(engine));
+                Assert.Equal(["first", "ace", "libred"], Whos(engine, "T"));
+                Assert.True(Poll(AceSees, () => Count(ace) == 3), "ACE did not read LibRed's row.");
+            }
+            AssertOpensCleanly(path, 3);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // LibRed's INSERT in an open transaction takes a new run of pages; ACE's first INSERT of its session with a long value
+    // then reserves a run of its own under page 1's lock (measured: an ACE session's first such INSERT writes page 1).
+    // LibRed has written page 1 and let it go as the statement returned, as ACE lets its own go about 500 ms after an
+    // INSERT in a transaction, so ACE's INSERT goes ahead at once, while LibRed's transaction is still open.
+    [Fact]
+    public void An_INSERT_in_LibReds_open_transaction_lets_ACE_reserve_pages_for_another_table_before_COMMIT()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-alloclock-ace-");
+        try
+        {
+            using (JetDatabase database = JetDatabase.Open(path, readOnly: false))
+            {
+                var engine = new QueryEngine(database);
+                CreateTwoTables(engine);
+                using OleDbConnection ace = AceTestDatabase.Open(path);
+                Assert.Equal(1, Count(ace));
+
+                engine.ExecuteNonQuery("BEGIN TRANSACTION");
+                engine.ExecuteNonQuery("INSERT INTO T (Who, A) VALUES ('libred', @a)", RunOfPages);
+                var clock = Stopwatch.StartNew();
+                AceInsertInto(ace, "U");
+                Assert.True(clock.ElapsedMilliseconds < 1000, $"ACE's INSERT took {clock.ElapsedMilliseconds} ms.");
+
+                engine.ExecuteNonQuery("COMMIT");
+                Assert.True(Poll(AceSees, () => Count(ace) == 2), "ACE did not read LibRed's row.");
+                // ACE's write may be held until its next statement (locking.md §5): Count gave it one.
+                Assert.True(Poll(AceSees, () => Count(ace) >= 0 && Whos(engine, "U").Length == 1), "LibRed did not read ACE's row.");
+                Assert.Equal(["ace"], Whos(engine, "U"));
+                Assert.Equal(RunOfPagesLength, MemoLength(engine, "T", "libred"));
+            }
+            AssertOpensCleanly(path, 2, uRows: 1);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // The reverse: ACE's INSERT in its open transaction takes a run, and lets page 1 go about 500 ms after (measured);
+    // LibRed's INSERT into another table then reserves a run of its own before ACE commits.
+    [Fact]
+    public void An_INSERT_in_ACEs_open_transaction_lets_LibRed_reserve_pages_for_another_table_before_COMMIT()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-alloclock-ace-");
+        try
+        {
+            using (JetDatabase database = JetDatabase.Open(path, readOnly: false))
+            {
+                var engine = new QueryEngine(database);
+                CreateTwoTables(engine);
+                using OleDbConnection ace = AceTestDatabase.Open(path);
+                Assert.Equal(1, Count(ace));
+
+                using (OleDbTransaction transaction = ace.BeginTransaction())
+                {
+                    AceInsertInto(ace, "T", transaction);
+                    Thread.Sleep(1000);
+                    var clock = Stopwatch.StartNew();
+                    engine.ExecuteNonQuery("INSERT INTO U (Who, A) VALUES ('libred', @a)", RunOfPages);
+                    Assert.True(clock.ElapsedMilliseconds < 1000, $"LibRed's INSERT took {clock.ElapsedMilliseconds} ms.");
+                    transaction.Commit();
+                }
+                Assert.True(Poll(AceSees, () => Whos(engine, "T").Length == 2), "LibRed did not read ACE's row.");
+                Assert.Equal(["libred"], Whos(engine, "U"));
+            }
+            AssertOpensCleanly(path, 2, uRows: 1);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // LibRed's transaction rolled back after its run went out early and ACE reserved and wrote pages of its own meanwhile:
+    // the rollback gives back only the pages LibRed's undone INSERT took, ACE's rows stay, and the file opens cleanly
+    // with every page owned once.
+    [Fact]
+    public void A_ROLLBACK_of_LibReds_transaction_after_ACE_inserted_meanwhile_leaves_ACEs_rows_and_pages()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-alloclock-ace-");
+        try
+        {
+            using (JetDatabase database = JetDatabase.Open(path, readOnly: false))
+            {
+                var engine = new QueryEngine(database);
+                CreateTwoTables(engine);
+                using OleDbConnection ace = AceTestDatabase.Open(path);
+                Assert.Equal(1, Count(ace));
+
+                engine.ExecuteNonQuery("BEGIN TRANSACTION");
+                engine.ExecuteNonQuery("INSERT INTO T (Who, A) VALUES ('libred', @a)", RunOfPages);
+                AceInsertInto(ace, "U");
+                engine.ExecuteNonQuery("ROLLBACK");
+                AceInsertInto(ace, "U");
+                Thread.Sleep(1000);   // ACE's last write may wait (locking.md §5)
+                Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (Who, A) VALUES ('after', @a)", RunOfPages));
+
+                // ACE's write may be held until its next statement (locking.md §5): each poll gives it one.
+                Assert.True(Poll(AceSees, () => Count(ace) >= 0 && Whos(engine, "U").Length == 2), "LibRed did not read ACE's rows.");
+                Assert.Equal(["first", "after"], Whos(engine, "T"));
+                Assert.True(Poll(AceSees, () => Count(ace) == 2), "ACE did not read LibRed's row.");
+            }
+            AssertOpensCleanly(path, 2, uRows: 2);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // A long value that takes more pages than one run of 32 holds, so the INSERT reserves a run of its own.
+    private const int RunOfPagesLength = 160_000;
+
+    private static Dictionary<string, object?> RunOfPages => new() { ["@a"] = new string('m', RunOfPagesLength) };
+
+    // T with one row, and U empty, both with a long-value column.
+    private static void CreateTwoTables(QueryEngine engine)
+    {
+        engine.ExecuteNonQuery("CREATE TABLE T (Id AUTOINCREMENT PRIMARY KEY, Who TEXT(10), A MEMO)");
+        engine.ExecuteNonQuery("CREATE TABLE U (Id AUTOINCREMENT PRIMARY KEY, Who TEXT(10), A MEMO)");
+        engine.ExecuteNonQuery("INSERT INTO T (Who) VALUES ('first')");
+    }
+
+    private static void AceInsertInto(OleDbConnection ace, string table, OleDbTransaction? transaction = null)
+    {
+        using OleDbCommand command = ace.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"INSERT INTO {table} (Who, A) VALUES ('ace', ?)";
+        command.Parameters.Add("a", OleDbType.LongVarWChar).Value = LongMemo;
+        command.ExecuteNonQuery();
+    }
+
+    private static string[] Whos(QueryEngine engine, string table) =>
+        [.. engine.ExecuteQuery($"SELECT Who FROM {table} ORDER BY Id").Rows.Select(r => (string)r[0]!)];
+
+    private static int MemoLength(QueryEngine engine, string table, string who) =>
+        ((string)engine.ExecuteQuery($"SELECT A FROM {table} WHERE Who = '{who}'").Rows.Single()[0]!).Length;
 
     [Fact]
     public void ACE_inserting_while_LibRed_creates_and_drops_tables_loses_nothing() => InsertBesideDdl(aceInserts: true);
@@ -281,7 +459,7 @@ public class AllocationLockAccessTests
 
     // Read by each engine afresh once both have closed: every row, distinct ids, and no page owned twice or both owned
     // and free.
-    private static void AssertOpensCleanly(string path, int rows)
+    private static void AssertOpensCleanly(string path, int rows, int? uRows = null)
     {
         using (OleDbConnection ace = AceTestDatabase.Open(path))
         {
@@ -289,9 +467,15 @@ public class AllocationLockAccessTests
             using OleDbCommand command = ace.CreateCommand();
             command.CommandText = "SELECT COUNT(*) FROM (SELECT DISTINCT Id FROM T)";
             Assert.Equal(rows, Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+            if (uRows is { } u)
+            {
+                command.CommandText = "SELECT COUNT(*) FROM U";
+                Assert.Equal(u, Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+            }
         }
         using JetDatabase reopened = JetDatabase.Open(path, readOnly: false);
         Assert.Equal(rows, Ids(new QueryEngine(reopened)).Length);
+        if (uRows is { } us) Assert.Equal(us, Whos(new QueryEngine(reopened), "U").Length);
         TestDatabases.AssertPageOwnership(reopened);
     }
 

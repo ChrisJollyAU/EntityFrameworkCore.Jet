@@ -365,10 +365,13 @@ Format-level detail on each on-disk gap lives in `docs/format/`.
   LibRed and Access **inserting into one table at the same time**, long values included, draw distinct
   AutoNumbers, lose no row and never take the same page (measured against ACE 16, as is either inserting while
   the other creates and drops tables). A lock got after another user's commit re-runs the statement only when
-  that page itself changed. It takes **no long-value read lock**, and inside an explicit transaction it holds an
-  `INSERT`'s definition page and page 1 until `COMMIT` (Access lets them go shortly after the `INSERT`): while
-  such a LibRed transaction is open, Access's `INSERT`s into that table are refused with 3218
-  (`docs/format/locking.md` §4). After any user's `CREATE INDEX`, Access refuses reads of that table with 3159
+  that page itself changed. Inside an explicit transaction it writes the pages a statement reserved and the
+  AutoNumbers it drew, and lets page 1 and the table's definition page go, as the statement returns, as Access
+  does shortly after an `INSERT`; its `COMMIT` locks the definition page again and adds its row and index counts
+  to the page as the file has it then, as Access's does. So Access can allocate meanwhile, and its `INSERT` into
+  a table the open transaction has inserted into draws the next AutoNumber and is refused with 3218 at the pages
+  the transaction holds, as it is between two Access users. It takes **no long-value read lock**
+  (`docs/format/locking.md` §4, §5). After any user's `CREATE INDEX`, Access refuses reads of that table with 3159
   for up to 5 s — Access's own behaviour between two Access users. Off Windows it registers nothing, watches no
   slot and takes no lock, and two processes there are unsafe. Safe: any number of readers with no writer; one
   writer plus readers when access is **serialized**; concurrent row `UPDATE`s, concurrent `INSERT`s, and a

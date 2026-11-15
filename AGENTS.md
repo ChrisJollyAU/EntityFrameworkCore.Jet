@@ -380,8 +380,10 @@ parser: the lexer/parser are pre-generated and committed under `LibRed.Sql/Gramm
 >   **deferred-write overlay** per `PageChannel`, not an undo log: writes buffer until commit and publish under a
 >   lock, so a reader cannot see another handle's uncommitted pages, and a stale writer fails commit with a
 >   write-conflict error.
-> - **Still unlike ACE, or unsafe, even on Windows:** a LibRed transaction that inserted holds the TDEF page and
->   page 1 until it commits, where ACE lets them go after the statement; long-value reads take no lock; rows
+> - **Still unlike ACE, or unsafe, even on Windows:** inside a transaction LibRed writes the AutoNumbers drawn and
+>   page 1 and lets them go as each statement returns, where ACE does about 500 ms after (and holds page 1 when
+>   the statement freed, grew or converted a map, and the TDEF page after a design change to it); a second
+>   connection in the same process is refused at COMMIT where ACE refuses its INSERT; long-value reads take no lock; rows
 >   enumerated after a statement has returned, and Core API calls made outside both a statement and a
 >   transaction, hold no table lock. Read `locking.md` and `docs/verification-backlog.md` before relying on any
 >   of it — they also list every behaviour chosen without a measurement.

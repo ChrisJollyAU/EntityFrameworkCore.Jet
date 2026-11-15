@@ -366,7 +366,9 @@ statement commit. A reference-form global map's selected bitmap is kept across r
 statement is rolled back, its writes go but the session's reservation stays, cleared bits and all, and is not
 refilled: the pages the undone writes took from it go to the free map, and the next request takes the
 reservation's next page. Those pages are left free below it, as zero pages once the file has grown past them. The
-undone writes are never on disk — inside a transaction ACE writes only the reservation's bits to the free map.
+undone writes are never on disk — inside a transaction ACE writes only the reservation's bits to the free map,
+about 500 ms after the statement that reserved it and before `COMMIT`; a `ROLLBACK` writes nothing, and the run,
+with the pages the undone writes took, goes back to the free map at close ([locking.md §5](locking.md#5-lifetimes)).
 This is allocation policy, not an on-disk requirement; see `docs/design/page-allocation.md`.
 
 > LibRed allocates **through** this map (the `PageChannel`'s single `PageAllocator`, which also owns file growth), found as ACE finds it — through page 0's `0x18`
@@ -376,7 +378,9 @@ This is allocation policy, not an on-disk requirement; see `docs/design/page-all
 > or group is found. Owner positions, groups and the selected global bitmap participate in transaction and
 > savepoint rollback; the shared reservation is kept as above, its bits cleared again over the restored map —
 > unless it lies in pages that map has no bit for, having come with map growth the rollback undid, when it goes
-> too (*unverified* against ACE). Free bits at the current file end are the pre-allocated growth region; LibRed materializes
+> too (*unverified* against ACE). A shared user writes the reservation's bits ahead of `COMMIT` too, as the
+> statement that took it returns, when all the statement changed of the map is pages taken; a rollback then frees
+> the pages its undone writes took in a write of its own, keeping the rest of the run. Free bits at the current file end are the pre-allocated growth region; LibRed materializes
 > intervening pages contiguously before returning the selected page — free, released, or reserved, its own
 > session's or, with the free bit clear, another handle's. A session's reservation and an owner's group take
 > pages from the map before they are written (measured: a reservation opened at the end of the file clears its

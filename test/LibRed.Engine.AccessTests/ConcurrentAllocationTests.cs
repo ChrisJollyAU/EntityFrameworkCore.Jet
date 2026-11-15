@@ -59,8 +59,13 @@ public class ConcurrentAllocationTests
         second.ExecuteNonQuery(
             $"INSERT INTO ConcurrentAlloc (K, M) VALUES ('stale', '{staleMemo}')");
 
+        // The second draws the id after the first's, which the first's INSERT wrote ahead of its COMMIT (locking.md §5).
+        // ACE, two connections in one process, this sequence on this table (measured —
+        // RollbackCounterProbeTest.Probe_ids_of_two_connections_when_one_rolls_back): the first draws 1, the second's
+        // INSERT draws 2 and is refused at once with 3218, and the retry below gets 3. LibRed's connections in one
+        // process stay optimistic among themselves, so its second INSERT goes ahead and is refused at COMMIT instead.
         Assert.Equal(1, Identity(first));
-        Assert.Equal(1, Identity(second));
+        Assert.Equal(2, Identity(second));
         Assert.True(firstDb.OpenTable("ConcurrentAlloc").Channel.PageCount > committedPages);
         Assert.True(secondDb.OpenTable("ConcurrentAlloc").Channel.PageCount > committedPages);
 

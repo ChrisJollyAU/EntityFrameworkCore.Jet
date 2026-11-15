@@ -119,29 +119,77 @@ public class AllocationLockStatementTests
         Assert.Equal([1, 2, 4], Ids(engine));
     }
 
+    // An INSERT inside a transaction, as ACE's (measured, locking.md §5): the table's definition page is written with the
+    // AutoNumber drawn and nothing else — not the row count, not the index counts — one more on the slot, and let go,
+    // before COMMIT; the row's data page stays held. LibRed writes it as the statement returns, where ACE writes it about
+    // 500 ms after. A ROLLBACK then leaves the file as it was but for that AutoNumber, as ACE's (locking.md §4).
     [Fact]
-    public void In_a_transaction_the_definition_page_is_held_to_ROLLBACK_and_the_AutoNumber_drawn_stays_drawn()
+    public void In_a_transaction_an_INSERT_writes_its_AutoNumber_and_lets_the_definition_page_go_and_ROLLBACK_keeps_it()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
         using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
         using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
         var engine = new QueryEngine(database);
-        (int tdef, _) = CreateTwoRows(engine, database);
+        (int tdef, int data) = CreateTwoRows(engine, database);
+        JetFormatBase format = FormatOf(copy.Path);
+        byte[] before = ReadRaw(copy.Path, tdef, format);
+        int slot = Slot(copy.Path, LibRedUser);
         using JetLockFile other = OtherUserOf(copy.Path);
 
         engine.ExecuteNonQuery("BEGIN TRANSACTION");
         engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('three')");
-        Assert.False(ExclusiveIsFree(other, tdef));
+        AssertOnlyAutoNumberMoved(before, ReadRaw(copy.Path, tdef, format), 3, format);
+        Assert.Equal(slot + 1, Slot(copy.Path, LibRedUser));
+        Assert.True(ExclusiveIsFree(other, tdef), "The definition page is still locked.");
+        Assert.False(ExclusiveIsFree(other, data), "The row's data page was let go before ROLLBACK.");
+
         engine.ExecuteNonQuery("ROLLBACK");
         AssertNothingLocked(other, copy.Path);
-        Assert.Equal(3, LastAutoNumber(copy.Path, tdef));
+        AssertOnlyAutoNumberMoved(before, ReadRaw(copy.Path, tdef, format), 3, format);
+        Assert.Equal([1, 2], Ids(engine));
 
         Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('four')"));
         Assert.Equal([1, 2, 4], Ids(engine));
+        LibRed.Core.Tests.TestDatabases.AssertPageOwnership(database);
     }
 
+    // Another user draws AutoNumbers, and deletes a row, while LibRed's transaction that inserted is open — as ACE lets
+    // another user do beside its own (measured, locking.md §5): LibRed's next INSERT in the transaction draws after
+    // theirs, and its COMMIT adds its row count to the one the file then has and keeps their AutoNumber, as ACE's COMMIT
+    // does. "The other user" takes the definition page's lock to write it, as ACE does.
     [Fact]
-    public void A_failed_INSERT_in_a_transaction_keeps_the_definition_page_an_earlier_INSERT_locked_until_COMMIT()
+    public void After_the_early_write_another_users_AutoNumbers_and_row_count_stay_through_the_INSERT_and_COMMIT_that_follow()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        (int tdef, _) = CreateTwoRows(engine, database);
+        JetFormatBase format = FormatOf(copy.Path);
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('three')");
+        OtherUserCounts(other, copy.Path, tdef, lastAutoNumber: 10, rowsChange: -1);
+        engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('four')");
+        Assert.Equal(11, LastAutoNumber(copy.Path, tdef));
+        Assert.Equal(1, RowCount(copy.Path, tdef));   // the other user's count; LibRed's two rows wait for COMMIT
+        OtherUserCounts(other, copy.Path, tdef, lastAutoNumber: 20, rowsChange: 0);
+        engine.ExecuteNonQuery("COMMIT");
+
+        AssertNothingLocked(other, copy.Path);
+        Assert.Equal(20, LastAutoNumber(copy.Path, tdef));
+        Assert.Equal(3, RowCount(copy.Path, tdef));
+        Assert.Equal([1, 2, 3, 11], Ids(engine));
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('five')"));
+        Assert.Equal(21, Ids(engine)[^1]);
+    }
+
+    // A design change to the table after the early write and another user's statement on it: the ALTER TABLE lays the
+    // definition page out afresh from the page as the file has it, so neither their AutoNumber nor their count is lost,
+    // and the transaction's own rows are counted onto theirs at COMMIT.
+    [Fact]
+    public void An_ALTER_TABLE_after_the_early_write_keeps_another_users_AutoNumber_and_row_count()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
         using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
@@ -152,11 +200,133 @@ public class AllocationLockStatementTests
 
         engine.ExecuteNonQuery("BEGIN TRANSACTION");
         engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('three')");
-        Assert.ThrowsAny<Exception>(() => engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (1, 'duplicate')"));
-        Assert.False(ExclusiveIsFree(other, tdef));
+        OtherUserCounts(other, copy.Path, tdef, lastAutoNumber: 10, rowsChange: -1);
+        engine.ExecuteNonQuery("ALTER TABLE T ADD COLUMN B LONG");
+        engine.ExecuteNonQuery("INSERT INTO T (A, B) VALUES ('four', 4)");
+        engine.ExecuteNonQuery("COMMIT");
+
+        AssertNothingLocked(other, copy.Path);
+        Assert.Equal(11, LastAutoNumber(copy.Path, tdef));
+        Assert.Equal(3, RowCount(copy.Path, tdef));
+        Assert.Equal([1, 2, 3, 11], Ids(engine));
+        Assert.Equal(4, Convert.ToInt32(engine.ExecuteQuery("SELECT B FROM T WHERE Id = 11").Rows.Single()[0]));
+        LibRed.Core.Tests.TestDatabases.AssertPageOwnership(database);
+    }
+
+    // A ROLLBACK after another user drew an AutoNumber beside the transaction: the file keeps theirs — the transaction's
+    // own was written before, and nothing of it is written again over theirs.
+    [Fact]
+    public void A_ROLLBACK_after_another_user_drew_meanwhile_keeps_their_AutoNumber()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        (int tdef, _) = CreateTwoRows(engine, database);
+        JetFormatBase format = FormatOf(copy.Path);
+        byte[] before = ReadRaw(copy.Path, tdef, format);
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('three')");
+        OtherUserCounts(other, copy.Path, tdef, lastAutoNumber: 10, rowsChange: 0);
+        engine.ExecuteNonQuery("ROLLBACK");
+
+        AssertNothingLocked(other, copy.Path);
+        AssertOnlyAutoNumberMoved(before, ReadRaw(copy.Path, tdef, format), 10, format);
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('four')"));
+        Assert.Equal([1, 2, 11], Ids(engine));
+    }
+
+    // A nested transaction rolled back after its INSERT's AutoNumber went out early, and another user drew one meanwhile:
+    // the rollback to its savepoint keeps both, and writes nothing over theirs.
+    [Fact]
+    public void A_nested_ROLLBACK_after_another_user_drew_meanwhile_keeps_their_AutoNumber()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        (int tdef, _) = CreateTwoRows(engine, database);
+        JetFormatBase format = FormatOf(copy.Path);
+        byte[] before = ReadRaw(copy.Path, tdef, format);
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('three')");
+        OtherUserCounts(other, copy.Path, tdef, lastAutoNumber: 10, rowsChange: 0);
+        engine.ExecuteNonQuery("ROLLBACK");
+        engine.ExecuteNonQuery("COMMIT");
+
+        AssertNothingLocked(other, copy.Path);
+        AssertOnlyAutoNumberMoved(before, ReadRaw(copy.Path, tdef, format), 10, format);
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('four')"));
+        Assert.Equal([1, 2, 11], Ids(engine));
+        LibRed.Core.Tests.TestDatabases.AssertPageOwnership(database);
+    }
+
+    // A failed statement after the early write and another user's draw, as ACE (measured on this table: another ACE
+    // user's refused INSERT drew 4, the failed INSERT then 5, and the COMMIT left 5 and counted its one row onto the
+    // file's): the failed INSERT locks the definition page again, draws after their AutoNumber and writes its own early;
+    // the COMMIT keeps it and counts the transaction's row onto the file's count.
+    [Fact]
+    public void A_failed_INSERT_after_another_user_drew_meanwhile_draws_after_them_and_COMMIT_keeps_it()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        (int tdef, _) = CreateTwoRows(engine, database);
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('three')");
+        // Their statement also took a row from the count (as their DELETE would, measured beside ACE's transaction).
+        OtherUserCounts(other, copy.Path, tdef, lastAutoNumber: 10, rowsChange: -1);
+        Assert.ThrowsAny<Exception>(() => engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('abcdefghijklmnopqrstuvwxyz')"));
+        Assert.Equal(11, LastAutoNumber(copy.Path, tdef));
+        Assert.Equal(1, RowCount(copy.Path, tdef));
+        Assert.True(ExclusiveIsFree(other, tdef), "The definition page is still locked.");
+        engine.ExecuteNonQuery("COMMIT");
+
+        AssertNothingLocked(other, copy.Path);
+        Assert.Equal(11, LastAutoNumber(copy.Path, tdef));
+        Assert.Equal(2, RowCount(copy.Path, tdef));
+        Assert.Equal([1, 2, 3], Ids(engine));
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('four')"));
+        Assert.Equal(12, Ids(engine)[^1]);
+        LibRed.Core.Tests.TestDatabases.AssertPageOwnership(database);
+    }
+
+    // A failed INSERT in a transaction, after one that succeeded, as ACE's (measured on this table and data: a value too
+    // long for its column): the AutoNumber it drew is written to the definition page ahead of COMMIT, with nothing else,
+    // and the page let go; the COMMIT counts the one row that stands.
+    [Fact]
+    public void A_failed_INSERT_in_a_transaction_writes_the_AutoNumber_it_drew_and_lets_the_definition_page_go()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        (int tdef, int data) = CreateTwoRows(engine, database);
+        JetFormatBase format = FormatOf(copy.Path);
+        byte[] before = ReadRaw(copy.Path, tdef, format);
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('three')");
+        Assert.ThrowsAny<Exception>(() => engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('abcdefghijklmnopqrstuvwxyz')"));
+        AssertOnlyAutoNumberMoved(before, ReadRaw(copy.Path, tdef, format), 4, format);
+        Assert.True(ExclusiveIsFree(other, tdef), "The definition page is still locked.");
+        Assert.False(ExclusiveIsFree(other, data), "The row's data page was let go before COMMIT.");
         engine.ExecuteNonQuery("COMMIT");
         AssertNothingLocked(other, copy.Path);
         Assert.Equal([1, 2, 3], Ids(engine));
+        Assert.Equal(4, LastAutoNumber(copy.Path, tdef));
+        Assert.Equal(3, RowCount(copy.Path, tdef));
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('five')"));
+        Assert.Equal(5, Ids(engine)[^1]);
     }
 
     [Fact]
@@ -224,6 +394,227 @@ public class AllocationLockStatementTests
         foreach (int page in reserved)
             Assert.True(ReadRaw(copy.Path, page, format).AsSpan().SequenceEqual(Marked(page, format)),
                 $"Page {page}, which the other user reserved and wrote, was written over.");
+    }
+
+    // An INSERT inside a transaction that takes a new run of pages: as ACE (measured, locking.md §5), page 1 is written
+    // with the run taken — bits cleared, nothing else — and one more on the slot, and let go, before COMMIT; the row's
+    // data page stays held to COMMIT. LibRed writes it as the statement returns, where ACE writes it about 500 ms after.
+    [Fact]
+    public void In_a_transaction_an_INSERT_that_takes_a_run_writes_page_1_and_lets_it_go_before_COMMIT()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        (int tdef, int data) = CreateTwoRowsWithMemo(engine, database);
+        JetFormatBase format = FormatOf(copy.Path);
+        int holder = MapHolder(copy.Path, format);
+        byte[] before = ReadRaw(copy.Path, holder, format);
+        int slot = Slot(copy.Path, LibRedUser);
+
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        engine.ExecuteNonQuery("INSERT INTO T (A, M) VALUES ('three', @m)", LongMemo);
+
+        byte[] early = ReadRaw(copy.Path, holder, format);
+        Assert.False(early.AsSpan().SequenceEqual(before), "Page 1 was not written before COMMIT.");
+        for (int i = 0; i < early.Length; i++)
+            Assert.True((early[i] & ~before[i]) == 0, $"Page 1 byte 0x{i:X3} gained a bit: {before[i]:X2} -> {early[i]:X2}.");
+        Assert.Equal(slot + 1, Slot(copy.Path, LibRedUser));
+        using JetLockFile other = OtherUserOf(copy.Path);
+        Assert.True(ExclusiveIsFree(other, holder), "Page 1 is still locked.");
+        Assert.False(ExclusiveIsFree(other, data), "The row's data page was let go before COMMIT.");
+        // Written with the AutoNumber drawn and let go too, in the same batch, as ACE's (locking.md §5).
+        Assert.True(ExclusiveIsFree(other, tdef), "The definition page is still locked.");
+
+        engine.ExecuteNonQuery("COMMIT");
+        AssertNothingLocked(other, copy.Path);
+        Assert.Equal([1, 2, 3], Ids(engine));
+        Assert.Equal(MemoLength, MemoLengthOf(engine, 3));
+        LibRed.Core.Tests.TestDatabases.AssertPageOwnership(database);
+    }
+
+    // Page 1 let go after the INSERT, another user reserves a run of its own and writes its pages, while LibRed's
+    // transaction is open: LibRed's next INSERT in it reads the maps again under the lock, takes none of those pages,
+    // and its COMMIT writes over none of them nor gives back what the other user took.
+    [Fact]
+    public void Another_users_run_reserved_while_the_transaction_is_open_is_never_handed_out_or_given_back()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        CreateTwoRowsWithMemo(engine, database);
+        JetFormatBase format = FormatOf(copy.Path);
+        int holder = MapHolder(copy.Path, format);
+
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        engine.ExecuteNonQuery("INSERT INTO T (A, M) VALUES ('three', @m)", LongMemo);
+
+        // The other user: page 1 locked, its lowest 16 free pages taken and written, page 1 written, its slot moved.
+        using JetLockFile other = OtherUserOf(copy.Path);
+        HoldExclusive(other, holder);
+        byte[] map = ReadRaw(copy.Path, holder, format);
+        (int start, int offset, int length) = FreeRecord(map, copy.Path, format);
+        Span<byte> bits = Storage.UsageMap.InlineBits(map.AsSpan(offset, length), format);
+        var theirs = new List<int>();
+        for (int bit = 0; bit < bits.Length * 8 && theirs.Count < 16; bit++)
+            if (Storage.BitmapBits.Get(bits, bit) && start + bit > holder)
+            {
+                theirs.Add(start + bit);
+                Storage.BitmapBits.Set(bits, bit, false);
+            }
+        Assert.Equal(16, theirs.Count);
+        foreach (int page in theirs) WriteRaw(copy.Path, page, Marked(page, format), format);
+        WriteRaw(copy.Path, holder, map, format);
+        WriteSlot(copy.Path, OtherUser, (ushort)(Slot(copy.Path, OtherUser) + 1));
+        ReleaseExclusive(other, holder);
+
+        engine.ExecuteNonQuery("INSERT INTO T (A, M) VALUES ('four', @m)", LongMemo);
+        engine.ExecuteNonQuery("COMMIT");
+
+        Assert.Equal([1, 2, 3, 4], Ids(engine));
+        Assert.Equal(MemoLength, MemoLengthOf(engine, 4));
+        foreach (int page in theirs)
+            Assert.True(ReadRaw(copy.Path, page, format).AsSpan().SequenceEqual(Marked(page, format)),
+                $"Page {page}, which the other user reserved and wrote, was written over.");
+        map = ReadRaw(copy.Path, holder, format);
+        (start, offset, length) = FreeRecord(map, copy.Path, format);
+        foreach (int page in theirs)
+            Assert.False(Storage.BitmapBits.Get(Storage.UsageMap.InlineBits(map.AsSpan(offset, length), format), page - start),
+                $"Page {page}, which the other user reserved, is free again.");
+        LibRed.Core.Tests.TestDatabases.AssertPageOwnership(database);
+    }
+
+    // A ROLLBACK after page 1 went out with the run taken: the pages the undone INSERT took go back to the free map, and
+    // the rest of the run at close, so the file's maps end as a session that never ran the transaction leaves them.
+    [Fact]
+    public void A_ROLLBACK_after_the_run_was_written_early_gives_back_every_page_of_it()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var control = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-control-");
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
+        using (JetDatabase database = JetDatabase.Open(control.Path, readOnly: false))
+            CreateTwoRowsWithMemo(new QueryEngine(database), database);
+        int slot;
+        using (JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false))
+        {
+            var engine = new QueryEngine(database);
+            CreateTwoRowsWithMemo(engine, database);
+            engine.ExecuteNonQuery("BEGIN TRANSACTION");
+            engine.ExecuteNonQuery("INSERT INTO T (A, M) VALUES ('three', @m)", LongMemo);
+            slot = Slot(copy.Path, LibRedUser);
+            engine.ExecuteNonQuery("ROLLBACK");
+            Assert.Equal([1, 2], Ids(engine));
+        }
+
+        JetFormatBase format = FormatOf(copy.Path);
+        int holder = MapHolder(copy.Path, format);
+        Assert.Equal(ReadRaw(control.Path, holder, format), ReadRaw(copy.Path, holder, format));
+        Assert.Equal(new FileInfo(control.Path).Length, new FileInfo(copy.Path).Length);
+        Assert.True(Slot(copy.Path, LibRedUser) > slot);
+        using JetDatabase reopened = JetDatabase.Open(copy.Path, readOnly: false);
+        LibRed.Core.Tests.TestDatabases.AssertPageOwnership(reopened);
+        Assert.Equal(1, new QueryEngine(reopened).ExecuteNonQuery("INSERT INTO T (A, M) VALUES ('four', @m)", LongMemo));
+    }
+
+    // A failed INSERT after one whose run went out early: the savepoint's rollback gives back only what the failed
+    // statement took, so the file's maps end as a session that never ran the failed statement leaves them.
+    [Fact]
+    public void A_failed_INSERT_after_a_run_was_written_early_gives_back_only_its_own_pages()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var control = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-control-");
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
+        foreach ((string path, bool fail) in new[] { (control.Path, false), (copy.Path, true) })
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(database);
+            CreateTwoRowsWithMemo(engine, database);
+            engine.ExecuteNonQuery("BEGIN TRANSACTION");
+            engine.ExecuteNonQuery("INSERT INTO T (A, M) VALUES ('three', @m)", LongMemo);
+            if (fail)
+                Assert.ThrowsAny<Exception>(() => engine.ExecuteNonQuery("INSERT INTO T (Id, A, M) VALUES (1, 'duplicate', @m)", LongMemo));
+            engine.ExecuteNonQuery("COMMIT");
+            Assert.Equal([1, 2, 3], Ids(engine));
+        }
+
+        JetFormatBase format = FormatOf(copy.Path);
+        int holder = MapHolder(copy.Path, format);
+        Assert.Equal(ReadRaw(control.Path, holder, format), ReadRaw(copy.Path, holder, format));
+        using JetDatabase reopened = JetDatabase.Open(copy.Path, readOnly: false);
+        LibRed.Core.Tests.TestDatabases.AssertPageOwnership(reopened);
+    }
+
+    // A nested transaction rolled back after its INSERT's run went out early: the rollback to its savepoint gives back
+    // the pages the INSERT took, and the outer transaction's COMMIT and the close the rest, so the file's maps end as a
+    // session that never ran the nested transaction leaves them.
+    [Fact]
+    public void A_nested_ROLLBACK_after_the_run_was_written_early_gives_back_every_page_of_it()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var control = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-control-");
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
+        foreach ((string path, bool nested) in new[] { (control.Path, false), (copy.Path, true) })
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(database);
+            CreateTwoRowsWithMemo(engine, database);
+            engine.ExecuteNonQuery("BEGIN TRANSACTION");
+            engine.ExecuteNonQuery("UPDATE T SET A = 'one!' WHERE Id = 1");
+            if (nested)
+            {
+                engine.ExecuteNonQuery("BEGIN TRANSACTION");
+                engine.ExecuteNonQuery("INSERT INTO T (A, M) VALUES ('three', @m)", LongMemo);
+                engine.ExecuteNonQuery("ROLLBACK");
+            }
+            engine.ExecuteNonQuery("COMMIT");
+            Assert.Equal([1, 2], Ids(engine));
+        }
+
+        JetFormatBase format = FormatOf(copy.Path);
+        int holder = MapHolder(copy.Path, format);
+        Assert.Equal(ReadRaw(control.Path, holder, format), ReadRaw(copy.Path, holder, format));
+        Assert.Equal(new FileInfo(control.Path).Length, new FileInfo(copy.Path).Length);
+        using JetDatabase reopened = JetDatabase.Open(copy.Path, readOnly: false);
+        LibRed.Core.Tests.TestDatabases.AssertPageOwnership(reopened);
+    }
+
+    private const int LibRedUser = 1;
+
+    // Long enough to need more pages than one run of 32 holds, so the INSERT reserves a new run inside the transaction.
+    private const int MemoLength = 160_000;
+
+    private static Dictionary<string, object?> LongMemo => new() { ["@m"] = new string('m', MemoLength) };
+
+    private static int MemoLengthOf(QueryEngine engine, int id) =>
+        ((string)engine.ExecuteQuery($"SELECT M FROM T WHERE Id = {id}").Rows.Single()[0]!).Length;
+
+    // As CreateTwoRows, with a long-value column.
+    private static (int Tdef, int Data) CreateTwoRowsWithMemo(QueryEngine engine, JetDatabase database)
+    {
+        engine.ExecuteNonQuery("CREATE TABLE T (Id AUTOINCREMENT PRIMARY KEY, A TEXT(20), M MEMO)");
+        engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('one')");
+        engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('two')");
+        return database.ReadConsistent(() =>
+        {
+            var table = database.OpenTable("T");
+            return (table.Definition.DefinitionPage, table.Rows().WithIds().Select(r => r.Id.Page).Distinct().Single());
+        });
+    }
+
+    // The page holding the global free-pages map (page 1, as ACE creates it).
+    private static int MapHolder(string path, JetFormatBase format) =>
+        Pages.DatabaseDefinitionPage.ReadMapPointer(ReadRaw(path, 0, format), format.FreePagesMapPointerOffset, format).Page;
+
+    // The global free-pages map's record on its holder page: its first page, and where it lies on the page.
+    private static (int Start, int Offset, int Length) FreeRecord(byte[] holder, string path, JetFormatBase format)
+    {
+        (int row, int page) = Pages.DatabaseDefinitionPage.ReadMapPointer(ReadRaw(path, 0, format), format.FreePagesMapPointerOffset, format);
+        var parsed = new Pages.DataPage();
+        parsed.Read(new PageBuffer(holder, page), format);
+        Pages.DataPage.RowSlot slot = parsed.Rows[row];
+        Assert.Equal(UsageMapType.Inline, Storage.UsageMap.RecordType(holder.AsSpan(slot.Offset, slot.Length)));
+        return (Storage.UsageMap.StartPage(holder.AsSpan(slot.Offset, slot.Length), format), slot.Offset, slot.Length);
     }
 
     // A page's bytes as the other user wrote them: its own number, repeated.
@@ -323,6 +714,37 @@ public class AllocationLockStatementTests
         byte[] page = ReadRaw(path, tdef, format);
         BinaryPrimitives.WriteInt32LittleEndian(page.AsSpan(format.TdefLastAutoNumberOffset), value);
         WriteRaw(path, tdef, page, format);
+    }
+
+    private static int RowCount(string path, int tdef)
+    {
+        JetFormatBase format = FormatOf(path);
+        return BinaryPrimitives.ReadInt32LittleEndian(ReadRaw(path, tdef, format).AsSpan(format.TdefRowCountOffset));
+    }
+
+    // The other user's statement on the table, as ACE writes one: the definition page locked, its AutoNumber counter set
+    // and its row count moved, its slot moved, the page let go.
+    private static void OtherUserCounts(JetLockFile other, string path, int tdef, int lastAutoNumber, int rowsChange)
+    {
+        HoldExclusive(other, tdef);
+        JetFormatBase format = FormatOf(path);
+        byte[] page = ReadRaw(path, tdef, format);
+        BinaryPrimitives.WriteInt32LittleEndian(page.AsSpan(format.TdefLastAutoNumberOffset), lastAutoNumber);
+        BinaryPrimitives.WriteInt32LittleEndian(page.AsSpan(format.TdefRowCountOffset),
+            BinaryPrimitives.ReadInt32LittleEndian(page.AsSpan(format.TdefRowCountOffset)) + rowsChange);
+        WriteRaw(path, tdef, page, format);
+        WriteSlot(path, OtherUser, (ushort)(Slot(path, OtherUser) + 1));
+        ReleaseExclusive(other, tdef);
+    }
+
+    // The definition page as the file has it is the page as it was but for the AutoNumber counter, now at
+    // lastAutoNumber: no row count, no index count, nothing else.
+    private static void AssertOnlyAutoNumberMoved(byte[] before, byte[] after, int lastAutoNumber, JetFormatBase format)
+    {
+        Assert.Equal(lastAutoNumber, BinaryPrimitives.ReadInt32LittleEndian(after.AsSpan(format.TdefLastAutoNumberOffset)));
+        byte[] expected = (byte[])before.Clone();
+        BinaryPrimitives.WriteInt32LittleEndian(expected.AsSpan(format.TdefLastAutoNumberOffset), lastAutoNumber);
+        Assert.Equal(expected, after);
     }
 
     private static int Slot(string path, int user)

@@ -76,6 +76,11 @@ public sealed class PageChannel : IDisposable
     private readonly Dictionary<(int Page, int Offset), (int? Baseline, int Value, bool FailedOnly)> _keptCounters = [];
     // The FailedOnly counters written since a statement last accepted them (AcceptCounters).
     private readonly Dictionary<(int Page, int Offset), (int? Baseline, int Value)> _pendingCounters = [];
+    // The TDEF pages the open transaction has published its AutoNumbers on and let go of ahead of its COMMIT
+    // (PublishAheadOfCommit), each with the image it published: the page's overlay image derives from that image, not
+    // from the file, which another user may have changed since. The transaction's next lock of the page — or its
+    // COMMIT — reads the page again and puts the overlay's counting on top of it (LockForUpdate).
+    private readonly Dictionary<int, byte[]> _publishedEarly = [];
     // Usage-map records the open transaction retired, whose bytes ACE takes back only when it commits.
     private readonly List<(int Page, int Row)> _reclaimAtCommit = [];
 
@@ -436,11 +441,17 @@ public sealed class PageChannel : IDisposable
         // restore it, then buffer a private copy of the new bytes and advance the logical page count.
         if (_active is not null)
         {
+            // A page let go after an early publication: what the caller read and changed derives from the image
+            // published, and goes on top of the page as the lock now reads it, as the overlay's own image does.
+            byte[]? published = _publishedEarly.GetValueOrDefault(pageNumber);
             LockForUpdate(pageNumber);
             if (_active.NeedsBeforeImage(pageNumber))
                 _active.RecordBeforeImage(pageNumber, _overlay.TryGetValue(pageNumber, out byte[]? prior) ? prior : null);
-            _overlay[pageNumber] = source[..PageSize].ToArray();
-            if (parsed is null) _overlayParsed.Remove(pageNumber);
+            bool rebased = published is not null && _commitBaselines[pageNumber] is not null;
+            _overlay[pageNumber] = rebased
+                ? Rebased(pageNumber, source[..PageSize], published!, _commitBaselines[pageNumber]!)
+                : source[..PageSize].ToArray();
+            if (parsed is null || rebased) _overlayParsed.Remove(pageNumber);
             else _overlayParsed[pageNumber] = parsed;
             if (pageNumber >= _txPageCount) _txPageCount = pageNumber + 1;
             return;
@@ -477,11 +488,62 @@ public sealed class PageChannel : IDisposable
     /// <param name="refuseStale">False for a caller that reads everything it uses only after this call — a rollback
     /// putting the global maps right, the close's merge: a lock newly taken after another user changed the page then
     /// only drops the cache, rather than refusing the statement as <see cref="LockForWrite"/> otherwise does.</param>
+    /// <remarks>A TDEF page the transaction let go of after publishing its AutoNumbers ahead of COMMIT
+    /// (<see cref="PublishAheadOfCommit"/>) is locked again here, and read as the file has it now — another user may
+    /// have drawn an AutoNumber, or counted a row, meanwhile — and the transaction's overlay image of it is put on top
+    /// of that (<see cref="Rebased"/>), as ACE's COMMIT writes its counting onto the page as the file has it then
+    /// (locking.md §5). The counters the transaction keeps through a rollback move with it: each is still its change
+    /// on top of what is committed.</remarks>
     internal void LockForUpdate(int pageNumber, bool refuseStale = true)
     {
-        if (_active is not null && !_readOnly && !_commitBaselines.ContainsKey(pageNumber))
-            _commitBaselines[pageNumber] = LockForWrite(pageNumber, refuseStale);
+        if (_active is null || _readOnly || _commitBaselines.ContainsKey(pageNumber)) return;
+        byte[]? committed = _commitBaselines[pageNumber] = LockForWrite(pageNumber, refuseStale);
+        if (!_publishedEarly.Remove(pageNumber, out byte[]? published) || committed is null) return;
+
+        if (_overlay.TryGetValue(pageNumber, out byte[]? image))
+        {
+            _overlay[pageNumber] = Rebased(pageNumber, image, published, committed);
+            _overlayParsed.Remove(pageNumber);
+        }
+        foreach ((int page, int offset) in _keptCounters.Keys.Where(k => k.Page == pageNumber).ToArray())
+        {
+            int moved = CounterMove(offset, published, committed);
+            (int? baseline, int value, bool failedOnly) = _keptCounters[(page, offset)];
+            _keptCounters[(page, offset)] = (baseline + moved, unchecked(value + moved), failedOnly);
+        }
+        foreach ((int page, int offset) in _pendingCounters.Keys.Where(k => k.Page == pageNumber).ToArray())
+        {
+            int moved = CounterMove(offset, published, committed);
+            (int? baseline, int value) = _pendingCounters[(page, offset)];
+            _pendingCounters[(page, offset)] = (baseline + moved, unchecked(value + moved));
+        }
     }
+
+    /// <summary>How far another user has moved the counter at <paramref name="offset"/> from the image this transaction
+    /// published to the page as the file has it now.</summary>
+    private static int CounterMove(int offset, byte[] published, byte[] committed) => unchecked(
+        BinaryPrimitives.ReadInt32LittleEndian(committed.AsSpan(offset)) - BinaryPrimitives.ReadInt32LittleEndian(published.AsSpan(offset)));
+
+    /// <summary><paramref name="image"/> — the transaction's image of TDEF page <paramref name="page"/>, derived from
+    /// <paramref name="published"/>, what it published of it ahead of COMMIT — put on top of
+    /// <paramref name="committed"/>, the page as the file has it now: each counter the transaction has written there
+    /// as its change added to the file's value, every other byte the transaction has left as published as the file
+    /// has it.</summary>
+    private byte[] Rebased(int page, ReadOnlySpan<byte> image, byte[] published, byte[] committed)
+    {
+        byte[] rebased = image[..PageSize].ToArray();
+        for (int i = 0; i < PageSize; i++)
+            if (rebased[i] == published[i]) rebased[i] = committed[i];
+        foreach (int offset in CounterOffsets(page))
+            BinaryPrimitives.WriteInt32LittleEndian(rebased.AsSpan(offset), unchecked(
+                BinaryPrimitives.ReadInt32LittleEndian(image[offset..]) + CounterMove(offset, published, committed)));
+        return rebased;
+    }
+
+    /// <summary>The offsets on <paramref name="page"/> of the counters the open transaction has written there
+    /// (<see cref="KeepThroughRollback"/>).</summary>
+    private IEnumerable<int> CounterOffsets(int page) =>
+        _keptCounters.Keys.Concat(_pendingCounters.Keys).Where(k => k.Page == page).Select(k => k.Offset).Distinct();
 
     /// <summary>Takes this user's write lock on <paramref name="pageNumber"/>, which is about to be written for the
     /// first time in a batch, and then reads the committed image the write derives from (null for a page past the
@@ -596,6 +658,11 @@ public sealed class PageChannel : IDisposable
             UnlockTables(owner, from);
             throw new StaleReadException(JetUserRegistration.TableInUseMessage(name));
         }
+
+        // A design change reads the definition page and lays it out afresh, which can move the counters on it (a dropped
+        // index's entry goes from the real-index block): a page let go after an early publication is locked again
+        // first, so what it reads already carries the file's counting, at the offsets the transaction counted on.
+        if (use == TableUse.Design && _publishedEarly.ContainsKey(tdefPage)) LockForUpdate(tdefPage);
     }
 
     private bool HoldsTableLock(JetLockRegion region, int page, bool exclusive) =>
@@ -781,12 +848,139 @@ public sealed class PageChannel : IDisposable
     }
 
     /// <summary>Runs a logical write with every other reader and writer on this file excluded, so its pages
-    /// publish as one unit. A statement, as <see cref="ReadConsistent{T}"/> is.</summary>
+    /// publish as one unit. A statement, as <see cref="ReadConsistent{T}"/> is: one that succeeds inside a transaction
+    /// still open when it returns publishes what it took of the global maps, and the AutoNumbers it drew, before it
+    /// lets the gate go — one that fails there, once rolled back, the AutoNumbers (<see cref="PublishAheadOfCommit"/>).</summary>
     internal T WriteExclusive<T>(Func<T> action)
     {
         _scopeDepth++;
-        try { return _cache.PublishLocked(action); }
+        try
+        {
+            return _cache.PublishLocked(() =>
+            {
+                T result;
+                try { result = action(); }
+                catch when (_scopeDepth == 1)
+                {
+                    PublishAheadOfCommit(failed: true);
+                    throw;
+                }
+                if (_scopeDepth == 1) PublishAheadOfCommit(failed: false);
+                return result;
+            });
+        }
         finally { EndScope(); }
+    }
+
+    /// <summary>Publishes, ahead of the open transaction's COMMIT, the pages it has taken out of the global free-pages
+    /// map and the AutoNumbers it has drawn, and lets go of the maps' pages and of the tables' definition pages it has
+    /// only counted on, as ACE writes page 1 and the TDEF page (its AutoNumber only) and lets them go about 500 ms
+    /// after an INSERT inside a transaction (locking.md §5): another user can then reserve a run of its own and draw
+    /// the next AutoNumber while the transaction is open, and none of them can take a page or an id this one took.
+    /// Called at the end of each statement in the transaction, which is sooner than ACE's deferral, as LibRed's
+    /// autocommit write already is; for one that <paramref name="failed"/>, once its savepoint is rolled back, only the
+    /// definition pages, as ACE writes a failed INSERT's AutoNumber early and lets the page go (measured).</summary>
+    /// <remarks>
+    /// <para>Only a registered user's transaction. The maps only after a statement that succeeded, and only when what it
+    /// changed of them is pages taken — bits cleared, in place (<see cref="PageAllocator.TakenOnly"/>): a page it freed
+    /// is still used by the committed rows until it commits, and a map it grew or converted cannot be split from the rest
+    /// of its change. A definition page
+    /// only when what it changed of it is counters (<see cref="CountersAheadOfCommit"/>). Otherwise the pages stay in
+    /// the overlay, locked, and publish at COMMIT as before. Nor when another channel of this process has committed one
+    /// of them since this transaction locked it — the commit-time conflict check is left to refuse that — or a rollback
+    /// to an open savepoint would put an image of one back.</para>
+    /// <para>What is published goes as one batch (<see cref="PublishBatch"/>), which moves this user's commit slot — a
+    /// batch with no page changed writes nothing, a definition page the statement only counted on included — and the
+    /// pages' locks go. The maps' pages leave the overlay: the next change to the maps in the transaction locks page 1
+    /// again and reads it as the file has it then. A definition page stays in it with the transaction's counting on it,
+    /// which goes onto the page as the file has it at the transaction's next lock of it, or at its COMMIT
+    /// (<see cref="LockForUpdate"/>). A rollback gives back the pages its undone writes had taken
+    /// (<see cref="PageAllocator.RollBackTo"/>), and keeps the AutoNumbers, which are the file's now.</para>
+    /// </remarks>
+    private void PublishAheadOfCommit(bool failed)
+    {
+        if (_active is not { } transaction || _cache.User is not { } user || _readOnly) return;
+        var images = new Dictionary<int, byte[]>();
+
+        int[] maps = failed ? [] : [.. Allocator.GlobalMapPages(page => _commitBaselines.GetValueOrDefault(page) is not null)
+            .Where(page => _commitBaselines.GetValueOrDefault(page) is not null)];
+        var taken = new List<int>();
+        foreach (int page in maps)
+        {
+            if (!_overlay.TryGetValue(page, out byte[]? image)) continue;   // locked to be read, left as it was
+            byte[] baseline = _commitBaselines[page]!;
+            if (transaction.RestoresImageOf(page) || !SamePage(page, baseline, ReadCommittedPageOrNull(page))
+                || Allocator.TakenOnly(page, baseline, image) is not { } pages)
+            {
+                images.Clear();
+                taken.Clear();
+                maps = [];
+                break;
+            }
+            images[page] = image;
+            taken.AddRange(pages);
+        }
+
+        var definitions = new List<int>();
+        foreach (int page in CountedPages())
+        {
+            if (CountersAheadOfCommit(transaction, page) is not { } image) continue;
+            images[page] = image;
+            definitions.Add(page);
+        }
+        if (maps.Length == 0 && definitions.Count == 0) return;
+
+        PublishBatch([.. images.Keys], page => images[page], page => _commitBaselines[page], _ => null);
+        foreach (int page in maps)
+        {
+            _overlay.Remove(page);
+            _overlayParsed.Remove(page);
+            _commitBaselines.Remove(page);
+            user.Unlock(JetLockRegion.WriteRead, page, exclusive: true);
+        }
+        Allocator.TakenEarly(taken);
+        foreach (int page in definitions)
+        {
+            _commitBaselines.Remove(page);
+            user.Unlock(JetLockRegion.WriteRead, page, exclusive: true);
+            _publishedEarly[page] = images[page];
+            // The AutoNumbers drawn are the file's now: kept through a rollback, as each is, with nothing left of them
+            // for the rollback to write (RestoreKeptCounters).
+            foreach (((int counted, int offset), (_, int value, bool failedOnly)) in _keptCounters.ToArray())
+                if (counted == page && !failedOnly) _keptCounters[(counted, offset)] = (value, value, false);
+        }
+    }
+
+    /// <summary>The pages the open transaction has written counters on (<see cref="KeepThroughRollback"/>) — its
+    /// tables' definition pages.</summary>
+    private int[] CountedPages() => [.. _keptCounters.Keys.Concat(_pendingCounters.Keys).Select(k => k.Page).Distinct()];
+
+    /// <summary>What the open transaction publishes of definition page <paramref name="page"/> ahead of its COMMIT: the
+    /// page as it locked it with the AutoNumbers it has drawn there — the counters kept through every rollback — and
+    /// nothing else, as ACE's early write carries only the AutoNumber, its row and index counts written at COMMIT
+    /// (locking.md §5). Null when the page is not one to let go: not locked by the transaction, or changed by it in
+    /// more than counters (a design change), or carrying another counter kept through every rollback (a catalog
+    /// table's counts), or changed in the file since it was locked, or one a rollback to an open savepoint would put
+    /// an image of back.</summary>
+    private byte[]? CountersAheadOfCommit(Transaction transaction, int page)
+    {
+        if (_commitBaselines.GetValueOrDefault(page) is not { } baseline || !_overlay.TryGetValue(page, out byte[]? image)
+            || transaction.RestoresImageOf(page) || !SamePage(page, baseline, ReadCommittedPageOrNull(page)))
+            return null;
+
+        byte[] counted = (byte[])baseline.Clone();
+        foreach (int offset in CounterOffsets(page))
+            image.AsSpan(offset, sizeof(int)).CopyTo(counted.AsSpan(offset));
+        if (!SamePage(page, counted, image)) return null;
+
+        byte[] published = (byte[])baseline.Clone();
+        foreach (((int counter, int offset), (_, _, bool failedOnly)) in _keptCounters)
+        {
+            if (counter != page || failedOnly) continue;
+            if (offset != _format.TdefLastAutoNumberOffset && offset != _format.TdefComplexAutoNumberOffset) return null;
+            image.AsSpan(offset, sizeof(int)).CopyTo(published.AsSpan(offset));
+        }
+        return published;
     }
 
     private void EndScope()
@@ -884,6 +1078,7 @@ public sealed class PageChannel : IDisposable
         Allocator.ReturnGroups();
         ReclaimRetiredRecords();
         PublishTransaction();
+        Allocator.TakenEarly(null);   // the pages it took early are the committed file's now
         _keptCounters.Clear();   // the counters it kept are on its TDEF pages
         _pendingCounters.Clear();
         if (flush) _stream.Flush(flushToDisk: false);
@@ -898,6 +1093,10 @@ public sealed class PageChannel : IDisposable
         Array.Sort(pages);
         _cache.PublishLocked(() =>
         {
+            // A definition page it let go of after publishing its AutoNumbers is locked again, briefly, and its counting
+            // goes onto the page as the file has it now, as ACE's COMMIT does (locking.md §5): an AutoNumber another
+            // user drew meanwhile, and a row another user counted, stay.
+            foreach (int page in _publishedEarly.Keys.ToArray()) LockForUpdate(page, refuseStale: false);
             foreach (int page in pages)
             {
                 byte[]? current = ReadCommittedPageOrNull(page);
@@ -1035,8 +1234,9 @@ public sealed class PageChannel : IDisposable
 
     /// <summary>Writes each kept counter back onto its TDEF — where that page still is one, the table not having
     /// been created by the writes just undone. Into the enclosing transaction after a savepoint rollback, as the
-    /// value written; with <paramref name="onCommitted"/>, after the transaction's, as the change written on top of
-    /// what is committed now. A rollback no statement's failure caused takes back what only a failure keeps, which no
+    /// value written where the overlay still holds the page; with <paramref name="onCommitted"/>, after the
+    /// transaction's, and onto a page the overlay no longer holds, as the change written on top of what is committed
+    /// now. A rollback no statement's failure caused takes back what only a failure keeps, which no
     /// later rollback then writes back either. With <paramref name="only"/>, only the counters only a failure keeps
     /// (true), or only those every rollback keeps (false).</summary>
     private void RestoreKeptCounters(bool failed, bool onCommitted, bool? only = null)
@@ -1050,10 +1250,13 @@ public sealed class PageChannel : IDisposable
                 continue;
             }
             if (only is { } kind && failedOnly != kind) continue;
-            if (page >= PageCount || onCommitted && baseline is null) continue;
+            // A page the overlay no longer holds is the committed page — which another user may have moved on since an
+            // early publication let it go — and takes the change, as after the transaction's rollback.
+            bool ontoCommitted = onCommitted || !_overlay.ContainsKey(page);
+            if (page >= PageCount || ontoCommitted && baseline is null) continue;
             byte[] tdef = ReadPage(page).Span.ToArray();
             int current = BinaryPrimitives.ReadInt32LittleEndian(tdef.AsSpan(offset));
-            int kept = onCommitted ? unchecked(current + value - baseline!.Value) : value;
+            int kept = ontoCommitted ? unchecked(current + value - baseline!.Value) : value;
             if (PageHeader.ReadType(tdef) != PageType.TableDefinition || current == kept) continue;
             BinaryPrimitives.WriteInt32LittleEndian(tdef.AsSpan(offset), kept);
             WritePage(page, tdef);
@@ -1070,6 +1273,7 @@ public sealed class PageChannel : IDisposable
         _overlay.Clear();
         _overlayParsed.Clear();
         _commitBaselines.Clear();
+        _publishedEarly.Clear();
         _dependencies.Clear();
         _dependencyKeys.Clear();
         _releasing.Clear();
@@ -1154,12 +1358,17 @@ public sealed class PageChannel : IDisposable
         int dependencyCount = _active.DependencyCountAt(savepoint);
         int tableLockCount = _active.TableLockCountAt(savepoint);
         Storage.PageAllocator.AllocationState? allocation = _active.AllocationAt(savepoint);
-        if (allocation is not null) Allocator.LockGlobalMapsFor(allocation);
         var (before, pageCount) = _active.TakeForRollbackTo(savepoint);
         int[] unlocked = RestoreOverlay(before, pageCount);
         try
         {
-            if (allocation is not null) Allocator.RollBackTo(allocation);
+            // Locked once the overlay is restored, which lets go of every page the frame first locked: the maps' pages
+            // among them when the transaction published them early since (PublishAheadOfCommit).
+            if (allocation is not null)
+            {
+                Allocator.LockGlobalMapsFor(allocation);
+                Allocator.RollBackTo(allocation);
+            }
             // Before the pages first written after the savepoint are let go: a kept counter goes back onto a TDEF
             // page among them, which is then written again without waiting for another user.
             RestoreKeptCounters(failed, onCommitted: false);
@@ -1209,6 +1418,10 @@ public sealed class PageChannel : IDisposable
             if (_commitBaselines[page] is not null && _cache.User is not null) unlocked.Add(page);
             _commitBaselines.Remove(page);
         }
+        // A definition page let go after an early publication, and first written in a frame rolled back, is the file's
+        // again: the transaction has nothing on it but the AutoNumbers it published (RestoreKeptCounters).
+        foreach (int page in _publishedEarly.Keys.Where(p => !_overlay.ContainsKey(p)).ToArray())
+            _publishedEarly.Remove(page);
         ResyncFormatVersion();   // page 0 may have been one of the restored images
         return [.. unlocked];
     }
@@ -1241,7 +1454,7 @@ public sealed class PageChannel : IDisposable
     // the committed array has not changed. Only a page reloaded since (evicted, read back) needs its bytes compared.
     // Page 0's commit-slot table is not part of it: every batch, ours or another user's, changes a slot there, and
     // no page write carries the table (WriteThroughUnderPublishLock), so a difference confined to it is no conflict.
-    private bool SamePage(int page, byte[]? left, byte[]? right) =>
+    internal bool SamePage(int page, byte[]? left, byte[]? right) =>
         ReferenceEquals(left, right)
         || left is not null && right is not null
             && left.AsSpan(0, page == 0 ? _format.CommitByteTableOffset : PageSize)

@@ -79,7 +79,8 @@ been through production use.
   the other has the table in use; and Access's locks on a table's counters and on the page maps, so LibRed and
   Access inserting into one table at the same time draw distinct AutoNumbers and never take the same page.
   Inside an open LibRed transaction that inserted into a table, Access cannot insert into that table until it
-  commits. Updates that move rows, deletes that free pages and schema changes that allocate pages follow the same
+  commits — as between two Access users, it draws the next AutoNumber and is refused — but can allocate pages
+  for other tables. Updates that move rows, deletes that free pages and schema changes that allocate pages follow the same
   rules but have not been tested against Access under contention. Off Windows it takes no locks at all. Safe
   for any number of readers with no writer, or one writer with serialized access; not yet the library for a
   busy shared network database.

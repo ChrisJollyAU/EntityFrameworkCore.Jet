@@ -108,16 +108,35 @@ Status: **draft / accepted direction** · Date: 2026-07-18
 > before the read wherever a page's current contents decide the change: `RowInserter` locks the table's TDEF page
 > before it reads the counters (an `INSERT` before anything else), and `PageAllocator.ReadGlobalMaps`, the
 > allocator's one read of the global maps, locks their holder page first for every caller that may change them
-> (a take from the run already reserved changes no map and locks nothing). Held to the end of the transaction —
-> so in an explicit transaction to `COMMIT`, where ACE writes them and lets them go about 500 ms after the
-> `INSERT`; doing that needs the overlay to keep those two pages' changes as deltas applied at commit (see
-> `verification-backlog.md`). A rollback's frees and the close-time merge lock page 1 up front and read it under
+> (a take from the run already reserved changes no map and locks nothing). Held to the end of the transaction, but
+> for the global maps' pages in an explicit transaction: a statement that succeeds there, having changed the maps
+> only by taking pages (bits cleared in place, `PageAllocator.TakenOnly`), publishes those pages as a batch of their
+> own as it returns, drops them from the overlay and lets them go (`PageChannel.PublishAheadOfCommit`), as ACE
+> writes page 1 and lets it go about 500 ms after an `INSERT`. The allocator records the pages so taken; a rollback,
+> of the transaction or to a savepoint, frees those its undone writes took and keeps the rest of the run
+> (`PageAllocator.RollBackTo`). Maps the transaction freed a page in, grew or converted stay in the overlay to
+> `COMMIT`. In the same batch go the TDEF pages the transaction has changed only in counters — the offsets
+> `KeepThroughRollback` recorded: each is published as its committed image with the AutoNumbers drawn (the counters
+> every rollback keeps) and nothing else, as ACE writes it, and let go — after a failed statement too, once its
+> savepoint is rolled back, as ACE's failed `INSERT` writes its AutoNumber early (measured). The page stays in the
+> overlay with the transaction's counting on it; `PageChannel._publishedEarly` keeps the image published, and the
+> AutoNumbers' kept entries take it as their baseline (nothing left for a rollback to write). The transaction's next
+> `LockForUpdate` of the page — an `INSERT`, a `DELETE`, a design lock (`LockTable`), a write — and its `COMMIT`
+> (`PublishTransaction`, before the conflict check) lock it again, read it as the file has it, and rebuild the
+> overlay image on top: each counter as its change since the image published added to the file's value, every
+> other byte the transaction left as published taken from the file (`PageChannel.Rebased`), the kept counters moved
+> with it; a write made from the image before that is rebuilt the same way. So another user's AutoNumber and
+> another user's row count stay, as ACE's `COMMIT` keeps them (measured). A savepoint rollback that drops the page
+> from the overlay leaves the file's page, and writes a kept counter onto it as a change, not a value. A TDEF page
+> changed in more than counters, a catalog table's, and one a rollback to an open savepoint would put an image of
+> back, stay in the overlay to `COMMIT`. A rollback's frees and the close-time merge lock page 1 up front and read it under
 > the lock, never refusing. Pages appended past the end of the file are the user's own (the map gave them); a
 > zero page appended only to keep the file contiguous is not written once the file reaches it, and growth and a
 > failed publication's cut-back are measured against the file. **A long-value read takes no shared byte** — see
 > [locking.md §4](../format/locking.md) for what that leaves unsafe. What ships today is the deferred-write
 > overlay, the write-conflict check on commit, process-local page locks, the user registration, the commit slots,
-> ACE's page write locks, its table locks, and its TDEF-first and page-1 discipline for counters and allocation.
+> ACE's page write locks, its table locks, its TDEF-first and page-1 discipline for counters and allocation, and
+> page 1 and the AutoNumbers written and let go ahead of an explicit transaction's `COMMIT`.
 
 This is the ground-up design for LibRed's transaction support and the concurrency
 infrastructure it sits on. It replaced the ad-hoc page-level undo log that used to be in
@@ -343,8 +362,8 @@ Two orderings hold in every mode, and they are the ones that matter for concurre
   *n*). A batch of one existing page is the page then the slot (counter + 1); a batch of two or more is
   the slot (`00 00`), the pages, the slot (counter + 1) ([page-00 §2.2](../format/page-00-database.md)). An
   explicit transaction writes nothing at all until its commit — apart from an `INSERT`'s
-  TDEF page and page 1, written about 500 ms after the `INSERT`
-  ([locking.md](../format/locking.md)).
+  TDEF page (its AutoNumber only) and page 1 (the run it reserved), written about 500 ms after the `INSERT`
+  ([locking.md §5](../format/locking.md)). LibRed writes both as the statement returns.
 - File growth is a 1-byte write at the last byte of the new page, then the page itself;
   newly appended pages are written before a multi-page batch's leading slot write.
 
@@ -396,8 +415,8 @@ Build correctness first with lock seams stubbed; drop the Jet lock manager in la
    `.laccdb` records → live co-residency with `MSACCESS.EXE`. The lock bands and shapes, the
    `.laccdb` record, the poll interval (5 s) and the slot write order and values are measured
    ([locking.md](../format/locking.md)). Done: the registration, the commit slots, the page write locks and the
-   table locks (see the deferral note). Left: page 1 and the TDEF page as an allocation /
-   counter lock, the long-value shared byte, the released-pages handling at close; and the unknowns — what the
+   table locks, page 1 and the TDEF page as an allocation / counter lock, and page 1 and the TDEF page's
+   AutoNumbers written and let go ahead of `COMMIT` (see the deferral note). Left: the long-value shared byte, the released-pages handling at close; and the unknowns — what the
    poll compares, the slot of an exclusive holder and of a second user during a multi-page batch,
    the `.ldb` of an `.mdb`, and what the next open does after a kill while a slot holds `00 00`.
 

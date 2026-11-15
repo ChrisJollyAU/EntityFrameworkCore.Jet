@@ -31,27 +31,36 @@ internal sealed class PageAllocator
     private Dictionary<(int Row, int Page), int> _otherGroups = [];
     private Dictionary<(int Row, int Page), (int Page, int Held)> _dataGroups = [];
     private List<int> _heldUntilCommit = [];
+    // The pages the open transaction has taken out of the global free map in a publication of its own ahead of COMMIT
+    // (PageChannel's early publication of the maps, locking.md §5), in the order published: their bits are clear in the
+    // committed map because of this session, not another user. A rollback gives back those its undone writes had taken.
+    private readonly List<int> _takenEarly = [];
 
-    /// <summary>Session allocation state captured with a transaction or savepoint's page images.</summary>
+    /// <summary>Session allocation state captured with a transaction or savepoint's page images. <c>TakenEarly</c> is
+    /// how many pages the transaction had taken in an early publication then.</summary>
     internal sealed record AllocationState(int Start, uint Bits, int BitmapSlot, Dictionary<(int Row, int Page), int> Owners,
         Dictionary<(int Row, int Page), (int Start, byte Bits)> Groups, Dictionary<(int Row, int Page), int> OtherGroups,
-        Dictionary<(int Row, int Page), (int Page, int Held)> DataGroups, List<int> HeldUntilCommit);
+        Dictionary<(int Row, int Page), (int Page, int Held)> DataGroups, List<int> HeldUntilCommit, int TakenEarly);
 
     internal AllocationState State =>
         new(_reservationStart, _reservationBits, _bitmapSlot, new(_owners), new(_groups), new(_otherGroups), new(_dataGroups),
-            [.. _heldUntilCommit]);
+            [.. _heldUntilCommit], _takenEarly.Count);
 
     /// <summary>
     /// Rolls the session's allocation back to <paramref name="state"/>, as ACE rolls back a transaction: all of it
     /// but the shared reservation, which a rollback does not give back. The pages the undone writes took from the
     /// reservation go to the global free map rather than back into it, and what it still holds stays held, its bits
     /// clear (measured). Called once the undone writes are discarded, so the global map is again the one
-    /// <paramref name="state"/> was taken with.
+    /// <paramref name="state"/> was taken with — but for the pages taken since in an early publication (see
+    /// <see cref="TakenEarly"/>), which are clear in it because this session took them: those the reservation and the
+    /// groups still hold stay held, and the rest, taken for the undone writes, go back to the free map.
     /// </summary>
     internal void RollBackTo(AllocationState state)
     {
         int start = _reservationStart;
         uint bits = _reservationBits, before = state.Start == start ? state.Bits : 0;
+        HashSet<int> takenEarly = [.. _takenEarly.Skip(state.TakenEarly)];
+        _takenEarly.RemoveRange(state.TakenEarly, _takenEarly.Count - state.TakenEarly);
         // Locked, where it writes them, by LockGlobalMapsFor before the rollback began.
         (MapRecord free, MapRecord released) = ReadGlobalMaps(claim: false);
         // The reservation stays, unless it lies in pages the restored map has no bit for: then it came with map growth
@@ -71,26 +80,42 @@ internal sealed class PageAllocator
         // reservation holds that the restored map shows free is reserved again.
         uint taken = state.Start == start ? state.Bits & ~bits : state.Bits;
         for (int bit = 0; bit < 32; bit++)
-            if ((taken & 1u << bit) != 0) Free(state.Start + bit);
+        {
+            if ((taken & 1u << bit) == 0) continue;
+            Free(state.Start + bit);
+            takenEarly.Remove(state.Start + bit);
+        }
         (free, released) = ReadGlobalMaps(claim: false);
         for (int bit = 0; bit < 32; bit++)
         {
             if ((bits & ~before & 1u << bit) == 0) continue;
-            // Unless another handle has committed the page meanwhile: the reservation lets it go.
+            // Unless another handle has committed the page meanwhile: the reservation lets it go. A page this session
+            // took early is clear because it took it, and stays reserved.
             if (FreeBit(start + bit, free) == true) WriteFreeBit(free, released, start + bit, false);
-            else _reservationBits &= ~(1u << bit);
+            else if (!takenEarly.Contains(start + bit)) _reservationBits &= ~(1u << bit);
         }
+        foreach (int page in takenEarly.Order())
+            if (!Reserved(page) && !_groups.Values.Any(g => LowestHeld(g, page) == page)) Free(page);
+    }
+
+    /// <summary>Records <paramref name="pages"/> as taken out of the global free map by a publication of the open
+    /// transaction's ahead of its COMMIT (<see cref="RollBackTo"/>); <c>null</c> forgets every page so recorded, once
+    /// the transaction has committed or rolled back and the pages are the committed file's.</summary>
+    internal void TakenEarly(IEnumerable<int>? pages)
+    {
+        if (pages is null) _takenEarly.Clear();
+        else _takenEarly.AddRange(pages);
     }
 
     /// <summary>Locks the global maps' holder pages ahead of a rollback to <paramref name="state"/> that will change
     /// them — one whose shared reservation differs from <paramref name="state"/>'s, so that <see cref="RollBackTo"/>
-    /// frees what the undone writes took from it, or reserves pages again — while the transaction is still open to
-    /// hold them (<see cref="ReadGlobalMaps"/>). The rollback reads the maps only after this, so a lock taken after
-    /// another user committed only drops the cache. Refused past ACE's retries, it is left to each write of the
-    /// rollback to wait for the page as it comes, as a write outside a transaction does.</summary>
+    /// frees what the undone writes took from it, or reserves pages again, or one that has taken pages early since —
+    /// while the transaction is still open to hold them (<see cref="ReadGlobalMaps"/>). The rollback reads the maps
+    /// only after this, so a lock taken after another user committed only drops the cache. Refused past ACE's retries,
+    /// it is left to each write of the rollback to wait for the page as it comes, as a write outside a transaction does.</summary>
     internal void LockGlobalMapsFor(AllocationState state)
     {
-        if (state.Start == _reservationStart && state.Bits == _reservationBits) return;
+        if (state.Start == _reservationStart && state.Bits == _reservationBits && state.TakenEarly == _takenEarly.Count) return;
         try { ReadGlobalMaps(claim: true, refuseStale: false); }
         catch (Exception e) when (e is InvalidOperationException or InvalidDataException) { }   // the rollback meets it
     }
@@ -837,12 +862,7 @@ internal sealed class PageAllocator
     /// of the transaction. Outside one it does nothing, and each map write locks its page as it is written.</remarks>
     private (MapRecord Free, MapRecord Released) ReadGlobalMaps(bool claim = true, bool refuseStale = true)
     {
-        ReadOnlySpan<byte> page0 = _channel.ReadPage(0).Span;
-        JetFormatBase format = _channel.Format;
-        (int Row, int Page) freePointer =
-            DatabaseDefinitionPage.ReadMapPointer(page0, format.FreePagesMapPointerOffset, format);
-        (int Row, int Page) releasedPointer =
-            DatabaseDefinitionPage.ReadMapPointer(page0, format.ReleasedPagesMapPointerOffset, format);
+        (var freePointer, var releasedPointer) = ReadMapPointers(_channel.ReadPage(0).Span);
         if (freePointer == releasedPointer)
             throw new InvalidDataException(
                 $"Page 0 names the same record (page {freePointer.Page}, row {freePointer.Row}) for the global " +
@@ -857,6 +877,67 @@ internal sealed class PageAllocator
         MapRecord released = ReadMapRecord("released-pages", releasedPointer);
         ReferenceBitmapPages(free, released);
         return (free, released);
+    }
+
+    /// <summary>The free-pages and released-pages map pointers, (row, page), as page 0 names them.</summary>
+    private ((int Row, int Page) Free, (int Row, int Page) Released) ReadMapPointers(ReadOnlySpan<byte> page0)
+    {
+        JetFormatBase format = _channel.Format;
+        return (DatabaseDefinitionPage.ReadMapPointer(page0, format.FreePagesMapPointerOffset, format),
+            DatabaseDefinitionPage.ReadMapPointer(page0, format.ReleasedPagesMapPointerOffset, format));
+    }
+
+    /// <summary>The pages the global maps are kept on — the two records' holder pages and, for a map in reference form,
+    /// its bitmap pages — when <paramref name="claimed"/> says the open transaction holds a holder page, as every change
+    /// to the maps does first (<see cref="ReadGlobalMaps"/>); empty otherwise, without reading the maps.</summary>
+    internal int[] GlobalMapPages(Func<int, bool> claimed)
+    {
+        ((int _, int freeHolder), (int _, int releasedHolder)) = ReadMapPointers(_channel.ReadPageShared(0).Span);
+        if (!claimed(freeHolder) && !claimed(releasedHolder)) return [];
+        (MapRecord free, MapRecord released) = ReadGlobalMaps(claim: false);
+        return [.. new[] { free.PageNumber, released.PageNumber }.Concat(ReferenceBitmapPages(free, released)).Distinct()];
+    }
+
+    /// <summary>The pages whose bits in the global free-pages map <paramref name="changed"/> clears from
+    /// <paramref name="committed"/> — two images of global map page <paramref name="page"/> — when that is all it
+    /// changes: no bit set, no record moved or resized, the released-pages map untouched. Null otherwise.</summary>
+    /// <remarks>What a transaction can publish of the maps before it commits, as ACE writes page 1 about 500 ms after
+    /// an INSERT that reserved a run (locking.md §5): the pages it took are then taken for every other user too, and a
+    /// rollback gives back those its undone writes had (<see cref="RollBackTo"/>). A page it freed is not: until it
+    /// commits, its committed rows still use it.</remarks>
+    internal int[]? TakenOnly(int page, byte[] committed, byte[] changed)
+    {
+        JetFormatBase format = _channel.Format;
+        (MapRecord free, _) = ReadGlobalMaps(claim: false);
+        byte[] merged = (byte[])committed.Clone();
+        Span<byte> before, after;
+        int first;
+        if (free.PageNumber == page && free.Type == UsageMapType.Inline)
+        {
+            if (!DataPage.TryReadRow(new PageBuffer(committed, page), format, free.Row, out DataPage.RowSlot slot, out _))
+                return null;
+            before = UsageMap.InlineBits(merged.AsSpan(slot.Offset, slot.Length), format);
+            after = UsageMap.InlineBits(changed.AsSpan(slot.Offset, slot.Length), format);
+            first = UsageMap.StartPage(merged.AsSpan(slot.Offset, slot.Length), format);
+        }
+        else if (free.Type == UsageMapType.Reference && Enumerable.Range(0, format.UsageMapReferenceSlots)
+            .FirstOrDefault(s => UsageMap.ReferencePointer(free.Record, s, format) == page, -1) is var range and >= 0)
+        {
+            before = UsageMap.BitmapPageBits(merged, format);
+            after = UsageMap.BitmapPageBits(changed, format);
+            first = range * format.UsageMapPagesPerBitmapPage;
+        }
+        else return _channel.SamePage(page, committed, changed) ? [] : null;
+
+        var taken = new List<int>();
+        for (int i = 0; i < before.Length; i++)
+        {
+            if ((after[i] & ~before[i]) != 0) return null;   // a bit set: a page given back
+            for (int bit = 0; bit < 8; bit++)
+                if ((before[i] & ~after[i] & 1 << bit) != 0) taken.Add(first + i * 8 + bit);
+            before[i] &= after[i];
+        }
+        return _channel.SamePage(page, merged, changed) ? [.. taken] : null;
     }
 
     private MapRecord ReadMapRecord(string name, (int Row, int Page) pointer)

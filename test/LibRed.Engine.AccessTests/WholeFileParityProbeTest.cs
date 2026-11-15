@@ -242,6 +242,27 @@ public class WholeFileParityProbeTest(ITestOutputHelper output)
         ]);
     }
 
+    /// <summary>INSERTs with long values in one transaction, committed or rolled back: a shared LibRed writes the run they
+    /// take ahead of COMMIT and lets page 1 go (locking.md §5), and ends with the file ACE ends with either way.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void INSERTs_with_long_values_in_a_transaction_leave_libred_and_ace_with_the_same_file(bool commit)
+    {
+        // 3,000 characters in 250-character literals, as many as ACE takes in one expression (more are "too complex"):
+        // forty of them need more pages than one run of 32 holds.
+        string memo = string.Join(" & ", Enumerable.Range(0, 12).Select(i => $"'{new string((char)('a' + i), 250)}'"));
+        AssertSameFile(CreateThroughDao(Ace12),
+        [
+            "CREATE TABLE T (Id COUNTER CONSTRAINT pkT PRIMARY KEY, A TEXT(20), M MEMO)",
+            "INSERT INTO T (A) VALUES ('one')",
+            "INSERT INTO T (A) VALUES ('two')",
+            "BEGIN TRANSACTION",
+            .. Enumerable.Range(3, 40).Select(i => $"INSERT INTO T (A, M) VALUES ('row {i}', {memo})"),
+            commit ? "COMMIT TRANSACTION" : "ROLLBACK TRANSACTION",
+        ]);
+    }
+
     /// <summary>Writes to calculated and complex columns, which ACE's DDL cannot create: DAO creates them, with a
     /// complex column's first values, in the file both engines start from — the calculated column raising it to the
     /// 2010 format — and the statements insert, update and delete through them, run through DAO.</summary>
