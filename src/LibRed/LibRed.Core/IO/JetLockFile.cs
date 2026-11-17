@@ -51,7 +51,10 @@ internal sealed class JetLockFile : IDisposable
     /// <summary>Opens the lock file at <paramref name="path"/> for locking and for writing a user record, as ACE
     /// opens it: read/write, shared for read and write. Not shared for delete, also as ACE: a user that closes and
     /// finds nobody else connected deletes the file, and a handle another user still has open on it is what makes
-    /// that delete fail rather than pull the file out from under them.</summary>
+    /// that delete fail rather than pull the file out from under them. The file is opened as it stands first, and
+    /// only a file or directory not found falls back to open-or-create: that is much cheaper than open-or-create
+    /// when the file exists, which it does for every user but the first, and the fallback still ends correctly when
+    /// another user creates or deletes the file in between.</summary>
     /// <param name="path">The lock file.</param>
     /// <param name="createIfMissing">Create the file when it does not exist; otherwise a missing file throws
     /// <see cref="FileNotFoundException"/>.</param>
@@ -60,11 +63,14 @@ internal sealed class JetLockFile : IDisposable
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Jet lock-file locking is only implemented on Windows.");
 
-        return new JetLockFile(File.OpenHandle(
-            path,
-            createIfMissing ? FileMode.OpenOrCreate : FileMode.Open,
-            FileAccess.ReadWrite,
-            FileShare.ReadWrite));
+        try
+        {
+            return new JetLockFile(File.OpenHandle(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite));
+        }
+        catch (Exception e) when (createIfMissing && e is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new JetLockFile(File.OpenHandle(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite));
+        }
     }
 
     /// <summary>Writes <paramref name="bytes"/> at <paramref name="offset"/> of the lock file — a user's record
@@ -74,6 +80,15 @@ internal sealed class JetLockFile : IDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
         RandomAccess.Write(_handle, bytes, offset);
+    }
+
+    /// <summary>Reads the lock file's bytes at <paramref name="offset"/> into <paramref name="bytes"/> — a user's
+    /// record as it stands — and returns how many the file had there.</summary>
+    public int Read(long offset, Span<byte> bytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        return RandomAccess.Read(_handle, bytes, offset);
     }
 
     /// <summary>Tries to lock <paramref name="length"/> bytes at <paramref name="offset"/> exclusively, without

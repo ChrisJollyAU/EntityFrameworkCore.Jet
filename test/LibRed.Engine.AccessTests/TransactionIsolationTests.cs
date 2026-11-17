@@ -156,16 +156,18 @@ public class TransactionIsolationTests : TempDatabaseTest
             first.ExecuteNonQuery("BEGIN TRANSACTION");
             second.ExecuteNonQuery("BEGIN TRANSACTION");
             first.ExecuteNonQuery("UPDATE SamePageWriters SET A = 'first' WHERE Id = 1");
-            second.ExecuteNonQuery("UPDATE SamePageWriters SET A = 'second' WHERE Id = 2");
+            // ACE, two connections in one process, this sequence on this table (measured): the second's UPDATE is
+            // refused with 3218 after about 2.2 s, both then commit, row 2 is unchanged, and the UPDATE run again
+            // goes ahead.
+            AssertCurrentlyLocked(() => second.ExecuteNonQuery("UPDATE SamePageWriters SET A = 'second' WHERE Id = 2"));
 
             first.ExecuteNonQuery("COMMIT");
-            var conflict = Assert.Throws<InvalidOperationException>(() => second.ExecuteNonQuery("COMMIT"));
-            Assert.Contains("write conflict", conflict.Message, StringComparison.OrdinalIgnoreCase);
-            Assert.True(secondDb.InTransaction);
-            second.ExecuteNonQuery("ROLLBACK");
+            second.ExecuteNonQuery("COMMIT");
 
             Assert.Equal("first", Scalar(first, "SELECT A FROM SamePageWriters WHERE Id = 1"));
             Assert.Equal("two", Scalar(first, "SELECT A FROM SamePageWriters WHERE Id = 2"));
+            Assert.Equal(1, second.ExecuteNonQuery("UPDATE SamePageWriters SET A = 'second' WHERE Id = 2"));
+            Assert.Equal("second", Scalar(first, "SELECT A FROM SamePageWriters WHERE Id = 2"));
         }
         finally { TemporaryDatabase.Delete(path); }
     }
@@ -186,12 +188,11 @@ public class TransactionIsolationTests : TempDatabaseTest
             first.ExecuteNonQuery("BEGIN TRANSACTION");
             second.ExecuteNonQuery("BEGIN TRANSACTION");
             first.ExecuteNonQuery("UPDATE WideWriters SET K = 'first-key' WHERE Id = 1");
-            second.ExecuteNonQuery("UPDATE WideWriters SET K = 'second-key' WHERE Id = 12");
+            // ACE, this sequence on this table (measured): the second's UPDATE is refused with 3218 after about 2.2 s.
+            AssertCurrentlyLocked(() => second.ExecuteNonQuery("UPDATE WideWriters SET K = 'second-key' WHERE Id = 12"));
 
             first.ExecuteNonQuery("COMMIT");
-            var conflict = Assert.Throws<InvalidOperationException>(() => second.ExecuteNonQuery("COMMIT"));
-            Assert.Contains("write conflict", conflict.Message, StringComparison.OrdinalIgnoreCase);
-            second.ExecuteNonQuery("ROLLBACK");
+            second.ExecuteNonQuery("COMMIT");
 
             Assert.Equal("first-key", WideValue(first, 1, "K"));
             Assert.Equal("key-12", WideValue(first, 12, "K"));
@@ -216,12 +217,11 @@ public class TransactionIsolationTests : TempDatabaseTest
             first.ExecuteNonQuery("BEGIN TRANSACTION");
             second.ExecuteNonQuery("BEGIN TRANSACTION");
             first.ExecuteNonQuery("UPDATE Customers SET ContactName = 'first-wins' WHERE CustomerID = 'ALFKI'");
-            second.ExecuteNonQuery("UPDATE Customers SET ContactName = 'stale-second' WHERE CustomerID = 'ALFKI'");
+            // ACE, this sequence on this row (measured): the second's UPDATE is refused with 3218 after about 2.2 s.
+            AssertCurrentlyLocked(() => second.ExecuteNonQuery("UPDATE Customers SET ContactName = 'stale-second' WHERE CustomerID = 'ALFKI'"));
 
             first.ExecuteNonQuery("COMMIT");
-            var conflict = Assert.Throws<InvalidOperationException>(() => second.ExecuteNonQuery("COMMIT"));
-            Assert.Contains("write conflict", conflict.Message, StringComparison.OrdinalIgnoreCase);
-            second.ExecuteNonQuery("ROLLBACK");
+            second.ExecuteNonQuery("COMMIT");
 
             Assert.Equal("first-wins", Contact(first, "ALFKI"));
             Assert.NotEqual(original, Contact(first, "ALFKI"));
@@ -277,15 +277,17 @@ public class TransactionIsolationTests : TempDatabaseTest
             outer.ExecuteNonQuery("UPDATE WideWriters SET B = 'discarded-inner' WHERE Id = 1");
             outer.ExecuteNonQuery("ROLLBACK");
 
+            // ACE, this sequence on this table (measured, the inner transaction an OleDbTransaction.Begin): the outer
+            // transaction still holds the row's page after the inner rollback, the other connection's UPDATE is
+            // refused with 3218 after about 2.2 s, and the outer COMMIT goes ahead — A as the outer left it, B and C
+            // untouched.
             other.ExecuteNonQuery("BEGIN TRANSACTION");
-            other.ExecuteNonQuery("UPDATE WideWriters SET C = 'other-wins' WHERE Id = 1");
+            AssertCurrentlyLocked(() => other.ExecuteNonQuery("UPDATE WideWriters SET C = 'other-wins' WHERE Id = 1"));
             other.ExecuteNonQuery("COMMIT");
 
-            var conflict = Assert.Throws<InvalidOperationException>(() => outer.ExecuteNonQuery("COMMIT"));
-            Assert.Contains("write conflict", conflict.Message, StringComparison.OrdinalIgnoreCase);
-            outer.ExecuteNonQuery("ROLLBACK");
-            Assert.Equal("other-wins", WideValue(other, 1, "C"));
-            Assert.NotEqual("outer-value", WideValue(other, 1, "A"));
+            outer.ExecuteNonQuery("COMMIT");
+            Assert.NotEqual("other-wins", WideValue(other, 1, "C"));
+            Assert.Equal("outer-value", WideValue(other, 1, "A"));
             Assert.NotEqual("discarded-inner", WideValue(other, 1, "B"));
         }
         finally { TemporaryDatabase.Delete(path); }
@@ -305,12 +307,13 @@ public class TransactionIsolationTests : TempDatabaseTest
                 first.ExecuteNonQuery("BEGIN TRANSACTION");
                 second.ExecuteNonQuery("BEGIN TRANSACTION");
                 first.ExecuteNonQuery("CREATE TABLE FirstSchema (Id LONG PRIMARY KEY)");
-                second.ExecuteNonQuery("CREATE TABLE StaleSchema (Id LONG PRIMARY KEY)");
+                // ACE, this sequence (measured): the second's CREATE TABLE is refused with 3218 after its retries —
+                // the first holds the catalog's pages — and goes ahead, under another name, once the first has
+                // committed.
+                AssertCurrentlyLocked(() => second.ExecuteNonQuery("CREATE TABLE StaleSchema (Id LONG PRIMARY KEY)"));
 
                 first.ExecuteNonQuery("COMMIT");
-                var conflict = Assert.Throws<InvalidOperationException>(() => second.ExecuteNonQuery("COMMIT"));
-                Assert.Contains("write conflict", conflict.Message, StringComparison.OrdinalIgnoreCase);
-                second.ExecuteNonQuery("ROLLBACK");
+                second.ExecuteNonQuery("COMMIT");
 
                 second.ExecuteNonQuery("BEGIN TRANSACTION");
                 second.ExecuteNonQuery("CREATE TABLE SecondSchema (Id LONG PRIMARY KEY)");
@@ -352,7 +355,10 @@ public class TransactionIsolationTests : TempDatabaseTest
             var first = new QueryEngine(firstDb);
             var second = new QueryEngine(secondDb);
 
-            for (int cycle = 1; cycle <= 12; cycle++)
+            // ACE, one cycle of this sequence on this row (measured): the second's UPDATE is refused with 3218 after
+            // about 2.2 s, and its UPDATE in a new transaction after the first's COMMIT goes ahead. Three cycles
+            // rather than twelve: each refusal now waits out ACE's retries.
+            for (int cycle = 1; cycle <= 3; cycle++)
             {
                 string winner = $"winner-{cycle}";
                 string stale = $"stale-{cycle}";
@@ -360,11 +366,9 @@ public class TransactionIsolationTests : TempDatabaseTest
                 first.ExecuteNonQuery("BEGIN TRANSACTION");
                 second.ExecuteNonQuery("BEGIN TRANSACTION");
                 first.ExecuteNonQuery($"UPDATE Customers SET ContactName = '{winner}' WHERE CustomerID = 'ALFKI'");
-                second.ExecuteNonQuery($"UPDATE Customers SET ContactName = '{stale}' WHERE CustomerID = 'ALFKI'");
+                AssertCurrentlyLocked(() => second.ExecuteNonQuery($"UPDATE Customers SET ContactName = '{stale}' WHERE CustomerID = 'ALFKI'"));
 
                 first.ExecuteNonQuery("COMMIT");
-                var conflict = Assert.Throws<InvalidOperationException>(() => second.ExecuteNonQuery("COMMIT"));
-                Assert.Contains("write conflict", conflict.Message, StringComparison.OrdinalIgnoreCase);
                 second.ExecuteNonQuery("ROLLBACK");
                 Assert.Equal(winner, Contact(second, "ALFKI"));
 
@@ -375,6 +379,16 @@ public class TransactionIsolationTests : TempDatabaseTest
             }
         }
         finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // A write refused a page another connection holds, once ACE's retries are spent: 3218, after 21 attempts.
+    private static void AssertCurrentlyLocked(Action write)
+    {
+        var wait = System.Diagnostics.Stopwatch.StartNew();
+        var refused = Assert.Throws<InvalidOperationException>(write);
+        wait.Stop();
+        Assert.Equal("Could not update; currently locked.", refused.Message);
+        Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
     }
 
     private static void CreateWideWriterTable(string path)

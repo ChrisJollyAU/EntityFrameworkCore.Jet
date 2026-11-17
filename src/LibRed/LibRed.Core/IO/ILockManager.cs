@@ -11,11 +11,12 @@ namespace LibRed.IO;
 /// validation at publish time, so overlapping writers in one process fail deterministically instead of losing
 /// an update.</para>
 ///
-/// <para>The locks other processes see are not here. A registered Jet user takes ACE's byte-range locks on the
-/// lock file (<c>docs/format/locking.md</c>): its user bytes in <see cref="JetUserRegistration"/>, and a write
-/// lock on each page it changes, taken by <see cref="PageChannel"/> when the page is first written and held
-/// until the batch that writes it ends or the change is rolled back, and the table locks of every table a statement
-/// uses (<see cref="PageChannel.LockTable"/>), through the per-process table <see cref="JetUserRegistration.Lock"/>
+/// <para>The locks other users see — other processes, and the other channels of this one — are not here. Each
+/// channel registered as a Jet user takes ACE's byte-range locks on the lock file (<c>docs/format/locking.md</c>):
+/// its user bytes in <see cref="JetUserRegistration"/>, and a write lock on each page it changes, taken by
+/// <see cref="PageChannel"/> when the page is first written and held until the batch that writes it ends or the
+/// change is rolled back, and the table locks of every table a statement uses
+/// (<see cref="PageChannel.LockTable"/>), through the table of its own locks <see cref="JetUserRegistration.Lock"/>
 /// keeps — see <c>docs/design/transactions.md</c>.</para>
 /// </summary>
 /// <remarks>The API is <c>Enter</c>/<c>Exit</c> (not a disposable handle) so the hot path — a page read takes

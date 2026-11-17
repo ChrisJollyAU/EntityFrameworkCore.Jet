@@ -76,11 +76,17 @@ been through production use.
   it marks its commits in the database header as Access does and notices Access's; and it takes and honours
   Access's page write locks, so LibRed and Access updating rows at the same time wait for each other and lose
   neither change; and its table locks, so a schema change waits for (and is refused, as Access refuses it, while)
-  the other has the table in use; and Access's locks on a table's counters and on the page maps, so LibRed and
-  Access inserting into one table at the same time draw distinct AutoNumbers and never take the same page.
+  the other has the table in use — a query's results hold the table until they are closed, as Access's do; and
+  Access's locks on a table's counters and on the page maps, so LibRed and Access inserting into one table at
+  the same time draw distinct AutoNumbers and never take the same page; and Access's locks on a long memo or OLE
+  value, so a read waits while the other replaces the value, and a replacement waits for (and is refused, as
+  Access refuses it, by) the other's read.
   Inside an open LibRed transaction that inserted into a table, Access cannot insert into that table until it
   commits — as between two Access users, it draws the next AutoNumber and is refused — but can allocate pages
-  for other tables. Updates that move rows, deletes that free pages and schema changes that allocate pages follow the same
+  for other tables. Two LibRed connections in one process on Windows are two users, as two Access connections
+  are: a row page or table one holds in a transaction refuses the other's statement, as Access refuses it,
+  rather than its commit. And on every platform a connection's own schema change of a table it is still reading,
+  or has written in its open transaction, is refused at once, as Access refuses it. Updates that move rows, deletes that free pages and schema changes that allocate pages follow the same
   rules but have not been tested against Access under contention. Off Windows it takes no locks at all. Safe
   for any number of readers with no writer, or one writer with serialized access; not yet the library for a
   busy shared network database.

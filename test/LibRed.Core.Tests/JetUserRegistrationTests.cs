@@ -4,7 +4,7 @@ using Xunit;
 
 namespace LibRed.Core.Tests;
 
-// A shared open registers the process as a Jet user of the database, as ACE does (docs/format/locking.md §1, §3): the
+// A shared open registers its channel as a Jet user of the database, as ACE does (docs/format/locking.md §1, §3): the
 // lock file beside it, the user's group-0 and group-1 bytes, and its 64-byte record. "The other user" is a second
 // JetLockFile handle, which conflicts with LibRed's own exactly as another process's would.
 public class JetUserRegistrationTests
@@ -38,8 +38,11 @@ public class JetUserRegistrationTests
         Assert.False(File.Exists(lockPath));
     }
 
+    // ACE, two and three OLE DB connections in one process on a copy of this file (measured): each has a handle of its
+    // own on the lock file, users 1, 2 and 3 are held, the file is 64 bytes a user; a read-only connection is a user
+    // too. The one closed lets its number go, the file keeps its length, and the last to close deletes it.
     [Fact]
-    public void Every_channel_on_the_file_in_one_process_is_the_same_user_until_the_last_closes()
+    public void Every_channel_on_the_file_in_one_process_is_a_user_of_its_own()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
         using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-register-");
@@ -51,15 +54,29 @@ public class JetUserRegistrationTests
             using (JetDatabase second = JetDatabase.Open(copy.Path))
             {
                 Assert.Equal(1, first.Channel.UserNumber);
-                Assert.Equal(1, second.Channel.UserNumber);
-                Assert.Equal(JetLockLayout.UserRecordSize, ReadLockFile(lockPath).Length);
+                Assert.Equal(2, second.Channel.UserNumber);
+                byte[] records = ReadLockFile(lockPath);
+                Assert.Equal(2 * JetLockLayout.UserRecordSize, records.Length);
+                Assert.Equal(MeasuredRecord(Environment.MachineName), records[JetLockLayout.UserRecordSize..]);
+                using JetLockFile both = JetLockFile.Open(lockPath, createIfMissing: false);
+                Assert.False(both.TryLock(JetLockLayout.UserByte(2), 1));
+                Assert.False(both.TryLock(JetLockLayout.SessionByte(2), 1));
             }
 
-            // The second close left the registration alone: the first channel is still open.
+            // The second's close gave its own number back and left the first's alone.
             Assert.True(File.Exists(lockPath));
-            using JetLockFile other = JetLockFile.Open(lockPath, createIfMissing: false);
-            Assert.False(other.TryLock(JetLockLayout.UserByte(1), 1));
-            Assert.False(other.TryLock(JetLockLayout.SessionByte(1), 1));
+            Assert.Equal(2 * JetLockLayout.UserRecordSize, ReadLockFile(lockPath).Length);
+            using (JetLockFile other = JetLockFile.Open(lockPath, createIfMissing: false))
+            {
+                Assert.False(other.TryLock(JetLockLayout.UserByte(1), 1));
+                Assert.False(other.TryLock(JetLockLayout.SessionByte(1), 1));
+                Assert.True(other.TryLock(JetLockLayout.UserByte(2), 1));
+                other.Unlock(JetLockLayout.UserByte(2), 1);
+            }
+
+            // The next to open takes the lowest free number again.
+            using JetDatabase third = JetDatabase.Open(copy.Path, readOnly: false);
+            Assert.Equal(2, third.Channel.UserNumber);
         }
         finally { first.Dispose(); }
 

@@ -24,6 +24,8 @@ public sealed class TableCursor(Table table, bool[]? decode = null) : IEnumerabl
     /// reference the row (e.g. back-filling an index over existing data).</summary>
     public IEnumerable<(RowId Id, object?[] Values)> WithIds()
     {
+        // Outside every statement and transaction, the enumeration holds the table's read lock until it ends.
+        using HeldTableLocks? held = _table.LockForRead();
         var decoder = new RowCodec(
             _table.Definition.Columns,
             _table.Channel.Format,

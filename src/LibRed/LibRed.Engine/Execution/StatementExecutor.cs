@@ -2126,6 +2126,8 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         // Once the SET targets are resolved and before the joined rows are read: ACE refuses a read-only database
         // after a missing table or column and before the values it would write (verified).
         _database.RefuseIfReadOnly(ReadOnlyWrite.Row);
+        // Each table it sets a column of is opened for writing before a row is read, as ACE opens it (Table.LockForWrite).
+        foreach (int ti in targets.Select(t => t.TableIndex).Distinct()) TargetTable(tables, ti).LockForWrite();
         List<(RowId Id, object?[] Values)[]> joinRows = JoinRows(tables, kinds, ons, groupBases, statement.Where, columns);
         CompleteRows(joinRows, tables, targets.Select(t => t.TableIndex));
 
@@ -2219,6 +2221,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         // Once the target is resolved and before the joined rows are read, as ACE refuses a read-only database after
         // a missing table (verified).
         _database.RefuseIfReadOnly(ReadOnlyWrite.RowDelete);
+        target.LockForWrite();   // opened for writing before a row is read, as ACE opens it
 
         // With no WHERE over one table, ACE empties the table in one go rather than row by row — unless an enforced
         // relationship names it as the parent, when it deletes row by row as below (measured, whole-file diff:

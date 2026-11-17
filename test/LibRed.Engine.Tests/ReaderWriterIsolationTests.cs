@@ -242,11 +242,27 @@ public class ReaderWriterIsolationTests
                 "CREATE TABLE Children (Id LONG PRIMARY KEY, ParentId LONG REFERENCES Parents (Id))");
             child.ExecuteNonQuery("INSERT INTO Parents (Id) VALUES (1)");
 
+            // The child table is renamed before the row goes in, and the parent after: a transaction that has written
+            // a table cannot then change its design — ACE refuses that at once with 3211, a DAO rename of Children
+            // after this INSERT included, while renaming Parents after it, and Children before it, goes ahead
+            // (measured; ACE's SQL has no RENAME).
             child.ExecuteNonQuery("BEGIN TRANSACTION");
-            child.ExecuteNonQuery("INSERT INTO Children (Id, ParentId) VALUES (10, 1)");
             child.ExecuteNonQuery("ALTER TABLE Children RENAME TO Kids");
             child.ExecuteNonQuery("ALTER TABLE Kids RENAME COLUMN ParentId TO Pid");
+            child.ExecuteNonQuery("INSERT INTO Kids (Id, Pid) VALUES (10, 1)");
             child.ExecuteNonQuery("ALTER TABLE Parents RENAME TO Folks");
+
+            if (childDb.Channel.UserNumber is not null)
+            {
+                // Two Jet users: the child's design change holds Parents until it commits, and the other connection's
+                // DELETE is refused its read byte — ACE's 3008, after two rounds of retries (measured for a DELETE
+                // beside another connection's ALTER TABLE … ADD CONSTRAINT in an open transaction).
+                var refused = Assert.Throws<InvalidOperationException>(() => parent.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1"));
+                Assert.Equal(OpenedExclusively("Parents"), refused.Message);
+                child.ExecuteNonQuery("COMMIT");
+                Assert.Single(parent.ExecuteQuery("SELECT Id FROM Kids").Rows);
+                return;
+            }
 
             parent.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1");
 
@@ -257,6 +273,9 @@ public class ReaderWriterIsolationTests
         }
         finally { TemporaryDatabase.Delete(path); }
     }
+
+    private static string OpenedExclusively(string table) =>
+        $"The table '{table}' is already opened exclusively by another user, or it is already open through the user interface and cannot be manipulated programmatically.";
 
     // Adding a relationship checks the child rows already there against their parents, which is the same write
     // skew as an insert's check: nothing it read is written. ACE closes it by holding both tables exclusively
@@ -282,6 +301,20 @@ public class ReaderWriterIsolationTests
             child.ExecuteNonQuery("BEGIN TRANSACTION");
             child.ExecuteNonQuery(
                 "ALTER TABLE Children ADD CONSTRAINT FK_Child FOREIGN KEY (ParentId) REFERENCES Parents (Id)");
+
+            if (childDb.Channel.UserNumber is not null)
+            {
+                // Two Jet users: the ADD CONSTRAINT holds both tables until it commits, as ACE's does, and the other
+                // connection's UPDATE is refused its read byte on Parents with 3008 — after about 4.4 s in ACE, this
+                // sequence on these tables (measured).
+                var wait = System.Diagnostics.Stopwatch.StartNew();
+                var refused = Assert.Throws<InvalidOperationException>(() => parent.ExecuteNonQuery("UPDATE Parents SET Id = 5 WHERE Id = 1"));
+                Assert.Equal(OpenedExclusively("Parents"), refused.Message);
+                Assert.InRange(wait.ElapsedMilliseconds, 3900, 12_000);
+                child.ExecuteNonQuery("COMMIT");
+                Assert.Single(childDb.Catalog.ForeignKeysOf("Children"));
+                return;
+            }
 
             parent.ExecuteNonQuery("UPDATE Parents SET Id = 5 WHERE Id = 1");
 

@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using LibRed.Formats;
 using LibRed.IO;
+using LibRed.Storage;
 using Xunit;
 
 namespace LibRed.Core.Tests;
@@ -14,6 +15,7 @@ public class PageLockTests
 {
     private const string WindowsOnly = "Lock-file locking is Windows-only for now.";
     private const string CurrentlyLocked = "Could not update; currently locked.";
+    private const string CouldNotRead = "Could not read the record; currently locked by another user.";
     private const int OtherUser = 2;
 
     private static readonly JetFormatBase Format = TestDatabases.FormatOf(TestDatabases.NorthwindAccdb);
@@ -124,34 +126,39 @@ public class PageLockTests
         channel.CommitTransaction();
     }
 
+    // Two channels of one process are two users, as two ACE connections in one process are (measured: each its own
+    // lock-file handle and user number; two of them in transactions updating different rows of one data page, the
+    // second's UPDATE is refused with 3218 after about 2.2 s, and goes ahead once the first has committed).
     [Fact]
-    public void Two_channels_of_one_process_stay_optimistic_and_the_lock_goes_when_both_let_go()
+    public void A_page_another_channel_of_the_process_holds_is_refused_after_ACEs_retries_until_it_commits()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
         using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-pagelock-");
 
         using var first = PageChannel.Open(copy.Path, readOnly: false);
         using var second = PageChannel.Open(copy.Path, readOnly: false);
-        using JetLockFile other = OtherUserOf(copy.Path);
+        Assert.Equal(1, first.UserNumber);
+        Assert.Equal(2, second.UserNumber);
 
         first.BeginTransaction();
         second.BeginTransaction();
         WriteMarker(first, 5, 0x51);
         var wait = Stopwatch.StartNew();
-        WriteMarker(second, 5, 0x52);   // one user: no wait
-        Assert.True(wait.ElapsedMilliseconds < 1000, $"The second channel waited {wait.ElapsedMilliseconds} ms.");
+        var refused = Assert.Throws<InvalidOperationException>(() => WriteMarker(second, 5, 0x52));
+        wait.Stop();
+        Assert.Equal(CurrentlyLocked, refused.Message);
+        Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
+        WriteMarker(second, 6, 0x62);   // another page is the second's to take
 
         first.CommitTransaction();
-        Assert.False(ExclusiveIsFree(other, 5));   // the second still has it
+        WriteMarker(second, 5, 0x52);   // on top of the first's commit, which it reads
+        second.CommitTransaction();
 
-        // As before page locks: the second's commit finds the first's change and is refused.
-        var conflict = Assert.Throws<InvalidOperationException>(() => second.CommitTransaction());
-        Assert.Contains("write conflict on page 5", conflict.Message, StringComparison.Ordinal);
-        Assert.False(ExclusiveIsFree(other, 5));
-
-        second.RollbackTransaction();
-        Assert.True(ExclusiveIsFree(other, 5));
-        Assert.Equal(0x51, first.ReadPage(5).Span[100]);
+        byte[] page = TestDatabases.ReadPage(copy.Path, 5);
+        Assert.Equal(0x52, page[100]);
+        Assert.Equal(0x62, TestDatabases.ReadPage(copy.Path, 6)[100]);
+        using JetLockFile other = OtherUserOf(copy.Path);
+        Assert.True(other.TryLock(JetLockLayout.PageWindow(JetLockRegion.WriteRead, 5) + 1, JetLockLayout.PageWindowSize - 1));
     }
 
     [Fact]
@@ -340,6 +347,157 @@ public class PageLockTests
             Assert.True(wait.ElapsedMilliseconds < 1000, $"The writes took {wait.ElapsedMilliseconds} ms.");
         }
         finally { Directory.Delete(lockPath); }
+    }
+
+    // ACE reads a chained long value under its shared byte on the chain's first page, and no other page of it, held for
+    // the statement (locking.md §4, §5).
+    [Fact]
+    public void A_chained_long_value_is_read_under_the_shared_byte_on_its_first_page_for_the_scope_alone()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-pagelock-");
+
+        using var channel = PageChannel.Open(copy.Path, readOnly: false);
+        using JetLockFile other = OtherUserOf(copy.Path);
+        var store = new LongValueStore(channel);
+        (byte[] descriptor, IReadOnlyList<int> pages) = WriteLongValue(channel, store, Payload(10_000));
+        Assert.Equal(3, pages.Count);
+
+        channel.ReadConsistent(() =>
+        {
+            Assert.Equal(Payload(10_000), store.Resolve(descriptor));
+            Assert.False(ExclusiveIsFree(other, pages[0]));
+            Assert.True(SharedIsFree(other, pages[0]));   // another reader beside it
+            Assert.True(ExclusiveIsFree(other, pages[1]));
+            Assert.True(ExclusiveIsFree(other, pages[2]));
+            return 0;
+        });
+        Assert.True(ExclusiveIsFree(other, pages[0]));
+
+        // Outside every scope it is held for the read alone.
+        Assert.Equal(Payload(10_000), store.Resolve(descriptor));
+        Assert.True(ExclusiveIsFree(other, pages[0]));
+    }
+
+    [Fact]
+    public void A_chained_long_value_whose_first_page_another_user_holds_is_refused_with_ACEs_3624()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-pagelock-");
+
+        using var channel = PageChannel.Open(copy.Path, readOnly: true);
+        using JetLockFile other = OtherUserOf(copy.Path);
+        (byte[] descriptor, IReadOnlyList<int> pages) = WriteLongValueAsOtherChannel(copy.Path, Payload(10_000));
+        var store = new LongValueStore(channel);
+
+        HoldExclusive(other, pages[0]);
+        var wait = Stopwatch.StartNew();
+        var refused = Assert.Throws<InvalidOperationException>(() => store.Resolve(descriptor));
+        wait.Stop();
+        Assert.Equal(CouldNotRead, refused.Message);
+        // Three rounds of ACE's 21 retries, back to back: ACE's refused read fails after about 6.5 s (measured).
+        Assert.InRange(wait.ElapsedMilliseconds, 6000, 15_000);
+
+        // Another page of the chain held refuses nothing.
+        ReleaseExclusive(other, pages[0]);
+        HoldExclusive(other, pages[1]);
+        Assert.Equal(Payload(10_000), store.Resolve(descriptor));
+        ReleaseExclusive(other, pages[1]);
+        Assert.True(ExclusiveIsFree(other, pages[0]));
+    }
+
+    [Fact]
+    public void A_long_value_on_a_single_page_is_read_without_a_lock()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-pagelock-");
+
+        using var channel = PageChannel.Open(copy.Path, readOnly: false);
+        using JetLockFile other = OtherUserOf(copy.Path);
+        var store = new LongValueStore(channel);
+        (byte[] descriptor, IReadOnlyList<int> pages) = WriteLongValue(channel, store, Payload(1_000));
+        Assert.Single(pages);
+
+        HoldExclusive(other, pages[0]);
+        var wait = Stopwatch.StartNew();
+        channel.ReadConsistent(() =>
+        {
+            Assert.Equal(Payload(1_000), store.Resolve(descriptor));
+            return 0;
+        });
+        Assert.True(wait.ElapsedMilliseconds < 1000, $"The read took {wait.ElapsedMilliseconds} ms.");
+        ReleaseExclusive(other, pages[0]);
+    }
+
+    [Fact]
+    public void A_chained_long_value_read_after_the_other_users_commit_is_read_as_the_file_has_it()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-pagelock-");
+
+        using var channel = PageChannel.Open(copy.Path, readOnly: false);
+        using JetLockFile other = OtherUserOf(copy.Path);
+        var store = new LongValueStore(channel);
+        byte[] payload = Payload(10_000);
+        (byte[] descriptor, IReadOnlyList<int> pages) = WriteLongValue(channel, store, payload);
+        Assert.Equal(payload, store.Resolve(descriptor));   // every page of the chain is now cached
+
+        // The other user holds the chain, changes its last byte on the second page, commits and lets go — while LibRed
+        // waits to read it.
+        HoldExclusive(other, pages[0]);
+        Thread otherWrites = OnOwnThread(() =>
+        {
+            Thread.Sleep(300);
+            byte[] page = TestDatabases.ReadPage(copy.Path, pages[1]);
+            page[^1] ^= 0xFF;
+            WriteAsOtherUser(copy.Path, pages[1], page);
+            WriteSlot(copy.Path, OtherUser, (ushort)(Slot(copy.Path, OtherUser) + 1));
+            ReleaseExclusive(other, pages[0]);
+        });
+
+        byte[] read = store.Resolve(descriptor);
+        otherWrites.Join();
+        Assert.Equal(1, payload.Zip(read).Count(pair => pair.First != pair.Second));
+        Assert.True(ExclusiveIsFree(other, pages[0]));
+    }
+
+    [Fact]
+    public void An_exclusive_open_reads_a_chained_long_value_with_no_lock()
+    {
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-pagelock-");
+
+        using var channel = PageChannel.Open(copy.Path, readOnly: false, exclusive: true);
+        var store = new LongValueStore(channel);
+        (byte[] descriptor, _) = WriteLongValue(channel, store, Payload(10_000));
+        channel.ReadConsistent(() =>
+        {
+            Assert.Equal(Payload(10_000), store.Resolve(descriptor));
+            return 0;
+        });
+        Assert.False(File.Exists(JetLockFile.PathFor(copy.Path)));
+    }
+
+    // A long value written in a transaction of its own; its descriptor and the pages it took, the first page first.
+    private static (byte[] Descriptor, IReadOnlyList<int> Pages) WriteLongValue(PageChannel channel, LongValueStore store, byte[] payload)
+    {
+        channel.BeginTransaction();
+        (byte[] descriptor, IReadOnlyList<int> pages, _) = store.Write(payload);
+        channel.CommitTransaction();
+        return (descriptor, pages);
+    }
+
+    // The same, written by a channel of its own — as another user's, before LibRed's read-only channel reads it.
+    private static (byte[] Descriptor, IReadOnlyList<int> Pages) WriteLongValueAsOtherChannel(string path, byte[] payload)
+    {
+        using var writer = PageChannel.Open(path, readOnly: false);
+        return WriteLongValue(writer, new LongValueStore(writer), payload);
+    }
+
+    private static byte[] Payload(int length)
+    {
+        byte[] payload = new byte[length];
+        for (int i = 0; i < length; i++) payload[i] = (byte)(i * 7 % 251);
+        return payload;
     }
 
     // A thread of its own rather than the pool's: a write waiting for a lock blocks its thread, and under the suite's

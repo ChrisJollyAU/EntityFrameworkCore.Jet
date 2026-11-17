@@ -759,15 +759,17 @@ public sealed class JetDatabase : IDisposable
     /// statement reads — the one DAO's <c>OpenRecordset</c> gives too (verified).</summary>
     /// <remarks>Every table a statement reads or writes is opened here, and a registered user takes ACE's table-read
     /// lock on it, and its table-write locks on its first write (<see cref="IO.PageChannel.LockTable"/>): held for
-    /// the statement, or the transaction it runs in. The catalog's own reads of its tables do not come here and take
-    /// none.</remarks>
+    /// the statement, or the transaction it runs in, and by a query's result until its rows have been read. Opened
+    /// outside both, the table is locked for each read and enumeration of its rows instead
+    /// (<see cref="Table.LockForRead"/>), and here only for the open itself. The catalog's own reads of its tables do
+    /// not come here and take none.</remarks>
     public Table OpenTable(string name)
     {
         TableDefinition def = Catalog.FindTable(name)
             ?? throw new ArgumentException(
                 $"The Microsoft Access database engine cannot find the input table or query '{name}'. Make sure it "
                 + "exists and that its name is spelled correctly.", nameof(name));
-        _channel.LockTable(def.DefinitionPage, def.Name, TableUse.Read);
+        _channel.LockTable(def.DefinitionPage, def.Name, TableUse.Read)?.Dispose();
         return new Table(_channel, def, Catalog, locked: true);
     }
 

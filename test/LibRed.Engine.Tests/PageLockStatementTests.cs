@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Text;
+using LibRed.Core.Tests;
 using LibRed.IO;
 using Xunit;
 
@@ -14,6 +15,8 @@ public class PageLockStatementTests
 {
     private const string WindowsOnly = "Lock-file locking is Windows-only for now.";
     private const string CurrentlyLocked = "Could not update; currently locked.";
+    private const string CouldNotRead = "Could not read the record; currently locked by another user.";
+    private const string CouldNotSave = "Could not save; currently locked by another user.";
     private const int OtherUser = 2;
     private const string RowOne = "AAAAAAAAAAAA";
     private const string RowTwo = "ZQXJZQXJZQXJ";
@@ -41,6 +44,46 @@ public class PageLockStatementTests
 
         AssertNothingLocked(other, copy.Path);
         Assert.Equal(RowOne, ValueOf(engine, 1));
+    }
+
+    // Two connections of one process are two Jet users, as ACE's are. ACE, two OLE DB connections in one process
+    // (measured, an AutoNumber table with a unique index): the first's INSERT in a transaction draws 1; the second's
+    // draws 2 and is refused with 3218 after the retries, 2.2 s or more; after the first's COMMIT the second's INSERT
+    // goes ahead and draws 3.
+    [Fact]
+    public void Another_connections_INSERT_beside_an_open_transaction_is_refused_at_the_statement_and_goes_ahead_after_COMMIT()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using JetDatabase firstDb = JetDatabase.Open(copy.Path, readOnly: false);
+        using JetDatabase secondDb = JetDatabase.Open(copy.Path, readOnly: false);
+        var first = new QueryEngine(firstDb);
+        var second = new QueryEngine(secondDb);
+        first.ExecuteNonQuery("CREATE TABLE N (Id COUNTER PRIMARY KEY, K TEXT(30))");
+        first.ExecuteNonQuery("CREATE UNIQUE INDEX UxK ON N (K)");
+        Assert.Equal((1, 2), (firstDb.Channel.UserNumber, secondDb.Channel.UserNumber));
+        int Identity(QueryEngine engine) => Convert.ToInt32(engine.ExecuteQuery("SELECT @@IDENTITY").Rows.Single()[0]);
+
+        first.ExecuteNonQuery("BEGIN TRANSACTION");
+        first.ExecuteNonQuery("INSERT INTO N (K) VALUES ('first')");
+        Assert.Equal(1, Identity(first));
+
+        var wait = Stopwatch.StartNew();
+        var refused = Assert.Throws<InvalidOperationException>(() => second.ExecuteNonQuery("INSERT INTO N (K) VALUES ('second')"));
+        wait.Stop();
+        Assert.Equal(CurrentlyLocked, refused.Message);
+        Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
+        // The first's uncommitted row is not the second's to read, and reading waits for nothing.
+        Assert.Empty(second.ExecuteQuery("SELECT Id FROM N").Rows.ToList());
+
+        first.ExecuteNonQuery("COMMIT");
+        Assert.Equal(1, second.ExecuteNonQuery("INSERT INTO N (K) VALUES ('second')"));
+        Assert.Equal(3, Identity(second));
+        Assert.Equal([1, 3], first.ExecuteQuery("SELECT Id FROM N ORDER BY Id").Rows.Select(r => Convert.ToInt32(r[0])).ToArray());
+
+        // Each wrote its own commit slot, and nothing is left locked.
+        using JetLockFile other = OtherUserOf(copy.Path);
+        AssertNothingLocked(other, copy.Path);
     }
 
     [Fact]
@@ -146,6 +189,205 @@ public class PageLockStatementTests
         Assert.Equal("BBBBBBBBBBBB", ValueOf(engine, 1));
     }
 
+    // A chained memo is read under the reader's shared byte on the chain's first page, held for the statement and let go
+    // when it returns — inside an explicit transaction too (locking.md §4, §5).
+    [Fact]
+    public void A_statement_reading_a_chained_memo_holds_its_first_pages_shared_byte_until_it_returns()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        (int first, int[] rest, _) = CreateMemos(engine, copy.Path);
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        database.ReadConsistent(() =>
+        {
+            Assert.Equal(Chained, (string?)engine.ExecuteQuery("SELECT Notes FROM M WHERE Id = 2").Rows.Single()[0]);
+            Assert.False(ExclusiveIsFree(other, first));
+            Assert.True(SharedIsFree(other, first));
+            foreach (int page in rest) Assert.True(ExclusiveIsFree(other, page));
+            return 0;
+        });
+        AssertNothingLocked(other, copy.Path);
+
+        // A query's rows read after it returned hold it for the read alone.
+        Assert.Equal(Chained, (string?)engine.ExecuteQuery("SELECT Notes FROM M WHERE Id = 2").Rows.Single()[0]);
+        AssertNothingLocked(other, copy.Path);
+
+        // Inside a transaction it goes when the statement returns, where the page the statement wrote is held to COMMIT.
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        Assert.Equal(1, engine.ExecuteNonQuery("UPDATE M SET Tag = 1 WHERE Notes = @p",
+            new Dictionary<string, object?> { ["@p"] = Chained }));
+        Assert.True(ExclusiveIsFree(other, first));
+        Assert.False(AllFree(other, copy.Path));
+        engine.ExecuteNonQuery("COMMIT");
+        AssertNothingLocked(other, copy.Path);
+    }
+
+    [Fact]
+    public void A_chained_memo_whose_first_page_another_user_holds_is_refused_with_3624_after_the_retries()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        (int first, int[] rest, int single) = CreateMemos(engine, copy.Path);
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        HoldExclusive(other, first);
+        var wait = Stopwatch.StartNew();
+        var refused = Assert.Throws<InvalidOperationException>(
+            () => engine.ExecuteQuery("SELECT Notes FROM M WHERE Id = 2").Rows.Single());
+        wait.Stop();
+        Assert.Equal(CouldNotRead, refused.Message);
+        // ACE retries a refused long-value read three rounds of 21, back to back, and fails after about 6.5 s (measured
+        // on this table and value).
+        Assert.InRange(wait.ElapsedMilliseconds, 6000, 15_000);
+        ReleaseExclusive(other, first);
+
+        // The chain's other pages, a value on a single page and the data page holding the rows are read with no lock.
+        int dataPage = database.ReadConsistent(() => database.OpenTable("M").Rows().WithIds().Select(r => r.Id.Page).Distinct().Single());
+        foreach (int page in (int[])[.. rest, single, dataPage])
+        {
+            HoldExclusive(other, page);
+            var quick = Stopwatch.StartNew();
+            Assert.Equal([OnePage, Chained], engine.ExecuteQuery("SELECT Notes FROM M ORDER BY Id").Rows.Select(r => (string?)r[0]));
+            Assert.True(quick.ElapsedMilliseconds < 1000, $"Reading with page {page} held took {quick.ElapsedMilliseconds} ms.");
+            ReleaseExclusive(other, page);
+        }
+        AssertNothingLocked(other, copy.Path);
+    }
+
+    [Fact]
+    public void A_chained_memo_the_other_user_lets_go_of_during_the_retries_is_read()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        (int first, _, _) = CreateMemos(engine, copy.Path);
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        HoldExclusive(other, first);
+        Thread release = OnOwnThread(() =>
+        {
+            Thread.Sleep(500);
+            ReleaseExclusive(other, first);
+        });
+        var wait = Stopwatch.StartNew();
+        Assert.Equal(1, engine.ExecuteNonQuery("UPDATE M SET Tag = 1 WHERE Notes = @p",
+            new Dictionary<string, object?> { ["@p"] = Chained }));
+        Assert.InRange(wait.ElapsedMilliseconds, 400, 1900);
+        release.Join();
+        AssertNothingLocked(other, copy.Path);
+    }
+
+    // An UPDATE replacing a chained memo locks the old chain's first page exclusively, and another user reading the
+    // value — its shared byte on that page — refuses it with ACE's 3202 once the retries are spent (measured).
+    [Fact]
+    public void An_UPDATE_replacing_a_chained_memo_another_user_is_reading_fails_with_3202_after_the_retries()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        (int first, _, _) = CreateMemos(engine, copy.Path);
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        long reading = JetLockLayout.SharedByte(JetLockRegion.WriteRead, first, OtherUser);
+        Assert.True(other.TryLock(reading, 1));
+        var wait = Stopwatch.StartNew();
+        var refused = Assert.Throws<InvalidOperationException>(() => engine.ExecuteNonQuery(
+            "UPDATE M SET Notes = @p WHERE Id = 2", new Dictionary<string, object?> { ["@p"] = OnePage + "x" }));
+        wait.Stop();
+        Assert.Equal(CouldNotSave, refused.Message);
+        Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
+
+        // Another of the row's columns is no reason to stop.
+        Assert.Equal(1, engine.ExecuteNonQuery("UPDATE M SET Tag = 2 WHERE Id = 2"));
+        other.Unlock(reading, 1);
+        Assert.Equal(Chained, (string?)engine.ExecuteQuery("SELECT Notes FROM M WHERE Id = 2").Rows.Single()[0]);
+
+        // Let go, it goes ahead; the lock goes when the statement returns, inside a transaction too.
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        Assert.Equal(1, engine.ExecuteNonQuery("UPDATE M SET Notes = @p WHERE Id = 2",
+            new Dictionary<string, object?> { ["@p"] = OnePage + "x" }));
+        Assert.True(ExclusiveIsFree(other, first));
+        engine.ExecuteNonQuery("COMMIT");
+        AssertNothingLocked(other, copy.Path);
+        Assert.Equal(OnePage + "x", (string?)engine.ExecuteQuery("SELECT Notes FROM M WHERE Id = 2").Rows.Single()[0]);
+    }
+
+    // A DELETE whose chained memo another user is reading waits out the retries and deletes the row anyway, leaving the
+    // chain where it is: still allocated, still the column's — as ACE's DELETE does (measured, byte for byte, in
+    // PageLockAccessTests).
+    [Fact]
+    public void A_DELETE_of_a_row_whose_chained_memo_another_user_is_reading_waits_and_deletes_it_leaving_the_chain()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        (int first, int[] rest, _) = CreateMemos(engine, copy.Path);
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        long reading = JetLockLayout.SharedByte(JetLockRegion.WriteRead, first, OtherUser);
+        Assert.True(other.TryLock(reading, 1));
+        var wait = Stopwatch.StartNew();
+        Assert.Equal(1, engine.ExecuteNonQuery("DELETE FROM M WHERE Id = 2"));
+        wait.Stop();
+        Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
+        other.Unlock(reading, 1);
+        AssertNothingLocked(other, copy.Path);
+        Assert.Empty(engine.ExecuteQuery("SELECT Id FROM M WHERE Id = 2").Rows.ToList());
+
+        // The chain's pages are still the column's, and none of them is free.
+        other.Dispose();
+        database.Dispose();
+        using JetDatabase reopened = JetDatabase.Open(copy.Path);
+        TestDatabases.AssertPageOwnership(reopened);
+        Catalog.TableDefinition table = reopened.Catalog.FindTable("M")!;
+        PageChannel channel = reopened.Channel;
+        var maps = new Storage.UsageMap(channel, table);
+        (int Row, int Page) owned = table.LongValueOwnedMaps.Single().Value;
+        HashSet<int> ownedPages = [.. maps.PagesInMap(owned.Row, owned.Page)];
+        (_, _, byte[] holder, Pages.DataPage.RowSlot slot) = TestDatabases.GlobalMap(channel, channel.Format.FreePagesMapPointerOffset);
+        HashSet<int> free = [.. Storage.UsageMap.PagesInRecord(channel, holder.AsSpan(slot.Offset, slot.Length), null, "free")];
+        foreach (int page in (int[])[first, .. rest])
+        {
+            Assert.Contains(page, ownedPages);
+            Assert.DoesNotContain(page, free);
+        }
+    }
+
+    // A memo stored on a single page and one chained over three; text no compression shortens, so the chain's first page
+    // is the one holding its first character.
+    private static readonly string OnePage = new('丁', 500);
+    private static readonly string Chained = new string('币', 1000) + new string('市', 4000);
+
+    // CREATE TABLE M with the two memos as rows 1 and 2; returns the chain's first page, its other pages and the single page.
+    private static (int First, int[] Others, int Single) CreateMemos(QueryEngine engine, string path)
+    {
+        engine.ExecuteNonQuery("CREATE TABLE M (Id INTEGER PRIMARY KEY, Tag INTEGER, Notes MEMO)");
+        engine.ExecuteNonQuery("INSERT INTO M (Id, Notes) VALUES (1, @p)", new Dictionary<string, object?> { ["@p"] = OnePage });
+        engine.ExecuteNonQuery("INSERT INTO M (Id, Notes) VALUES (2, @p)", new Dictionary<string, object?> { ["@p"] = Chained });
+
+        int pageSize = PageSize(path);
+        byte[] file;
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            file = new byte[stream.Length];
+            stream.ReadExactly(file);
+        }
+        int[] Holding(char c) => [.. Enumerable.Range(1, file.Length / pageSize - 1).Where(p =>
+            file.AsSpan(p * pageSize, pageSize).IndexOf(Encoding.Unicode.GetBytes(new string(c, 2))) >= 0)];
+        int first = Assert.Single(Holding('币'));
+        int[] rest = [.. Holding('市').Where(p => p != first)];
+        Assert.Equal(2, rest.Length);
+        return (first, rest, Assert.Single(Holding('丁')));
+    }
+
     // CREATE TABLE T and two rows, which share a data page; returns that page.
     private static int CreateTwoRows(QueryEngine engine, JetDatabase database)
     {
@@ -206,6 +448,14 @@ public class PageLockStatementTests
         long pages = new FileInfo(path).Length / pageSize;
         for (int page = 0; page < pages; page++)
             Assert.True(ExclusiveIsFree(other, page), $"Page {page} is still locked.");
+    }
+
+    private static bool AllFree(JetLockFile other, string path)
+    {
+        long pages = new FileInfo(path).Length / PageSize(path);
+        for (int page = 0; page < pages; page++)
+            if (!ExclusiveIsFree(other, page)) return false;
+        return true;
     }
 
     private static int PageSize(string path)

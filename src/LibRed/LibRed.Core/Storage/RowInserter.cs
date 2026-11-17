@@ -183,7 +183,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
             if (preservedCalculated?.ContainsKey(column.Index) == true) continue;
             if (oldCalculated.TryGetValue(column.Index, out byte[]? stale)
                 && stale.Length >= format.LongValueDescriptorSize)
-                FreeLongValue(column, stale, releaseAtClose: false);
+                FreeLongValue(column, stale, releaseAtClose: false, JetLockPurpose.LongValueReplace);
         }
 
         List<int> unwritten = MaterializeLongValues(storage, [.. replaced
@@ -191,7 +191,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
             .Select(r => r.Column.Index)]);
         // A chain goes back at once; a single-page value's page this empties is held, as a delete holds it (measured).
         foreach ((ColumnDef column, byte[] descriptor) in replaced)
-            FreeLongValue(column, descriptor, releaseAtClose: true);
+            FreeLongValue(column, descriptor, releaseAtClose: true, JetLockPurpose.LongValueReplace);
         foreach (int page in unwritten) _channel.Allocator.Free(page);
 
         PageBuffer srcPage = _channel.ReadPageShared(id.Page);
@@ -386,7 +386,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         foreach (ColumnDef column in _table.Columns)
             if ((column.Type is JetDataType.Memo or JetDataType.Ole || column.HasLongValueMap)
                 && oldDescriptors.TryGetValue(column.Index, out byte[]? d))
-                FreeLongValue(column, d, releaseAtClose: true);
+                FreeLongValue(column, d, releaseAtClose: true, JetLockPurpose.LongValueRemove);
 
         byte[] page = ArrayPool<byte>.Shared.Rent(format.PageSize);
         try
@@ -709,8 +709,10 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
     /// Measured against ACE on one connection: a chained value's pages are set in the global free map at once,
     /// whether an UPDATE replaced the value or a DELETE removed its row. A packed value's page an UPDATE or a DELETE
     /// empties is held until close (<paramref name="releaseAtClose"/>, see <see cref="PageAllocator.Release"/>).
+    /// A chained value is given back under this user's exclusive lock on its first page, for
+    /// <paramref name="purpose"/> (<see cref="PageChannel.LockLongValue"/>).
     /// </remarks>
-    private void FreeLongValue(ColumnDef column, byte[] descriptor, bool releaseAtClose)
+    private void FreeLongValue(ColumnDef column, byte[] descriptor, bool releaseAtClose, JetLockPurpose purpose)
     {
         // The descriptor comes off the row's variable chunk, so its width is whatever the offset table said, and
         // it is read — and checked — exactly as LongValueStore reads it: a short chunk would otherwise index past
@@ -730,21 +732,33 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
             ReleasePackedValue(column, valuePage, valueRow, owned, free, releaseAtClose);
             return;
         }
-        var reader = new LongValueStore(_channel);
-        _ = reader.ResolveWithPages(descriptor, out IReadOnlyList<int> pages);
-        var maps = new UsageMap(_channel, _table);
-        HashSet<int> ownedPages = maps.PagesInMap(owned.Row, owned.Page).ToHashSet();
-        if (free.Page != 0) _ = maps.PagesInMap(free.Row, free.Page); // validate both mutation targets before the first free
-        foreach (int page in pages)
-            if (!ownedPages.Contains(page))
-                throw new InvalidDataException(
-                    $"Long-value page {page} is not present in column '{column.Name}'s owned-pages map.");
+        // The chain's first page is locked exclusively before the chain is read and given back, as ACE's writer locks it
+        // (measured): another user reading the value refuses an UPDATE with 3202, and a DELETE goes ahead without it and
+        // leaves the chain where it is — still allocated, still the column's — as ACE's does (locking.md §4).
+        if (!_channel.LockLongValue(valuePage, purpose, out bool alone)) return;
+        try
+        {
+            var reader = new LongValueStore(_channel);
+            _ = reader.ResolveWithPages(descriptor, out IReadOnlyList<int> pages);
+            var maps = new UsageMap(_channel, _table);
+            HashSet<int> ownedPages = maps.PagesInMap(owned.Row, owned.Page).ToHashSet();
+            if (free.Page != 0) _ = maps.PagesInMap(free.Row, free.Page); // validate both mutation targets before the first free
+            foreach (int page in pages)
+                if (!ownedPages.Contains(page))
+                    throw new InvalidDataException(
+                        $"Long-value page {page} is not present in column '{column.Name}'s owned-pages map.");
 
-        // Validation above completes before the first free-map or page mutation, so a malformed chain cannot
-        // partially free. The writes themselves are atomic under the caller's transaction (the engine opens
-        // one per statement); a direct Core caller without one gets no more than any other multi-page write.
-        foreach (int page in pages)
-            ReleaseLongValuePage(page, owned, free, releaseAtClose: false);
+            // Validation above completes before the first free-map or page mutation, so a malformed chain cannot
+            // partially free. The writes themselves are atomic under the caller's transaction (the engine opens
+            // one per statement); a direct Core caller without one gets no more than any other multi-page write.
+            foreach (int page in pages)
+                ReleaseLongValuePage(page, owned, free, releaseAtClose: false);
+        }
+        finally
+        {
+            // Outside a statement the lock was this write's alone, and goes with it (PageChannel.LockLongValue).
+            if (alone) _channel.UnlockLongValue(valuePage, exclusive: true);
+        }
     }
 
     /// <summary>Gives a long-value page back — held until close or free at once — and clears it from the

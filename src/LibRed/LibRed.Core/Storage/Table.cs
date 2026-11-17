@@ -120,8 +120,18 @@ public sealed class Table
     /// <summary>Decodes the row at <paramref name="id"/> (following an overflow forward-pointer to a
     /// relocated row), or <see langword="null"/> if the slot is empty/deleted. Used by an index seek, which
     /// yields row ids. <paramref name="decode"/> is as for <see cref="Rows"/>.</summary>
-    public object?[]? GetRow(RowId id, bool[]? decode = null) =>
-        GetRow(id, decode is null ? SeekDecoder(null) : NewDecoder(decode));
+    public object?[]? GetRow(RowId id, bool[]? decode = null)
+    {
+        using HeldTableLocks? held = LockForRead();
+        return GetRow(id, decode is null ? SeekDecoder(null) : NewDecoder(decode));
+    }
+
+    /// <summary>The table's read lock for one read or enumeration of its rows (<see cref="PageChannel.LockTable"/>):
+    /// taken, and owned by the caller, only outside every statement — a Core API read, or a query's rows read after it
+    /// returned — and held until the read or the enumeration ends; inside a statement, the statement or its transaction
+    /// already holds it. None for the catalog's own reads of its tables.</summary>
+    internal HeldTableLocks? LockForRead() =>
+        _locked ? Channel.LockTable(Definition.DefinitionPage, Name, TableUse.Read) : null;
 
     private object?[]? GetRow(RowId id, RowCodec decoder)
     {
@@ -155,6 +165,7 @@ public sealed class Table
     /// the predicate. <paramref name="decode"/> is as for <see cref="Rows"/>.</summary>
     public IEnumerable<object?[]> SeekRows(IndexDef index, object?[] values, bool[]? decode = null)
     {
+        using HeldTableLocks? held = LockForRead();
         RowCodec decoder = SeekDecoder(decode);
         foreach (RowId id in IndexReader.Seek(index, values))
             if (GetRow(id, decoder) is { } row)
@@ -167,6 +178,7 @@ public sealed class Table
     /// in full.</summary>
     public IEnumerable<(RowId Id, object?[] Values)> SeekRowsWithIds(IndexDef index, object?[] values, bool[]? decode = null)
     {
+        using HeldTableLocks? held = LockForRead();
         RowCodec decoder = SeekDecoder(decode);
         foreach (RowId id in IndexReader.Seek(index, values))
             if (GetRow(id, decoder) is { } row)
@@ -184,6 +196,7 @@ public sealed class Table
     public IEnumerable<(RowId Id, object?[] Values)> SeekRangeRowsWithIds(
         IndexDef index, object?[]? low, object?[]? high, bool[]? decode = null)
     {
+        using HeldTableLocks? held = LockForRead();
         RowCodec decoder = SeekDecoder(decode);
         foreach (RowId id in IndexReader.SeekRange(index, low, high))
             if (GetRow(id, decoder) is { } row)
@@ -306,7 +319,7 @@ public sealed class Table
         if (ownTransaction) Channel.BeginTransaction();
         try
         {
-            if (_locked) Channel.LockTable(Definition.DefinitionPage, Name, TableUse.Write);
+            LockForWrite();
             action();
             if (ownTransaction) Channel.CommitTransaction(flush: false);
         }
@@ -315,6 +328,15 @@ public sealed class Table
             if (ownTransaction) Channel.RollbackTransaction(failed: true);
             throw;
         }
+    }
+
+    /// <summary>The table's write locks (<see cref="PageChannel.LockTable"/>), taken by each write, and by a statement
+    /// for its target before it reads a row: ACE opens the table an <c>UPDATE</c> or <c>DELETE</c> names for writing
+    /// whether or not a row is then written — after one matching no row, the transaction has the table in use
+    /// (measured).</summary>
+    internal void LockForWrite()
+    {
+        if (_locked) Channel.LockTable(Definition.DefinitionPage, Name, TableUse.Write);
     }
 
     /// <summary>Removes a deleted row's entry from one index.</summary>

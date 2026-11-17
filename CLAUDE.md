@@ -373,24 +373,31 @@ parser: the lexer/parser are pre-generated and committed under `LibRed.Sql/Gramm
 > since changed is rolled back and run again. So LibRed and Access can write one file at the same time.
 >
 > - **Where it lives:** `LibRed.Core/IO/JetLockLayout.cs` (the one copy of the lock offsets), `JetLockFile.cs`
->   (the OS range-lock primitive), `JetUserRegistration.cs` (the user, and the per-process table of held locks),
->   and the lock and publish paths in `PageChannel` / `PageCache` (`PublishBatch` is the one place a batch and
->   its slot writes go through). One Jet user per process per file, held by the `PageCache`. `ILockManager` /
->   `MonitorLockManager` are only the in-process seam.
+>   (the OS range-lock primitive), `JetUserRegistration.cs` (a connection's user, and the table of the locks it
+>   holds), and the lock and publish paths in `PageChannel` / `PageCache` (`PublishBatch` is the one place a batch
+>   and its slot writes go through). One Jet user per connection — per `PageChannel`, each with its own lock-file
+>   handle — as each ACE connection is one, two in one process included (measured); the per-file `PageCache` and
+>   its publish gate are still the process's. `ILockManager` / `MonitorLockManager` are only the in-process seam.
 > - **What takes no part:** an exclusive open (no lock file, no range locks — the OS share mode does it, as
 >   ACE's does); every non-Windows platform; and a channel whose lock file could not be opened. There LibRed is
 >   still a **single-writer** engine, and two processes writing one file corrupt it.
-> - **Inside one process nothing changed:** connections stay optimistic among themselves. Transactions use a
->   **deferred-write overlay** per `PageChannel`, not an undo log: writes buffer until commit and publish under a
->   lock, so a reader cannot see another handle's uncommitted pages, and a stale writer fails commit with a
->   write-conflict error.
+> - **Inside one process, connections are users of their own:** on a shared open on Windows a page or table one
+>   connection holds in a transaction refuses another connection's *statement* — ACE's retries, then 3218, 3211 or
+>   3008 — exactly as between two ACE connections in one process (measured), and no longer its COMMIT. A
+>   connection's own design change of a table it has in use (its own open result, or its transaction having
+>   written the table) is refused at once with 3211, on every platform and open mode, as ACE refuses it.
+>   Transactions use a **deferred-write overlay** per `PageChannel`, not an undo log: writes buffer until commit
+>   and publish under a lock, so a reader cannot see another handle's uncommitted pages. Where there is no Jet user
+>   (off Windows, no lock file) connections stay optimistic among themselves, and a stale writer fails commit with
+>   a write-conflict error.
 > - **Still unlike ACE, or unsafe, even on Windows:** inside a transaction LibRed writes the AutoNumbers drawn and
 >   page 1 and lets them go as each statement returns, where ACE does about 500 ms after (and holds page 1 when
->   the statement freed, grew or converted a map, and the TDEF page after a design change to it); a second
->   connection in the same process is refused at COMMIT where ACE refuses its INSERT; long-value reads take no lock; rows
->   enumerated after a statement has returned, and Core API calls made outside both a statement and a
->   transaction, hold no table lock. Read `locking.md` and `docs/verification-backlog.md` before relying on any
->   of it — they also list every behaviour chosen without a measurement.
+>   the statement freed, grew or converted a map, and the TDEF page after a design change to it); the
+>   connections of one process share a page cache, so one reads another's commit on its next statement where
+>   ACE's waits for its 5-second refresh; another connection's DELETE of a parent row beside an uncommitted child
+>   INSERT goes ahead and the child's COMMIT is refused, where ACE refuses the DELETE; a refused long-value read fails the whole row, where ACE's fails the long-value column. Read
+>   `locking.md` and `docs/verification-backlog.md` before relying on any of it — they also list every behaviour
+>   chosen without a measurement.
 > - **Measuring and testing it:** ACE's behaviour is measured from a ProcMon capture decoded by
 >   `tools/JetLockTrace`, with `tools/JetLockScenario` driving ACE (the user runs ProcMon). A plain test plays
 >   another user with a second `JetLockFile` handle, guarded to Windows; a test against real ACE goes in the

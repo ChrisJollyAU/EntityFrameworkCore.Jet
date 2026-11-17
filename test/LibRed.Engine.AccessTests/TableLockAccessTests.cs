@@ -224,6 +224,69 @@ public class TableLockAccessTests
         finally { TemporaryDatabase.Delete(path); }
     }
 
+    // A LibRed query whose rows are being read holds the table, as ACE's open reader does (measured): ACE's ALTER TABLE
+    // is refused with its own 3211 until the enumeration is disposed, and then succeeds.
+    [Fact]
+    public void A_LibRed_result_being_read_refuses_ACEs_ALTER_TABLE_with_3211_until_it_is_disposed()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-tablelock-ace-");
+        try
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(database);
+            CreateRows(engine, 50);
+
+            using OleDbConnection ace = AceTestDatabase.Open(path);
+            Assert.Equal("row1", Value(ace, 1));
+            using (IEnumerator<object?[]> rows = engine.ExecuteQuery("SELECT A FROM T ORDER BY Id").Rows.GetEnumerator())
+            {
+                for (int i = 0; i < 10; i++) Assert.True(rows.MoveNext());
+                var refused = Assert.Throws<OleDbException>(() => Exec(ace, "ALTER TABLE T ADD COLUMN C INTEGER"));
+                Assert.Equal("3211", refused.Errors[0].SQLState);
+                Assert.Contains(InUse("T"), refused.Message, StringComparison.Ordinal);
+                Assert.True(rows.MoveNext());
+            }
+
+            Exec(ace, "ALTER TABLE T ADD COLUMN C INTEGER");
+            Assert.True(Poll(AceSees, () => engine.ExecuteQuery("SELECT * FROM T").Rows.ToList() is { Count: 50 }
+                && engine.ExecuteQuery("SELECT * FROM T").ColumnNames.SequenceEqual(["Id", "A", "C"])),
+                "LibRed does not read ACE's new column.");
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // ACE's open reader holds the table until it is closed, whether or not every row has been fetched (measured), and
+    // LibRed's design change is refused meanwhile with 3211, and goes ahead once it is closed.
+    [Fact]
+    public void An_open_ACE_reader_refuses_LibReds_ALTER_TABLE_with_3211_until_it_is_closed()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-tablelock-ace-");
+        try
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(database);
+            CreateRows(engine, 50);
+
+            using OleDbConnection ace = AceTestDatabase.Open(path);
+            using (OleDbCommand command = ace.CreateCommand())
+            {
+                command.CommandText = "SELECT A FROM T";
+                using OleDbDataReader reader = command.ExecuteReader();
+                Assert.True(reader.Read());
+                var wait = Stopwatch.StartNew();
+                var refused = Assert.Throws<InvalidOperationException>(() => engine.ExecuteNonQuery("ALTER TABLE T ADD COLUMN C INTEGER"));
+                Assert.Equal(InUse("T"), refused.Message);
+                Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
+                while (reader.Read()) { }
+            }
+
+            engine.ExecuteNonQuery("ALTER TABLE T ADD COLUMN C INTEGER");
+            Assert.True(Poll(AceSees, () => AceColumns(ace).SequenceEqual(["Id", "A", "C"])),
+                $"ACE reads the columns {string.Join(", ", AceColumns(ace))}.");
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
     private static void CreateRows(QueryEngine engine, int count)
     {
         engine.ExecuteNonQuery("CREATE TABLE T (Id INTEGER PRIMARY KEY, A TEXT(20))");

@@ -1,6 +1,7 @@
 using System.Data.OleDb;
 using System.Diagnostics;
 using LibRed.Core.Tests;
+using LibRed.IO;
 using Xunit;
 
 namespace LibRed.Engine.Tests;
@@ -221,6 +222,202 @@ public class PageLockAccessTests
             TestContext.Current.TestOutputHelper?.WriteLine($"Retries on 3218: LibRed {libRedRetries}, ACE {aceRetries}.");
         }
         finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // A chained memo: ACE's UPDATE of it locks the old chain's first page exclusively and lets it go about 500 ms after
+    // the statement, inside a transaction too (measured); LibRed's read waits for it, and reads the value committed.
+    [Fact]
+    public void LibReds_read_of_a_chained_memo_ACE_is_updating_waits_for_the_chain_and_reads_the_committed_value()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-pagelock-ace-");
+        try
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(database);
+            CreateMemo(engine);
+
+            using OleDbConnection ace = AceTestDatabase.Open(path);
+            using (OleDbTransaction transaction = ace.BeginTransaction())
+            {
+                UpdateMemo(ace, AceMemo, transaction);
+                var wait = Stopwatch.StartNew();
+                Assert.Equal(LibRedMemo, Memo(engine));
+                wait.Stop();
+                TestContext.Current.TestOutputHelper?.WriteLine($"LibRed's read waited {wait.ElapsedMilliseconds} ms.");
+                Assert.InRange(wait.ElapsedMilliseconds, 100, 1900);
+                transaction.Commit();
+            }
+
+            Assert.True(Poll(AceSees, () => Memo(engine) == AceMemo), "LibRed did not read ACE's update.");
+            Assert.Equal(AceMemo, AceMemoValue(ace));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // LibRed holds its shared byte on the chain's first page for its statement, and ACE's UPDATE of the memo is refused
+    // it with ACE's own 3202 once its retries are spent, as against another ACE reader (measured).
+    [Fact]
+    public void ACEs_UPDATE_of_a_chained_memo_LibRed_is_reading_is_refused_with_3202_and_goes_ahead_after()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-pagelock-ace-");
+        try
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(database);
+            CreateMemo(engine);
+
+            using OleDbConnection ace = AceTestDatabase.Open(path);
+            database.ReadConsistent(() =>
+            {
+                Assert.Equal(LibRedMemo, Memo(engine));
+                var refused = Assert.Throws<OleDbException>(() => UpdateMemo(ace, AceMemo));
+                Assert.Equal("3202", refused.Errors[0].SQLState);
+                return 0;
+            });
+
+            UpdateMemo(ace, AceMemo);
+            Assert.Equal(AceMemo, AceMemoValue(ace));
+            Assert.True(Poll(AceSees, () => Memo(engine) == AceMemo), "LibRed did not read ACE's update.");
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // ACE's read of a chained memo keeps its shared byte on the chain's first page about 500 ms after the statement
+    // (measured); LibRed's UPDATE replacing the memo locks that page exclusively, so it waits for ACE to let go, and then
+    // goes ahead.
+    [Fact]
+    public void LibReds_UPDATE_of_a_chained_memo_ACE_has_just_read_waits_for_ACEs_read_lock_and_goes_ahead()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-pagelock-ace-");
+        try
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(database);
+            CreateMemo(engine);
+
+            using OleDbConnection ace = AceTestDatabase.Open(path);
+            Assert.Equal(LibRedMemo, AceMemoValue(ace));
+            var wait = Stopwatch.StartNew();
+            Assert.Equal(1, engine.ExecuteNonQuery("UPDATE M SET Notes = @p WHERE Id = 1",
+                new Dictionary<string, object?> { ["@p"] = AceMemo }));
+            wait.Stop();
+            TestContext.Current.TestOutputHelper?.WriteLine($"LibRed's UPDATE waited {wait.ElapsedMilliseconds} ms.");
+            Assert.InRange(wait.ElapsedMilliseconds, 100, 1900);
+
+            Assert.Equal(AceMemo, Memo(engine));
+            Assert.True(Poll(AceSees, () => AceMemoValue(ace) == AceMemo), "ACE did not read LibRed's update.");
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // A DELETE whose row's chained memo another user is reading waits out the retries and deletes the row, leaving the
+    // chain allocated and the column's (measured): LibRed's leaves the file byte for byte as ACE's does.
+    [Fact]
+    public void LibReds_and_ACEs_DELETE_of_a_chained_memo_another_user_is_reading_leave_the_same_file()
+    {
+        string seed = TemporaryDatabase.CopyPath(Northwind, "libred-pagelock-ace-");
+        string byAce = TemporaryDatabase.CopyPath(Northwind, "libred-pagelock-ace-");
+        string byLibRed = TemporaryDatabase.CopyPath(Northwind, "libred-pagelock-ace-");
+        try
+        {
+            string chained = new string('币', 1000) + new string('市', 4000);   // its first page alone holds 币
+            using (JetDatabase database = JetDatabase.Open(seed, readOnly: false))
+            {
+                var engine = new QueryEngine(database);
+                engine.ExecuteNonQuery("CREATE TABLE M (Id INTEGER PRIMARY KEY, Tag INTEGER, Notes MEMO)");
+                engine.ExecuteNonQuery("INSERT INTO M (Id, Tag, Notes) VALUES (1, 0, @p)", new Dictionary<string, object?> { ["@p"] = chained });
+                engine.ExecuteNonQuery("INSERT INTO M (Id, Tag, Notes) VALUES (2, 0, 'x')");
+            }
+            File.Copy(seed, byAce, overwrite: true);
+            File.Copy(seed, byLibRed, overwrite: true);
+            int first = ChainFirstPage(seed, '币');
+
+            using (OleDbConnection ace = AceTestDatabase.Open(byAce))
+            {
+                Assert.Equal("x", (string?)Scalar(ace, "SELECT Notes FROM M WHERE Id = 2"));
+                Thread.Sleep(1000);   // ACE's own locks of that read are gone
+                using JetLockFile other = JetLockFile.Open(JetLockFile.PathFor(byAce)!, createIfMissing: false);
+                long reading = JetLockLayout.SharedByte(JetLockRegion.WriteRead, first, OtherUser);
+                Assert.True(other.TryLock(reading, 1));
+                var wait = Stopwatch.StartNew();
+                Exec(ace, "DELETE FROM M WHERE Id = 1");
+                Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
+                other.Unlock(reading, 1);
+                Assert.Equal(1, Convert.ToInt32(Scalar(ace, "SELECT COUNT(*) FROM M"), System.Globalization.CultureInfo.InvariantCulture));
+                Thread.Sleep(1000);
+            }
+
+            using (JetDatabase database = JetDatabase.Open(byLibRed, readOnly: false))
+            {
+                using JetLockFile other = JetLockFile.Open(JetLockFile.PathFor(byLibRed)!, createIfMissing: false);
+                long reading = JetLockLayout.SharedByte(JetLockRegion.WriteRead, first, OtherUser);
+                Assert.True(other.TryLock(reading, 1));
+                var wait = Stopwatch.StartNew();
+                Assert.Equal(1, new QueryEngine(database).ExecuteNonQuery("DELETE FROM M WHERE Id = 1"));
+                Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
+                other.Unlock(reading, 1);
+            }
+            AceTestDatabase.ReleaseAbandonedComObjects();
+
+            byte[] aceFile = File.ReadAllBytes(byAce), libRedFile = File.ReadAllBytes(byLibRed);
+            Assert.Equal(aceFile.Length, libRedFile.Length);
+            int[] differing = [.. Enumerable.Range(0, aceFile.Length).Where(i => aceFile[i] != libRedFile[i])];
+            Assert.True(differing.Length == 0,
+                $"Bytes differ at {string.Join(", ", differing.Take(20).Select(i => $"page {i / 4096} 0x{i % 4096:X3}"))}.");
+        }
+        finally
+        {
+            TemporaryDatabase.Delete(seed);
+            TemporaryDatabase.Delete(byAce);
+            TemporaryDatabase.Delete(byLibRed);
+        }
+    }
+
+    // The one page holding the start of a chain written with text no compression shortens.
+    private static int ChainFirstPage(string path, char first)
+    {
+        byte[] file = File.ReadAllBytes(path);
+        byte[] needle = System.Text.Encoding.Unicode.GetBytes(new string(first, 2));
+        return Assert.Single(Enumerable.Range(1, file.Length / 4096 - 1),
+            p => file.AsSpan(p * 4096, 4096).IndexOf(needle) >= 0);
+    }
+
+    private static object? Scalar(OleDbConnection ace, string sql)
+    {
+        using OleDbCommand command = ace.CreateCommand();
+        command.CommandText = sql;
+        return command.ExecuteScalar();
+    }
+
+    private const int OtherUser = 5;
+
+    // Values a chain holds (over two pages): text no compression shortens.
+    private static readonly string LibRedMemo = new('币', 3000);
+    private static readonly string AceMemo = new('市', 3000);
+
+    private static void CreateMemo(QueryEngine engine)
+    {
+        engine.ExecuteNonQuery("CREATE TABLE M (Id INTEGER PRIMARY KEY, Notes MEMO)");
+        engine.ExecuteNonQuery("INSERT INTO M (Id, Notes) VALUES (1, @p)", new Dictionary<string, object?> { ["@p"] = LibRedMemo });
+    }
+
+    private static string? Memo(QueryEngine engine) =>
+        (string?)engine.ExecuteQuery("SELECT Notes FROM M WHERE Id = 1").Rows.Single()[0];
+
+    private static string? AceMemoValue(OleDbConnection ace)
+    {
+        using OleDbCommand command = ace.CreateCommand();
+        command.CommandText = "SELECT Notes FROM M WHERE Id = 1";
+        return (string?)command.ExecuteScalar();
+    }
+
+    private static void UpdateMemo(OleDbConnection ace, string value, OleDbTransaction? transaction = null)
+    {
+        using OleDbCommand command = ace.CreateCommand();
+        command.CommandText = "UPDATE M SET Notes = ? WHERE Id = 1";
+        command.Transaction = transaction;
+        command.Parameters.Add("notes", OleDbType.LongVarWChar).Value = value;
+        command.ExecuteNonQuery();
     }
 
     private static void CreateRows(QueryEngine engine, int count)

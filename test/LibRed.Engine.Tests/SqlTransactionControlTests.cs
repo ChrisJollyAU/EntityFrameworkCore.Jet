@@ -135,9 +135,20 @@ public class SqlTransactionControlTests : TempDatabaseTest
         e.ExecuteNonQuery("CREATE TABLE Parents (Id LONG PRIMARY KEY)");
         e.ExecuteNonQuery("CREATE TABLE Children (Id LONG PRIMARY KEY, ParentId LONG, CONSTRAINT FK_Child FOREIGN KEY (ParentId) REFERENCES Parents (Id))");
         e.ExecuteNonQuery("INSERT INTO Parents VALUES (1)");
+
+        // ACE on these tables (measured): after the INSERT, the transaction has Children in use, and its own DROP
+        // CONSTRAINT is refused at once with 3211; with the constraint dropped first, every statement goes ahead.
         e.ExecuteNonQuery("BEGIN TRANSACTION");
         e.ExecuteNonQuery("INSERT INTO Children VALUES (10, 1)");
+        var refused = Assert.Throws<InvalidOperationException>(() => e.ExecuteNonQuery("ALTER TABLE Children DROP CONSTRAINT FK_Child"));
+        Assert.Equal(
+            "The database engine could not lock table 'Children' because it is already in use by another person or process.",
+            refused.Message);
+        e.ExecuteNonQuery("ROLLBACK");
+
+        e.ExecuteNonQuery("BEGIN TRANSACTION");
         e.ExecuteNonQuery("ALTER TABLE Children DROP CONSTRAINT FK_Child");
+        e.ExecuteNonQuery("INSERT INTO Children VALUES (10, 1)");
         e.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1");
         e.ExecuteNonQuery("COMMIT");
         Assert.Single(e.ExecuteQuery("SELECT * FROM Children").Rows);

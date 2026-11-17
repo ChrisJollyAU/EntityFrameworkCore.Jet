@@ -21,8 +21,11 @@ public class TableLockStatementTests
     private static string InUse(string table) =>
         $"The database engine could not lock table '{table}' because it is already in use by another person or process.";
 
+    // A query holds its table's read byte until its rows have been read — the result disposed, or read to the end — and
+    // no longer, inside a transaction too: ACE's reader holds it until it is closed, whether or not every row has been
+    // fetched, and lets it go then, before COMMIT (measured on this table and query, autocommit and in a transaction).
     [Fact]
-    public void A_transaction_that_read_a_table_holds_it_against_a_design_lock_until_COMMIT_or_ROLLBACK()
+    public void A_query_holds_its_table_against_a_design_lock_until_its_rows_are_read_inside_a_transaction_too()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
         using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-tablelock-");
@@ -31,23 +34,68 @@ public class TableLockStatementTests
         int tdef = CreateTable(engine, database, "T");
         using JetLockFile other = OtherUserOf(copy.Path);
 
-        // An autocommit SELECT holds its byte for the statement alone.
-        Assert.Single(engine.ExecuteQuery("SELECT A FROM T WHERE Id = 1").Rows.ToList());
-        AssertTableFree(other, tdef);
-
-        foreach (string end in (string[])["COMMIT", "ROLLBACK"])
+        foreach (string? end in (string?[])[null, "COMMIT", "ROLLBACK"])
         {
-            engine.ExecuteNonQuery("BEGIN TRANSACTION");
-            Assert.Single(engine.ExecuteQuery("SELECT A FROM T WHERE Id = 1").Rows.ToList());
-            Assert.False(ExclusiveIsFree(other, JetLockRegion.TableRead, tdef));
-            Assert.False(other.TryLock(LibRedsByte(database, JetLockRegion.TableRead, tdef), 1));
-            // Another reader is not in its way: the other user's own byte is free.
-            Assert.True(SharedIsFree(other, JetLockRegion.TableRead, tdef));
-            Assert.True(ExclusiveIsFree(other, JetLockRegion.TableWrite, tdef));
+            if (end is not null) engine.ExecuteNonQuery("BEGIN TRANSACTION");
+            ResultSet result = engine.ExecuteQuery("SELECT A FROM T WHERE Id = 1");
+            using (IEnumerator<object?[]> rows = result.Rows.GetEnumerator())
+            {
+                Assert.True(rows.MoveNext());
+                Assert.False(ExclusiveIsFree(other, JetLockRegion.TableRead, tdef));
+                Assert.False(other.TryLock(LibRedsByte(database, JetLockRegion.TableRead, tdef), 1));
+                // Another reader is not in its way: the other user's own byte is free.
+                Assert.True(SharedIsFree(other, JetLockRegion.TableRead, tdef));
+                Assert.True(ExclusiveIsFree(other, JetLockRegion.TableWrite, tdef));
+                // Every row read, the enumeration not yet disposed: still held, as ACE's reader holds it until closed.
+                Assert.False(rows.MoveNext());
+                Assert.False(ExclusiveIsFree(other, JetLockRegion.TableRead, tdef));
+            }
+            AssertTableFree(other, tdef);
 
-            engine.ExecuteNonQuery(end);
+            // Read by a caller that disposes as it finishes, it is let go as well.
+            Assert.Single(engine.ExecuteQuery("SELECT A FROM T WHERE Id = 1").Rows.ToList());
+            AssertTableFree(other, tdef);
+
+            if (end is not null) engine.ExecuteNonQuery(end);
             AssertTableFree(other, tdef);
         }
+    }
+
+    // A result whose rows are never read holds its table until the connection's next statement begins, and one being read
+    // until it is disposed or the database closes — another user's design change is refused meanwhile, as ACE's open
+    // reader refuses it (measured: 3211 until the reader is closed).
+    [Fact]
+    public void A_result_holds_its_table_until_read_and_one_never_read_until_the_next_statement()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-tablelock-");
+        JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        int tdef = CreateTable(engine, database, "T");
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        ResultSet unread = engine.ExecuteQuery("SELECT A FROM T WHERE Id = 1");
+        Assert.False(ExclusiveIsFree(other, JetLockRegion.TableRead, tdef));
+        (long offset, long length) = JetLockLayout.ExclusiveRange(JetLockRegion.TableRead, tdef, OtherUser);
+        Assert.False(other.TryLock(offset, length));   // another user's design change is refused
+        engine.ExecuteNonQuery("UPDATE T SET A = 'two' WHERE Id = 1");
+        AssertTableFree(other, tdef);
+        // Read after all, it reads under a lock of its own.
+        Assert.Single(unread.Rows.ToList());
+        AssertTableFree(other, tdef);
+
+        // A non-query statement's rows are not kept.
+        Assert.Equal(-1, engine.ExecuteNonQuery("SELECT A FROM T"));
+        AssertTableFree(other, tdef);
+
+        // Begun and abandoned, the result holds the table through later statements until the database closes.
+        IEnumerator<object?[]> abandoned = engine.ExecuteQuery("SELECT A FROM T").Rows.GetEnumerator();
+        Assert.True(abandoned.MoveNext());
+        Assert.Single(engine.ExecuteQuery("SELECT A FROM T").Rows.ToList());
+        Assert.False(ExclusiveIsFree(other, JetLockRegion.TableRead, tdef));
+        database.Dispose();
+        Assert.True(other.TryLock(offset, length));
+        other.Unlock(offset, length);
     }
 
     [Fact]
@@ -119,7 +167,7 @@ public class TableLockStatementTests
         string altered = AlteredByAnotherUser(copy.Path);
         using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
         var engine = new QueryEngine(database);
-        Assert.Equal(["Id", "A"], engine.ExecuteQuery("SELECT * FROM T").ColumnNames);
+        AssertColumnsReadingTheRows(engine, ["Id", "A"]);
         int tdef = database.Catalog.FindTable("T")!.DefinitionPage;
 
         using JetLockFile other = OtherUserOf(copy.Path);
@@ -155,7 +203,7 @@ public class TableLockStatementTests
         string altered = AlteredByAnotherUser(copy.Path);
         using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
         var engine = new QueryEngine(database);
-        Assert.Equal(["Id", "A"], engine.ExecuteQuery("SELECT * FROM T").ColumnNames);
+        AssertColumnsReadingTheRows(engine, ["Id", "A"]);
         int tdef = database.Catalog.FindTable("T")!.DefinitionPage;
 
         using JetLockFile other = OtherUserOf(copy.Path);
@@ -184,8 +232,12 @@ public class TableLockStatementTests
         Assert.Equal(new object?[] { 1, "two", null }, Assert.Single(new QueryEngine(fresh).ExecuteQuery("SELECT * FROM T").Rows.ToList()));
     }
 
+    // Two connections of one process are two Jet users, as ACE's are. ACE, this sequence on this table (measured, two
+    // OLE DB connections in one process): with A's reader open in its transaction, B's ALTER TABLE is refused with
+    // 3211 after about 2.2 s, and A's own CREATE INDEX with 3211 at once; with the reader closed A's CREATE INDEX goes
+    // ahead and holds the table for its transaction; after A's COMMIT, B's ALTER TABLE goes ahead.
     [Fact]
-    public void Connections_of_one_process_change_the_design_of_a_table_one_has_in_a_transaction_as_they_always_could()
+    public void A_design_change_is_refused_while_another_connection_reads_the_table_and_a_connections_own_at_once()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
         using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-tablelock-");
@@ -194,27 +246,108 @@ public class TableLockStatementTests
         var a = new QueryEngine(first);
         var b = new QueryEngine(second);
         int tdef = CreateTable(a, first, "T");
-        using JetLockFile other = OtherUserOf(copy.Path);
+        Assert.Equal((1, 2), (first.Channel.UserNumber, second.Channel.UserNumber));
 
         a.ExecuteNonQuery("BEGIN TRANSACTION");
-        Assert.Single(a.ExecuteQuery("SELECT A FROM T WHERE Id = 1").Rows.ToList());
+        IEnumerator<object?[]> reading = a.ExecuteQuery("SELECT A FROM T WHERE Id = 1").Rows.GetEnumerator();
+        Assert.True(reading.MoveNext());
 
-        b.ExecuteNonQuery("ALTER TABLE T ADD COLUMN C INTEGER");
-        AssertHeldForReadOnly(other, first, tdef);
-        b.ExecuteNonQuery("CREATE INDEX IxB ON T (A)");
-        AssertHeldForReadOnly(other, first, tdef);
-        // A's own design change belongs to its transaction: the other user cannot even read the table until it ends.
-        a.ExecuteNonQuery("CREATE INDEX IxA ON T (Id)");
-        Assert.False(SharedIsFree(other, JetLockRegion.TableRead, tdef));
-        Assert.False(ExclusiveIsFree(other, JetLockRegion.TableRead, tdef));
+        var wait = Stopwatch.StartNew();
+        var refused = Assert.Throws<InvalidOperationException>(() => b.ExecuteNonQuery("ALTER TABLE T ADD COLUMN C INTEGER"));
+        wait.Stop();
+        Assert.Equal(InUse("T"), refused.Message);
+        Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
 
+        wait.Restart();
+        refused = Assert.Throws<InvalidOperationException>(() => a.ExecuteNonQuery("CREATE INDEX IxA ON T (Id)"));
+        Assert.Equal(InUse("T"), refused.Message);
+        Assert.True(wait.ElapsedMilliseconds < 1000, $"A's own design change waited {wait.ElapsedMilliseconds} ms.");
+        // Its own INSERT is not a design change, and goes ahead beside its reader (measured).
+        Assert.Equal(1, a.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (2, 'two')"));
+
+        reading.Dispose();
+        // The transaction has now written T: its own design change is refused still (measured: INSERT, then ALTER TABLE).
+        refused = Assert.Throws<InvalidOperationException>(() => a.ExecuteNonQuery("CREATE INDEX IxA ON T (Id)"));
+        Assert.Equal(InUse("T"), refused.Message);
         a.ExecuteNonQuery("COMMIT");
-        AssertTableFree(other, tdef);
+
+        using (JetLockFile other = OtherUserOf(copy.Path))
+        {
+            long window = JetLockLayout.PageWindow(JetLockRegion.TableRead, tdef);
+            Assert.True(other.TryLock(window + 1, JetLockLayout.PageWindowSize - 1), "A table-read byte is still held.");
+        }
+        b.ExecuteNonQuery("ALTER TABLE T ADD COLUMN C INTEGER");
+        a.ExecuteNonQuery("CREATE INDEX IxA ON T (Id)");
         Assert.Equal(["Id", "A", "C"], b.ExecuteQuery("SELECT * FROM T").ColumnNames);
     }
 
+    // A connection's own design change of a table it has in use is refused at once, with 3211 — on an exclusive open
+    // too, where there is no lock file: it is the engine's rule, not a lock's. ACE on this table (measured, shared and
+    // Mode=Share Exclusive alike): refused while the connection's own reader is open on it, its own INSERT beside the
+    // reader going ahead; refused after the transaction's own UPDATE, INSERT or DELETE of it — one matching no row
+    // included; not refused after a SELECT whose reader is closed, after the table was only the source of an
+    // INSERT … SELECT, after an autocommit UPDATE, or once the transaction has itself changed the table's design.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void A_connections_own_design_change_of_a_table_it_has_in_use_is_refused_at_once(bool exclusive)
+    {
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-tablelock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false, exclusive: exclusive);
+        var engine = new QueryEngine(database);
+        CreateTable(engine, database, "T");
+        CreateTable(engine, database, "S");
+        int column = 0;
+        void Alter() => engine.ExecuteNonQuery($"ALTER TABLE T ADD COLUMN C{++column} INTEGER");
+        void AlterRefused()
+        {
+            var wait = Stopwatch.StartNew();
+            var refused = Assert.Throws<InvalidOperationException>(Alter);
+            Assert.Equal(InUse("T"), refused.Message);
+            Assert.True(wait.ElapsedMilliseconds < 1000, $"The refusal took {wait.ElapsedMilliseconds} ms.");
+        }
+
+        // Its own open reader.
+        using (IEnumerator<object?[]> reading = engine.ExecuteQuery("SELECT A FROM T").Rows.GetEnumerator())
+        {
+            Assert.True(reading.MoveNext());
+            AlterRefused();
+            Assert.Throws<InvalidOperationException>(() => engine.ExecuteNonQuery("CREATE INDEX IxA ON T (A)"));
+            Assert.Throws<InvalidOperationException>(() => engine.ExecuteNonQuery("DROP TABLE T"));
+            Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (2, 'two')"));
+        }
+        Alter();   // the reader closed, and the INSERT committed on its own
+
+        // Its own transaction, having written the table.
+        foreach (string write in (string[])["UPDATE T SET A = 'z' WHERE Id = 1", "UPDATE T SET A = 'z' WHERE Id = 99",
+                     "INSERT INTO T (Id, A) VALUES (3, 'three')", "DELETE FROM T WHERE Id = 2"])
+        {
+            engine.ExecuteNonQuery("BEGIN TRANSACTION");
+            engine.ExecuteNonQuery(write);
+            AlterRefused();
+            engine.ExecuteNonQuery("ALTER TABLE S ADD COLUMN C" + ++column + " INTEGER");   // another table is not in use
+            engine.ExecuteNonQuery("ROLLBACK");
+        }
+
+        // What does not have the table in use.
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        Assert.Single(engine.ExecuteQuery("SELECT A FROM T WHERE Id = 1").Rows.ToList());
+        engine.ExecuteNonQuery("INSERT INTO S (Id, A) SELECT Id + 10, A FROM T");
+        Alter();
+        // And having changed its design, the transaction writes it and changes it again.
+        Assert.Equal(1, engine.ExecuteNonQuery("UPDATE T SET A = 'z' WHERE Id = 1"));
+        Alter();
+        engine.ExecuteNonQuery("COMMIT");
+
+        Assert.Equal(1, engine.ExecuteNonQuery("UPDATE T SET A = 'y' WHERE Id = 1"));
+        Alter();
+    }
+
+    // ACE, this sequence on these tables (measured, another connection's ALTER TABLE as the probe): T1 and T2 are both
+    // refused it — 3211 — while the nested transaction is open, after it is rolled back, and after the failed INSERT;
+    // both go ahead once the outer transaction has committed. An UPDATE that changes nothing holds its table too.
     [Fact]
-    public void A_savepoint_rollback_lets_go_of_the_tables_first_used_after_it_and_keeps_the_earlier_ones()
+    public void A_savepoint_rollback_and_a_failed_statement_keep_the_tables_they_wrote_until_the_transaction_ends()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
         using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-tablelock-");
@@ -224,8 +357,10 @@ public class TableLockStatementTests
         int second = CreateTable(engine, database, "T2");
         using JetLockFile other = OtherUserOf(copy.Path);
 
+        // T1 written before the savepoint, so the transaction holds it: a query's read lock would be its result's, let go
+        // once read, as ACE's reader lets go before COMMIT (measured).
         engine.ExecuteNonQuery("BEGIN TRANSACTION");
-        Assert.Single(engine.ExecuteQuery("SELECT A FROM T1 WHERE Id = 1").Rows.ToList());
+        Assert.Equal(1, engine.ExecuteNonQuery("UPDATE T1 SET A = 'one' WHERE Id = 1"));
         engine.ExecuteNonQuery("BEGIN TRANSACTION");
         Assert.Single(engine.ExecuteQuery("SELECT A FROM T1 WHERE Id = 1").Rows.ToList());
         Assert.Equal(1, engine.ExecuteNonQuery("UPDATE T2 SET A = 'x' WHERE Id = 1"));
@@ -234,16 +369,26 @@ public class TableLockStatementTests
 
         engine.ExecuteNonQuery("ROLLBACK");
         Assert.False(ExclusiveIsFree(other, JetLockRegion.TableRead, first));
-        AssertTableFree(other, second);
+        Assert.False(ExclusiveIsFree(other, JetLockRegion.TableRead, second));
 
-        // A statement that fails lets go of what it took, and keeps what the transaction already held.
+        // A statement that fails keeps its table too.
         Assert.ThrowsAny<Exception>(() => engine.ExecuteNonQuery("INSERT INTO T2 (Id, A) VALUES (1, 'dup')"));
-        AssertTableFree(other, second);
+        Assert.False(ExclusiveIsFree(other, JetLockRegion.TableRead, second));
         Assert.False(ExclusiveIsFree(other, JetLockRegion.TableRead, first));
 
         engine.ExecuteNonQuery("COMMIT");
         AssertTableFree(other, first);
+        AssertTableFree(other, second);
         Assert.Equal("one", engine.ExecuteQuery("SELECT A FROM T2 WHERE Id = 1").Rows.Single()[0]);
+    }
+
+    // T's columns, its rows read and the result let go — an unread result holds the table, as an unclosed ACE reader does
+    // (measured), and these tests then need another user to take it.
+    private static void AssertColumnsReadingTheRows(QueryEngine engine, string[] expected)
+    {
+        ResultSet result = engine.ExecuteQuery("SELECT * FROM T");
+        _ = result.Rows.ToList();
+        Assert.Equal(expected, result.ColumnNames);
     }
 
     // CREATE TABLE <name> with one row (Id 1, A 'one'); returns its definition page.

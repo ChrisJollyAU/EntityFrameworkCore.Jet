@@ -63,57 +63,46 @@ internal sealed class PageCache : IDisposable
     private long _evictions;
     private long _scopeEvictions;
 
-    // This process's registration as a Jet user of the file (null when it has none: an exclusive open, off Windows,
-    // or a lock file that could not be opened). It lives here because a Jet user is per process per file, exactly
-    // the scope and lifetime of this pool: registered by the first channel to open the file, deregistered when the
-    // last one closes. The lock manager has the same scope but a test can inject its own and skip it.
-    private readonly JetUserRegistration? _user;
+    // How the registered users of this process notice another process's commits (docs/format/locking.md §6): every
+    // user ends each batch of page writes by changing its own commit slot on page 0, so a slot that differs from what
+    // this process last saw, and that none of its own channels wrote, means pages here may be stale. Each channel on
+    // the file is a Jet user of its own (JetUserRegistration), with a slot of its own, but they publish through this
+    // one pool, so a slot one of them writes is noted here as seen (OwnSlotWritten) and is nothing to refresh for.
+    // `_database` is a read handle of our own on the file — the channels' streams buffer, and a positional read needs
+    // none of that — and `_seenCommitTable` the table as it stood at the last check. Both null until a registered
+    // channel joins (Watch): an exclusive holder is alone, and an unregistered process is not a user anyone's slot
+    // speaks to. `_database` is set last, and is what says the others are.
+    private volatile SafeFileHandle? _database;
+    private byte[]? _seenCommitTable;
+    private long _commitTableOffset;
 
-    // How a registered user notices another user's commits (docs/format/locking.md §6): every user ends each batch of
-    // page writes by changing its own commit slot on page 0, so a slot other than ours that differs from what this
-    // process last saw means pages here may be stale. `_database` is a read handle of our own on the file — the
-    // channels' streams buffer, and a positional read needs none of that — and `_seenCommitTable` the table as it
-    // stood at the last check. Both null when the process is not registered: an exclusive holder is alone, and an
-    // unregistered process is not a user anyone's slot speaks to.
-    private readonly SafeFileHandle? _database;
-    private readonly byte[]? _seenCommitTable;
-    private readonly long _commitTableOffset;
-    private readonly int _ownSlotOffset;
-    private readonly int _slotSize;
-
-    private PageCache(JetUserRegistration? user, string? path, JetFormatBase? format)
+    /// <summary>Starts watching the other users' commit slots, for the first registered channel on the file; does
+    /// nothing after that. Called under the registry's lock.</summary>
+    private void Watch(string path, JetFormatBase format)
     {
-        _user = user;
-        if (user is null || path is null || format is null) return;
-
-        _commitTableOffset = format.CommitByteTableOffset;
-        _slotSize = format.CommitByteSlotSize;
-        _ownSlotOffset = user.User * _slotSize;
+        if (_database is not null) return;
+        SafeFileHandle? database = null;
         try
         {
-            _database = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            var table = new byte[format.CommitByteTableUsers * _slotSize];
-            RandomAccess.Read(_database, table, _commitTableOffset);
+            database = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var table = new byte[format.CommitByteTableUsers * format.CommitByteSlotSize];
+            RandomAccess.Read(database, table, format.CommitByteTableOffset);
+            _commitTableOffset = format.CommitByteTableOffset;
             _seenCommitTable = table;
+            _database = database;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            // Without the read there is nothing to compare with; the process stays a user that does not look.
-            _database?.Dispose();
-            _database = null;
+            // Without the read there is nothing to compare with; the process's users do not look.
+            database?.Dispose();
         }
     }
 
-    /// <summary>This process's registration as a Jet user of the file — its user number, and the page write locks it
-    /// holds for every channel on the file — or null when it is not registered.</summary>
-    public JetUserRegistration? User => _user;
-
-    /// <summary>Deregisters the Jet user and releases the publication lock. Called when the last channel on the
-    /// file lets the cache go, so an open/close cycle leaves neither behind.</summary>
+    /// <summary>Releases the publication lock and the handle the slots are watched through. Called when the last
+    /// channel on the file lets the cache go, so an open/close cycle leaves neither behind.</summary>
     public void Dispose()
     {
         _database?.Dispose();
-        _user?.Dispose();
         _publishGate.Dispose();
     }
 
@@ -126,28 +115,26 @@ internal sealed class PageCache : IDisposable
     /// paired with a <see cref="Release"/>. The key is <see cref="FileIdentity"/>'s, so relative and absolute opens
     /// of one file share a pool (two pools for one file would reintroduce cross-handle staleness) while two files
     /// whose paths differ only in case, on a platform where that makes them two files, do not.</summary>
-    public static PageCache Acquire(string path) => AcquireKey(FileIdentity.Key(path), registerAs: null);
+    public static PageCache Acquire(string path) => AcquireKey(FileIdentity.Key(path), registered: null);
 
     /// <summary><see cref="Acquire"/> by a key <see cref="FileIdentity"/> has already given — a channel works its
-    /// file's key out once and uses it for every registry it joins and leaves. With <paramref name="registerAs"/>,
-    /// the database path a shared open was given and the file's format, the call that creates the cache also
-    /// registers this process as a Jet user of the file (<see cref="JetUserRegistration"/>) and starts watching the
-    /// other users' commit slots; a later call joins that registration.</summary>
-    /// <remarks>An exclusive open passes null and is never refused the registration it skips: it holds the file
-    /// with <c>FileShare.None</c>, so no other channel can be on the file before it or join it after.</remarks>
-    internal static PageCache AcquireKey(string key, (string Path, JetFormatBase Format)? registerAs)
+    /// file's key out once and uses it for every registry it joins and leaves. With <paramref name="registered"/>,
+    /// the database path and format of a channel that has registered as a Jet user of the file
+    /// (<see cref="JetUserRegistration"/>), the cache watches the other users' commit slots from then on.</summary>
+    /// <remarks>An exclusive open passes null: it holds the file with <c>FileShare.None</c>, so no other channel can
+    /// be on the file before it or join it after.</remarks>
+    internal static PageCache AcquireKey(string key, (string Path, JetFormatBase Format)? registered)
     {
         lock (RegistryGate)
         {
+            PageCache cache;
             if (Registry.TryGetValue(key, out var slot))
             {
-                Registry[key] = (slot.Cache, slot.RefCount + 1);
-                return slot.Cache;
+                cache = slot.Cache;
+                Registry[key] = (cache, slot.RefCount + 1);
             }
-            var cache = registerAs is { } open
-                ? new PageCache(JetUserRegistration.Connect(open.Path), open.Path, open.Format)
-                : new PageCache(null, null, null);
-            Registry[key] = (cache, 1);
+            else Registry[key] = (cache = new PageCache(), 1);
+            if (registered is { } user) cache.Watch(user.Path, user.Format);
             return cache;
         }
     }
@@ -328,17 +315,23 @@ internal sealed class PageCache : IDisposable
         finally { _publishGate.ExitReadLock(); }
     }
 
-    /// <summary>Reads the commit table from the file into <paramref name="table"/> and says whether a slot other
-    /// than this process's own differs from the table last seen. Only this process writes its own slot, and its
-    /// channels publish through this cache, so a change there is nothing to refresh for. Callers hold the publish
-    /// gate, shared or exclusive, so the table last seen cannot change under the comparison.</summary>
+    /// <summary>Reads the commit table from the file into <paramref name="table"/> and says whether a slot differs
+    /// from the table last seen. A slot one of this process's channels wrote is already in it
+    /// (<see cref="OwnSlotWritten"/>): they publish through this cache, so a change there is nothing to refresh for.
+    /// Callers hold the publish gate, shared or exclusive, so the table last seen cannot change under the
+    /// comparison.</summary>
     private bool OthersCommitted(Span<byte> table)
     {
         RandomAccess.Read(_database!, table, _commitTableOffset);
-        ReadOnlySpan<byte> seen = _seenCommitTable;
-        int after = _ownSlotOffset + _slotSize;
-        return !table[.._ownSlotOffset].SequenceEqual(seen[.._ownSlotOffset])
-            || !table[after..].SequenceEqual(seen[after..]);
+        return !table.SequenceEqual(_seenCommitTable);
+    }
+
+    /// <summary>Notes the <paramref name="slot"/> bytes a channel of this process has just written at
+    /// <paramref name="offset"/> of the file — its own commit slot — as seen. Under the exclusive publish gate, as
+    /// every batch is published.</summary>
+    public void OwnSlotWritten(long offset, ReadOnlySpan<byte> slot)
+    {
+        if (_database is not null) slot.CopyTo(_seenCommitTable.AsSpan((int)(offset - _commitTableOffset)));
     }
 
     /// <summary>Under the exclusive publish gate — taken here, recursively, so a writing statement already holding it

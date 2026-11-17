@@ -109,18 +109,28 @@ public sealed class PageChannel : IDisposable
         // A test may inject its own manager; otherwise share the per-path one (refcounted, released on Dispose).
         _ownsLocks = locks is null;
         _locks = locks ?? MonitorLockManager.AcquireKey(_identity);
-        // A shared open, read-only included, registers this process as a Jet user of the file, as ACE does; the
-        // first channel on the file registers and the rest join it. An exclusive one takes no lock file, as ACE.
-        _cache = PageCache.AcquireKey(_identity, registerAs: exclusive ? null : (path, format));
+        // A shared open, read-only included, registers this channel as a Jet user of the file, as each ACE connection
+        // is one — two connections in one process included (measured, locking.md §3). An exclusive one takes no lock
+        // file, as ACE.
+        _user = exclusive ? null : JetUserRegistration.Connect(path);
+        _cache = PageCache.AcquireKey(_identity, registered: _user is null ? null : (path, format));
         _seenSchemaGeneration = _cache.SchemaGeneration;
         _cache.InitFileLength(stream.Length);
         // The commit slot this channel's batches write (PublishBatch): slot 0 when it holds the file exclusively,
         // its user's slot when it is registered, none otherwise — a read-only channel never publishes a batch.
         // The table's place is the same in every version a raise can move the file to.
-        if (!readOnly && (exclusive ? 0 : _cache.User?.User) is { } slot)
+        if (!readOnly && (exclusive ? 0 : _user?.User) is { } slot)
             _commitSlot = format.CommitByteTableOffset + slot * format.CommitByteSlotSize;
         Allocator = new PageAllocator(this);
     }
+
+    // This channel's registration as a Jet user of the file — its user number, its lock-file handle and the locks it
+    // holds through it — or null when it has none: an exclusive open, off Windows, or a lock file that could not be
+    // opened. One per channel, as ACE's connections are users of their own, so the operating system arbitrates between
+    // two channels of one process exactly as between two processes: a page or table one holds refuses the other, with
+    // ACE's retries and errors. Without one the channel takes no lock, and its transactions are checked against the
+    // other channels' only at commit (PublishTransaction).
+    private readonly JetUserRegistration? _user;
 
     // The file offset of this channel's commit slot, or null when it writes none (see the constructor).
     private readonly int? _commitSlot;
@@ -309,10 +319,10 @@ public sealed class PageChannel : IDisposable
     /// <summary>The database file this channel reads and writes.</summary>
     internal string Path => _path;
 
-    /// <summary>The Jet user number this process holds on the file — one for every channel the process has open on
-    /// it — or null when it is not registered: an exclusive open, off Windows, or a lock file that could not be
-    /// opened (see <see cref="JetUserRegistration"/>).</summary>
-    internal int? UserNumber => _cache.User?.User;
+    /// <summary>The Jet user number this channel holds on the file — each channel its own — or null when it is not
+    /// registered: an exclusive open, off Windows, or a lock file that could not be opened (see
+    /// <see cref="JetUserRegistration"/>).</summary>
+    internal int? UserNumber => _user?.User;
 
     /// <summary>Rejects a page number that cannot exist in this file. Page numbers come out of the file
     /// itself, so a bad one is corruption — without this the read seeks past the end and throws
@@ -473,7 +483,7 @@ public sealed class PageChannel : IDisposable
             // goes after the batch's closing slot write, as ACE's does (locking.md §6).
             byte[]? baseline = LockForWrite(pageNumber);
             try { PublishBatch([pageNumber], _ => copy, _ => baseline, _ => parsed); }
-            finally { if (baseline is not null) _cache.User?.Unlock(JetLockRegion.WriteRead, pageNumber, exclusive: true); }
+            finally { if (baseline is not null) _user?.Unlock(JetLockRegion.WriteRead, pageNumber, exclusive: true); }
         });
     }
 
@@ -560,14 +570,16 @@ public sealed class PageChannel : IDisposable
     /// <see cref="LockForUpdate"/>).</exception>
     private byte[]? LockForWrite(int pageNumber, bool refuseStale = true)
     {
-        if (_cache.User is not { } user || pageNumber >= (int)(_cache.FileLength / PageSize))
+        if (_user is not { } user || pageNumber >= (int)(_cache.FileLength / PageSize))
             return ReadCommittedPageOrNull(pageNumber);
 
-        // Joined: the process has held the page throughout, so nobody else has written it since this caller read it.
+        // Joined: this channel has held the page throughout, so nobody else has written it since this caller read it.
         // Newly taken: the page is read again, as ACE reads a page it has just locked, and what the caller may have
-        // read of it — the image this process held before another user's commit dropped it — must still be what the
-        // file holds; another user's commit that left the page as it was is no reason to stop.
-        if (user.Lock(JetLockRegion.WriteRead, pageNumber, exclusive: true)
+        // read of it — the image this process held before another process's commit dropped it — must still be what
+        // the file holds; a commit that left the page as it was is no reason to stop. Another channel of this process
+        // publishes through the shared cache, and not while this statement holds the publish gate, so what the
+        // statement read of the page is what that channel left.
+        if (user.Lock(JetLockRegion.WriteRead, pageNumber, exclusive: true, JetLockPurpose.PageWrite) == true
             && (!_cache.RefreshAtLock(pageNumber, out byte[]? before)
                 || before is not null && !SamePage(pageNumber, before, ReadCommittedPageOrNull(pageNumber)))
             && refuseStale)
@@ -586,76 +598,108 @@ public sealed class PageChannel : IDisposable
     /// <summary>The pages the open transaction holds write locks on (see <see cref="LockForWrite"/>) — taken before its
     /// state is cleared, for <see cref="Unlock"/> to let go of once its commit's batch has ended or its rollback is
     /// done. Empty for a channel that takes no locks.</summary>
-    private int[] LockedPages() => _cache.User is null
+    private int[] LockedPages() => _user is null
         ? []
         : [.. _commitBaselines.Where(kv => kv.Value is not null).Select(kv => kv.Key)];
 
     private void Unlock(int[] pages)
     {
-        foreach (int page in pages) _cache.User!.Unlock(JetLockRegion.WriteRead, page, exclusive: true);
+        foreach (int page in pages) _user!.Unlock(JetLockRegion.WriteRead, page, exclusive: true);
     }
 
-    // The table locks this channel holds (locking.md §4), each as its region, its table's definition page and whether
-    // it is exclusive, in the order taken. Those in `_transactionTableLocks` belong to the open transaction and go when
-    // it ends — a savepoint rollback letting go of those taken since its frame opened (Transaction.TableLockCountAt);
-    // those in `_statementTableLocks` belong to the statement and go when its outermost scope ends (`_scopeDepth`).
-    // Per channel, and so — as the overlay — owned by the channel's own thread.
+    // The table locks and long-value locks this channel holds (locking.md §4), each as its region, its page — a
+    // table's definition page, or a chained long value's first page — and whether it is exclusive, in the order taken.
+    // Those in `_transactionTableLocks` — table locks only — belong to the open transaction and go when it ends, none
+    // at a savepoint rollback: ACE keeps a table a failed statement, or one rolled back in a nested transaction, wrote
+    // in use until the transaction ends (measured). Transaction.TableLockCountAt says how many of them were taken
+    // before a frame opened (InUseByThisConnection). Those in `_statementLocks` belong to the statement and go when
+    // its outermost scope ends (`_scopeDepth`), unless a result still to be read takes its table locks over
+    // (KeepStatementTableLocks). Per channel, and so — as the overlay — owned by the channel's own thread.
     private readonly List<(JetLockRegion Region, int Page, bool Exclusive)> _transactionTableLocks = [];
-    private readonly List<(JetLockRegion Region, int Page, bool Exclusive)> _statementTableLocks = [];
+    private readonly List<(JetLockRegion Region, int Page, bool Exclusive)> _statementLocks = [];
     private int _scopeDepth;
+
+    // The table locks owned by something other than a statement or a transaction — a statement's result while it is
+    // read, or one read or enumeration of a table outside every statement (HeldTableLocks) — until it lets them go, or
+    // this channel closes. Under its own lock: a result can be let go of from another thread.
+    private readonly List<HeldTableLocks> _heldTableLocks = [];
 
     /// <summary>Takes the table locks ACE takes for <paramref name="use"/> of the table whose definition is on
     /// <paramref name="tdefPage"/> (locking.md §4): its shared byte in the table-read region to read it; to write it,
     /// that and the table-write region's shared byte, taken under a momentary exclusive lock in the deny-write region;
     /// for a design change, the table-read region exclusively. A lock the channel already holds is not taken twice.</summary>
+    /// <returns>The locks, when the caller is to own them — a read outside every statement, which holds them until it
+    /// disposes them; null otherwise.</returns>
     /// <remarks>
-    /// <para>They belong to the open transaction, held until it commits or rolls back — for a statement on its own,
-    /// its implicit transaction, so ACE's DDL locks go inside the statement as measured, and in an explicit one until
-    /// <c>COMMIT</c>, as ACE holds a foreign key's tables (verified, <c>StatementExecutor.AddForeignKey</c>); outside
-    /// one, to the statement — the outermost <see cref="ReadConsistent{T}"/> or <see cref="WriteExclusive{T}"/> scope.
-    /// With neither — a table read or written through the Core API outside both — no table lock is taken, since
-    /// nothing would end it. Only a registered user takes them; a read-only channel takes its read locks only.</para>
+    /// <para>A table's write and design locks belong to the open transaction, held until it commits or rolls back —
+    /// for a statement on its own, its implicit transaction, so ACE's DDL locks go inside the statement as measured,
+    /// and in an explicit one until <c>COMMIT</c>, as ACE holds a table it has written or changed the design of
+    /// (measured: another connection's <c>ALTER TABLE</c> is refused until then, after a statement that failed too);
+    /// outside one, to the statement — the outermost <see cref="ReadConsistent{T}"/> or
+    /// <see cref="WriteExclusive{T}"/> scope. A statement's read locks belong to the statement inside a transaction
+    /// too — a query's, and those of the tables a writing statement only reads — since ACE's go when the query's
+    /// reader closes, before <c>COMMIT</c>, and an <c>INSERT … SELECT</c>'s source is another connection's to alter
+    /// once the statement has returned (measured); a query's result can take them over
+    /// (<see cref="KeepStatementTableLocks"/>). A design change of a table this connection itself has in use is
+    /// refused at once (<see cref="InUseByThisConnection"/>).
+    /// Outside every statement — a table read through the Core API, or a query's rows read after it returned, in a
+    /// transaction or not — the read lock is the caller's, for the read or the enumeration it makes; a write or design
+    /// change outside both a statement and a transaction takes none (the Core API's writes open a transaction of their
+    /// own). Only a registered user takes the operating-system locks. Every channel keeps the record of what its
+    /// statement, its transaction and its results have in use — an exclusive one and one off Windows too, since ACE
+    /// refuses a connection's own design change on an exclusive open as on a shared one (measured) — but for the
+    /// caller-owned read, which an unregistered channel does not record. A read-only channel takes its read locks
+    /// only.</para>
     /// <para>Refused, each lock is retried as ACE retries and then refused with ACE's 3211 naming
     /// <paramref name="name"/>. One newly taken after another user's slot has moved since the statement's scope
     /// looked throws <see cref="StaleReadException"/>, with what this call took let go: the other user may have changed
-    /// the table's design, and what the statement planned against is older than the file.</para>
+    /// the table's design, and what the statement planned against is older than the file. A caller-owned one, with no
+    /// statement to run again, drops the cache instead, so the rows are read as the file has them.</para>
     /// </remarks>
-    internal void LockTable(int tdefPage, string name, TableUse use)
+    internal HeldTableLocks? LockTable(int tdefPage, string name, TableUse use)
     {
-        if (_cache.User is not { } user || _readOnly && use != TableUse.Read) return;
-        List<(JetLockRegion Region, int Page, bool Exclusive)>? owner =
-            _active is not null ? _transactionTableLocks : _scopeDepth > 0 ? _statementTableLocks : null;
-        if (owner is null) return;
+        JetUserRegistration? user = _user;
+        if (_readOnly && use != TableUse.Read) return null;
+        bool statement = _scopeDepth > 0 && (_active is null || use == TableUse.Read);
+        bool callers = _scopeDepth == 0 && use == TableUse.Read;
+        if (!statement && (callers ? user is null : _active is null)) return null;
+        List<(JetLockRegion Region, int Page, bool Exclusive)> owner =
+            statement ? _statementLocks : callers ? [] : _transactionTableLocks;
+        // Held already by the owner, or — for a statement — by its transaction, which outlasts it.
+        bool Holds(JetLockRegion region, bool exclusive) =>
+            owner.Contains((region, tdefPage, exclusive)) || statement && _transactionTableLocks.Contains((region, tdefPage, exclusive));
 
         int from = owner.Count;
         bool took = false;
         try
         {
-            if (!HoldsTableLock(JetLockRegion.TableRead, tdefPage, use == TableUse.Design))
+            if (callers || !Holds(JetLockRegion.TableRead, use == TableUse.Design))
             {
-                took |= user.Lock(JetLockRegion.TableRead, tdefPage, use == TableUse.Design, name);
+                if (use == TableUse.Design && InUseByThisConnection(tdefPage))
+                    throw new InvalidOperationException(JetUserRegistration.TableInUseMessage(name));
+                took |= user?.Lock(JetLockRegion.TableRead, tdefPage, use == TableUse.Design, JetLockPurpose.Table, name) == true;
                 owner.Add((JetLockRegion.TableRead, tdefPage, use == TableUse.Design));
             }
-            if (use == TableUse.Write && !HoldsTableLock(JetLockRegion.TableWrite, tdefPage, exclusive: false))
+            if (use == TableUse.Write && !Holds(JetLockRegion.TableWrite, exclusive: false))
             {
-                user.Lock(JetLockRegion.TableDenyWrite, tdefPage, exclusive: true, name);
+                user?.Lock(JetLockRegion.TableDenyWrite, tdefPage, exclusive: true, JetLockPurpose.Table, name);
                 try
                 {
-                    took |= user.Lock(JetLockRegion.TableWrite, tdefPage, exclusive: false, name);
+                    took |= user?.Lock(JetLockRegion.TableWrite, tdefPage, exclusive: false, JetLockPurpose.Table, name) == true;
                     owner.Add((JetLockRegion.TableWrite, tdefPage, false));
                 }
-                finally { user.Unlock(JetLockRegion.TableDenyWrite, tdefPage, exclusive: true); }
+                finally { user?.Unlock(JetLockRegion.TableDenyWrite, tdefPage, exclusive: true); }
             }
         }
         catch
         {
-            UnlockTables(owner, from);
+            UnlockHeld(owner, from);
             throw;
         }
 
-        if (took && _cache.RefreshIfOthersCommitted())
+        if (took && _cache.RefreshIfOthersCommitted() && !callers)
         {
-            UnlockTables(owner, from);
+            UnlockHeld(owner, from);
             throw new StaleReadException(JetUserRegistration.TableInUseMessage(name));
         }
 
@@ -663,20 +707,155 @@ public sealed class PageChannel : IDisposable
         // index's entry goes from the real-index block): a page let go after an early publication is locked again
         // first, so what it reads already carries the file's counting, at the offsets the transaction counted on.
         if (use == TableUse.Design && _publishedEarly.ContainsKey(tdefPage)) LockForUpdate(tdefPage);
+        return callers ? Hold(owner, started: true) : null;
     }
 
-    private bool HoldsTableLock(JetLockRegion region, int page, bool exclusive) =>
-        _transactionTableLocks.Contains((region, page, exclusive)) || _statementTableLocks.Contains((region, page, exclusive));
+    /// <summary>Hands the table locks the statement has taken to its result, which holds them until it has been read,
+    /// as ACE's open reader holds the table's read byte until it is closed — whether or not its rows have all been
+    /// fetched, inside a transaction too (measured, locking.md §4, §5). Called by the statement as it returns, inside
+    /// its outermost scope; null when there is nothing to hand over — inside an enclosing scope, which holds them to its
+    /// own end, or with no table lock the statement owns (a transaction's are the transaction's).</summary>
+    /// <remarks>The result disposes them when its rows have been read or it is closed. One whose reading has not begun
+    /// (<see cref="HeldTableLocks.Start"/>) by the time this channel's next statement begins lets them go then: its
+    /// rows are read, if ever, as a Core API read is, each enumeration under locks of its own. This channel's close
+    /// lets go of all of them.</remarks>
+    internal HeldTableLocks? KeepStatementTableLocks()
+    {
+        if (_scopeDepth != 1) return null;
+        List<(JetLockRegion Region, int Page, bool Exclusive)> tables = [.. _statementLocks.Where(l => l.Region != JetLockRegion.WriteRead)];
+        if (tables.Count == 0) return null;
+        _statementLocks.RemoveAll(l => l.Region != JetLockRegion.WriteRead);
+        return Hold(tables, started: false);
+    }
 
-    /// <summary>Lets go of the table locks in <paramref name="held"/> from position <paramref name="from"/> on, the
+    private HeldTableLocks Hold(List<(JetLockRegion Region, int Page, bool Exclusive)> locks, bool started)
+    {
+        var held = new HeldTableLocks(this, locks, started);
+        lock (_heldTableLocks) _heldTableLocks.Add(held);
+        return held;
+    }
+
+    /// <summary>Lets go of <paramref name="held"/>'s locks, once.</summary>
+    internal void Release(HeldTableLocks held)
+    {
+        lock (_heldTableLocks)
+            if (!_heldTableLocks.Remove(held)) return;
+        UnlockHeld(held.Locks, 0);
+    }
+
+    /// <summary>As a statement begins: lets go of the locks of every result whose reading never began
+    /// (<see cref="KeepStatementTableLocks"/>).</summary>
+    private void ReleaseUnreadResults()
+    {
+        HeldTableLocks[] unread;
+        lock (_heldTableLocks)
+        {
+            if (_heldTableLocks.Count == 0) return;
+            unread = [.. _heldTableLocks.Where(h => !h.Started)];
+        }
+        foreach (HeldTableLocks held in unread) Release(held);
+    }
+
+    /// <summary>Whether this connection itself has the table whose definition is on <paramref name="tdefPage"/> in use,
+    /// which refuses its own design change of the table at once, with 3211 and no retries, as ACE refuses it
+    /// (measured, locking.md §4): a result of its own still open on the table, or one read or enumeration of it; or its
+    /// open transaction, having written the table in an earlier statement — one that matched no row, failed or was
+    /// rolled back in a nested transaction included. Not a table the transaction only read, nor one it created or
+    /// changed the design of (it then holds the design lock, and is not asked here).</summary>
+    private bool InUseByThisConnection(int tdefPage)
+    {
+        // The innermost frame is the statement's own (a lone statement's transaction, or its savepoint in an explicit
+        // one): what the transaction held when it opened, earlier statements took.
+        int earlier = _active is { } transaction ? transaction.TableLockCountAt(new Savepoint(transaction.Depth - 1)) : 0;
+        for (int i = 0; i < earlier && i < _transactionTableLocks.Count; i++)
+            if (_transactionTableLocks[i] == (JetLockRegion.TableWrite, tdefPage, false)) return true;
+        lock (_heldTableLocks)
+            return _heldTableLocks.Exists(held => held.Locks.Contains((JetLockRegion.TableRead, tdefPage, false)));
+    }
+
+    /// <summary>Runs <paramref name="read"/>, the read of a chained long value whose first page is
+    /// <paramref name="firstPage"/>, under this user's shared byte on that page, as ACE reads one (locking.md §4): a
+    /// writer holding the page refuses it, retried as ACE retries and then refused with ACE's 3624. Only the first page
+    /// of a chain is locked, and no page of a value stored on a single page or in its row — ACE locks none of those
+    /// (measured).</summary>
+    /// <remarks>
+    /// <para>Held for the statement — the outermost <see cref="ReadConsistent{T}"/> or <see cref="WriteExclusive{T}"/>
+    /// scope — inside an explicit transaction too, since ACE lets it go after the statement there as outside one; one
+    /// newly taken after another user's slot has moved since the scope looked throws <see cref="StaleReadException"/>,
+    /// with the lock let go, as <see cref="LockTable"/> does: what the statement read may be older than the file. A read
+    /// outside every scope — a query's rows read after the statement returned, a Core API call — holds it for the read
+    /// alone, and a lock newly taken there drops the cache if another user has committed, so the chain is read as the
+    /// file has it.</para>
+    /// <para>Only a registered user, read-only included, as ACE's read-only user takes it too; a page this connection
+    /// holds already, a write lock included, is joined (<see cref="JetUserRegistration.Lock"/>).</para>
+    /// </remarks>
+    internal T ReadLongValue<T>(int firstPage, Func<T> read)
+    {
+        LockLongValue(firstPage, JetLockPurpose.LongValueRead, out bool alone);
+        if (!alone) return read();
+        try { return read(); }
+        finally { UnlockLongValue(firstPage, exclusive: false); }
+    }
+
+    /// <summary>Lets go of a long-value lock <see cref="LockLongValue"/> left to its caller.</summary>
+    internal void UnlockLongValue(int firstPage, bool exclusive) => _user!.Unlock(JetLockRegion.WriteRead, firstPage, exclusive);
+
+    /// <summary>Takes this user's lock on the first page of a chained long value for <paramref name="purpose"/>
+    /// (locking.md §4): the shared byte to read it (<see cref="ReadLongValue{T}"/>); exclusively for an <c>UPDATE</c>
+    /// that replaces it or a <c>DELETE</c> that removes it, as ACE's writer locks the old chain's first page before it
+    /// gives the chain back (measured). A refusal ends as <see cref="JetUserRegistration.Lock"/> says for the purpose:
+    /// 3624 for a read, 3202 for a replacement; a removal refused returns false, and the caller deletes the row and
+    /// leaves the chain allocated, as ACE does (measured).</summary>
+    /// <param name="firstPage">The chain's first page.</param>
+    /// <param name="purpose">What the chain is locked for.</param>
+    /// <param name="alone">True when the lock belongs to no statement — a read or a write outside every statement —
+    /// and the caller lets it go (<see cref="UnlockLongValue"/>) once it has read the chain, or given it back.</param>
+    /// <returns>False for a removal refused; true otherwise, a page no lock is taken on included (no registered user, a
+    /// read-only writer, a write outside every transaction).</returns>
+    /// <remarks>
+    /// <para>Held for the statement — the outermost scope — inside an explicit transaction too: ACE lets go of the
+    /// read byte after the statement there as outside one, and of the writer's lock within 1.5 s of the statement, where
+    /// the data page it wrote is held to <c>COMMIT</c> (measured). Outside every statement — a Core API read or write —
+    /// it is held for that read or write alone, never to the end of the transaction: another connection reading the
+    /// value meanwhile reads the committed chain, as it does beside ACE's transaction once ACE has let go. One newly
+    /// taken after another user's slot has moved since the scope looked throws <see cref="StaleReadException"/>, with
+    /// the lock let go, as <see cref="LockTable"/> does: what the statement, or the Core API's writer, read may be
+    /// older than the file. A read lock newly taken outside every scope drops the cache if another user has committed,
+    /// so the chain is read as the file has it.</para>
+    /// <para>Only a registered user; a read-only one takes the read lock, as ACE's read-only user takes it too.</para>
+    /// </remarks>
+    internal bool LockLongValue(int firstPage, JetLockPurpose purpose, out bool alone)
+    {
+        alone = false;
+        bool exclusive = purpose != JetLockPurpose.LongValueRead;
+        if (_user is not { } user || firstPage <= 0 || firstPage >= PageCount || exclusive && _readOnly) return true;
+        bool statement = _scopeDepth > 0;
+        if (!statement && exclusive && _active is null) return true;   // a write outside every transaction
+
+        bool? took = user.Lock(JetLockRegion.WriteRead, firstPage, exclusive, purpose);
+        if (took is null) return false;
+        if (took.Value && _cache.RefreshIfOthersCommitted() && (statement || exclusive))
+        {
+            user.Unlock(JetLockRegion.WriteRead, firstPage, exclusive);
+            throw new StaleReadException(purpose == JetLockPurpose.LongValueRead
+                ? JetUserRegistration.CouldNotReadMessage
+                : JetUserRegistration.CouldNotSaveMessage);
+        }
+
+        if (statement) _statementLocks.Add((JetLockRegion.WriteRead, firstPage, exclusive));
+        else alone = true;
+        return true;
+    }
+
+    /// <summary>Lets go of the locks in <paramref name="held"/> from position <paramref name="from"/> on, the
     /// newest first.</summary>
-    private void UnlockTables(List<(JetLockRegion Region, int Page, bool Exclusive)> held, int from)
+    private void UnlockHeld(List<(JetLockRegion Region, int Page, bool Exclusive)> held, int from)
     {
         for (int i = held.Count - 1; i >= from; i--)
         {
             (JetLockRegion region, int page, bool exclusive) = held[i];
             held.RemoveAt(i);
-            _cache.User!.Unlock(region, page, exclusive);
+            _user?.Unlock(region, page, exclusive);
         }
     }
 
@@ -802,7 +981,7 @@ public sealed class PageChannel : IDisposable
     /// <summary>The file's length as it is now: for a registered user measured, since another user appends without
     /// telling this process until its slot is next read (locking.md §4); otherwise the length this process's channels
     /// keep, which only they change.</summary>
-    private long FileLengthOnDisk() => _cache.User is null
+    private long FileLengthOnDisk() => _user is null
         ? _cache.FileLength
         : Math.Max(_cache.FileLength, RandomAccess.GetLength(_stream.SafeFileHandle));
 
@@ -826,6 +1005,8 @@ public sealed class PageChannel : IDisposable
         _stream.Seek(offset, SeekOrigin.Begin);
         _stream.Write(bytes);
         _stream.Flush(flushToDisk: false);
+        // A slot of this process's own: nothing for its channels, which share the cache, to refresh for.
+        _cache.OwnSlotWritten(offset, bytes);
 
         // Copy-on-write, as every cached image is replaced rather than written into; not resident, the next read
         // takes it from the file, which already has it.
@@ -839,10 +1020,11 @@ public sealed class PageChannel : IDisposable
 
     /// <summary>Runs a logical read against one committed page-set generation. Shared: other readers on this
     /// file run concurrently; only a publication excludes them. The outermost scope is a statement: the table locks
-    /// it took outside a transaction go when it ends (<see cref="LockTable"/>).</summary>
+    /// it took for itself go when it ends, unless its result takes them over (<see cref="LockTable"/>,
+    /// <see cref="KeepStatementTableLocks"/>).</summary>
     internal T ReadConsistent<T>(Func<T> action)
     {
-        _scopeDepth++;
+        BeginScope();
         try { return _cache.ReadConsistent(action); }
         finally { EndScope(); }
     }
@@ -853,7 +1035,7 @@ public sealed class PageChannel : IDisposable
     /// lets the gate go — one that fails there, once rolled back, the AutoNumbers (<see cref="PublishAheadOfCommit"/>).</summary>
     internal T WriteExclusive<T>(Func<T> action)
     {
-        _scopeDepth++;
+        BeginScope();
         try
         {
             return _cache.PublishLocked(() =>
@@ -899,7 +1081,7 @@ public sealed class PageChannel : IDisposable
     /// </remarks>
     private void PublishAheadOfCommit(bool failed)
     {
-        if (_active is not { } transaction || _cache.User is not { } user || _readOnly) return;
+        if (_active is not { } transaction || _user is not { } user || _readOnly) return;
         var images = new Dictionary<int, byte[]>();
 
         int[] maps = failed ? [] : [.. Allocator.GlobalMapPages(page => _commitBaselines.GetValueOrDefault(page) is not null)
@@ -983,9 +1165,16 @@ public sealed class PageChannel : IDisposable
         return published;
     }
 
+    // The outermost scope is a statement: it lets go of the results before it that were never read
+    // (KeepStatementTableLocks).
+    private void BeginScope()
+    {
+        if (_scopeDepth++ == 0) ReleaseUnreadResults();
+    }
+
     private void EndScope()
     {
-        if (--_scopeDepth == 0 && _statementTableLocks.Count > 0) UnlockTables(_statementTableLocks, 0);
+        if (--_scopeDepth == 0 && _statementLocks.Count > 0) UnlockHeld(_statementLocks, 0);
     }
 
     /// <remarks><paramref name="source"/> is a whole page the cache takes over as it stands — this channel's own
@@ -1127,7 +1316,7 @@ public sealed class PageChannel : IDisposable
             _released.AddRange(_releasing);   // the pages it freed are now the session's to hold until close
             ClearTransactionState();
             Unlock(locked);
-            UnlockTables(_transactionTableLocks, 0);   // and its table locks, as ACE's go at COMMIT (locking.md §5)
+            UnlockHeld(_transactionTableLocks, 0);   // and its table locks, as ACE's go at COMMIT (locking.md §5)
             if (_schemaDirty) _cache.MarkSchemaChanged();
             _schemaDirty = false;
         });
@@ -1178,7 +1367,7 @@ public sealed class PageChannel : IDisposable
         finally
         {
             Unlock(locked);
-            UnlockTables(_transactionTableLocks, 0);
+            UnlockHeld(_transactionTableLocks, 0);
         }
     }
 
@@ -1356,7 +1545,6 @@ public sealed class PageChannel : IDisposable
             throw new InvalidOperationException("No transaction is in progress.");
         int releaseCount = _active.ReleaseCountAt(savepoint);
         int dependencyCount = _active.DependencyCountAt(savepoint);
-        int tableLockCount = _active.TableLockCountAt(savepoint);
         Storage.PageAllocator.AllocationState? allocation = _active.AllocationAt(savepoint);
         var (before, pageCount) = _active.TakeForRollbackTo(savepoint);
         int[] unlocked = RestoreOverlay(before, pageCount);
@@ -1375,9 +1563,10 @@ public sealed class PageChannel : IDisposable
         }
         finally
         {
+            // The page locks the frame first took go with its writes. Its table locks stay to the end of the
+            // transaction: a table a failed statement wrote, or one rolled back in a nested transaction, refuses
+            // another connection's ALTER TABLE until ACE's outer transaction ends (measured).
             Unlock(unlocked);
-            // The table locks the frame first took go with its writes; those taken before it stay.
-            UnlockTables(_transactionTableLocks, tableLockCount);
         }
         _releasing.RemoveRange(releaseCount, _releasing.Count - releaseCount);
         // The writes that needed them are undone, so the conditions are no longer anything to hold the commit to —
@@ -1415,7 +1604,7 @@ public sealed class PageChannel : IDisposable
         var unlocked = new List<int>();
         foreach (int page in _commitBaselines.Keys.Where(p => !_overlay.ContainsKey(p)).ToArray())
         {
-            if (_commitBaselines[page] is not null && _cache.User is not null) unlocked.Add(page);
+            if (_commitBaselines[page] is not null && _user is not null) unlocked.Add(page);
             _commitBaselines.Remove(page);
         }
         // A definition page let go after an early publication, and first written in a frame rolled back, is the file's
@@ -1497,13 +1686,14 @@ public sealed class PageChannel : IDisposable
             ClearTransactionState();
             _active = null;
         }
-        if (_cache.User is not null)
-        {
-            UnlockTables(_transactionTableLocks, 0);
-            UnlockTables(_statementTableLocks, 0);
-        }
+        UnlockHeld(_transactionTableLocks, 0);
+        UnlockHeld(_statementLocks, 0);
+        HeldTableLocks[] held;
+        lock (_heldTableLocks) held = [.. _heldTableLocks];
+        foreach (HeldTableLocks owner in held) Release(owner);
         if (!_readOnly) _stream.Flush(flushToDisk: false);
         _stream.Dispose();
+        _user?.Dispose();   // deregisters, and deletes the lock file when no other user — or channel — is connected
         PageCache.ReleaseKey(_identity); // last channel on this file drops the shared pool
         if (_ownsLocks) MonitorLockManager.ReleaseKey(_identity); // and the shared lock manager
     }
@@ -1519,6 +1709,33 @@ internal enum TableUse
     Write,
     /// <summary>Changes its design, creates it or drops it.</summary>
     Design,
+}
+
+/// <summary>Table locks owned by something other than a statement or a transaction: a statement's result while its rows
+/// are read (<see cref="PageChannel.KeepStatementTableLocks"/>), or one read or enumeration of a table outside every
+/// statement (<see cref="PageChannel.LockTable"/>). Disposing lets them go; so does the channel's close.</summary>
+internal sealed class HeldTableLocks : IDisposable
+{
+    private readonly PageChannel _channel;
+
+    internal HeldTableLocks(PageChannel channel, List<(JetLockRegion Region, int Page, bool Exclusive)> locks, bool started)
+    {
+        _channel = channel;
+        Locks = locks;
+        _started = started;
+    }
+
+    private volatile bool _started;
+
+    internal List<(JetLockRegion Region, int Page, bool Exclusive)> Locks { get; }
+
+    /// <summary>Whether the reading they are held for has begun.</summary>
+    internal bool Started => _started;
+
+    /// <summary>Marks the reading as begun: the locks are then held until disposed.</summary>
+    internal void Start() => _started = true;
+
+    public void Dispose() => _channel.Release(this);
 }
 
 /// <summary>The kinds of write a read-only database refuses, each with its own message from ACE.</summary>

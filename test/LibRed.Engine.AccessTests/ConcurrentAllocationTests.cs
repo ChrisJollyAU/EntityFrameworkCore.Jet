@@ -56,30 +56,28 @@ public class ConcurrentAllocationTests
         second.ExecuteNonQuery("BEGIN TRANSACTION");
         first.ExecuteNonQuery(
             $"INSERT INTO ConcurrentAlloc (K, M) VALUES ('first', '{firstMemo}')");
-        second.ExecuteNonQuery(
-            $"INSERT INTO ConcurrentAlloc (K, M) VALUES ('stale', '{staleMemo}')");
 
-        // The second draws the id after the first's, which the first's INSERT wrote ahead of its COMMIT (locking.md §5).
-        // ACE, two connections in one process, this sequence on this table (measured —
-        // RollbackCounterProbeTest.Probe_ids_of_two_connections_when_one_rolls_back): the first draws 1, the second's
-        // INSERT draws 2 and is refused at once with 3218, and the retry below gets 3. LibRed's connections in one
-        // process stay optimistic among themselves, so its second INSERT goes ahead and is refused at COMMIT instead.
+        // ACE, two connections in one process, this sequence on this table (measured): the first draws 1; the second's
+        // INSERT draws 2 — the first's INSERT wrote its id ahead of its COMMIT (locking.md §5) — and is refused with
+        // 3218 after ACE's retries, 2.2 to 2.7 s; both then commit, the second nothing; and the retry below gets 3.
+        // Each connection is a Jet user of its own, in LibRed as in ACE.
+        var wait = System.Diagnostics.Stopwatch.StartNew();
+        var refused = Assert.Throws<InvalidOperationException>(() => second.ExecuteNonQuery(
+            $"INSERT INTO ConcurrentAlloc (K, M) VALUES ('stale', '{staleMemo}')"));
+        wait.Stop();
+        Assert.Equal("Could not update; currently locked.", refused.Message);
+        Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
         Assert.Equal(1, Identity(first));
-        Assert.Equal(2, Identity(second));
         Assert.True(firstDb.OpenTable("ConcurrentAlloc").Channel.PageCount > committedPages);
-        Assert.True(secondDb.OpenTable("ConcurrentAlloc").Channel.PageCount > committedPages);
 
         first.ExecuteNonQuery("COMMIT");
-        var conflict = Assert.Throws<InvalidOperationException>(() => second.ExecuteNonQuery("COMMIT"));
-        Assert.Contains("write conflict", conflict.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.True(secondDb.InTransaction);
-        second.ExecuteNonQuery("ROLLBACK");
+        second.ExecuteNonQuery("COMMIT");
+        Assert.False(secondDb.InTransaction);
 
         Assert.Single(second.ExecuteQuery("SELECT Id FROM ConcurrentAlloc WHERE K = 'first'").Rows);
         Assert.Empty(second.ExecuteQuery("SELECT Id FROM ConcurrentAlloc WHERE K = 'stale'").Rows);
 
-        // The rolled-back insert's id stays drawn: ACE's retry after the same sequence gets 3 (measured —
-        // RollbackCounterProbeTest.Probe_ids_of_two_connections_when_one_rolls_back).
+        // The refused insert's id stays drawn: ACE's retry after the same sequence gets 3 (measured).
         second.ExecuteNonQuery("BEGIN TRANSACTION");
         second.ExecuteNonQuery(
             $"INSERT INTO ConcurrentAlloc (K, M) VALUES ('retry', '{retryMemo}')");

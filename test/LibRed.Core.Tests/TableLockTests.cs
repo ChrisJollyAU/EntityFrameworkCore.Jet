@@ -4,8 +4,8 @@ using Xunit;
 
 namespace LibRed.Core.Tests;
 
-// The process's lock table (docs/format/locking.md §2, §4): one user per process, so its holders of one lock share the
-// operating-system lock, and its own shared byte never stands in the way of its own exclusive lock — which it takes as
+// A connection's lock table (docs/format/locking.md §2, §4): one user per connection, whose holders of one lock share
+// the operating-system lock, and its own shared byte never stands in the way of its own exclusive lock — which it takes as
 // ACE takes an upgrade, the other users' bytes on top of its own. "The other user" is a second JetLockFile handle as
 // user 2, which conflicts with LibRed's own exactly as another process's would.
 public class TableLockTests
@@ -24,15 +24,15 @@ public class TableLockTests
         Assert.Equal(1, registration.User);
         long window = JetLockLayout.PageWindow(JetLockRegion.TableRead, Page);
 
-        Assert.True(registration.Lock(JetLockRegion.TableRead, Page, exclusive: false, "T"));
-        Assert.False(registration.Lock(JetLockRegion.TableRead, Page, exclusive: false, "T"));   // joined
+        Assert.True(registration.Lock(JetLockRegion.TableRead, Page, exclusive: false, JetLockPurpose.Table, "T"));
+        Assert.False(registration.Lock(JetLockRegion.TableRead, Page, exclusive: false, JetLockPurpose.Table, "T"));   // joined
         Assert.False(IsFree(other, window + 1, 1));
         Assert.True(SharedIsFree(other));
         Assert.False(ExclusiveIsFree(other));
 
         // The upgrade: every other user's byte, window + 2 for 255 bytes for user 1 — not ACE's single range, whose
         // last byte (window + 257) it leaves free.
-        Assert.True(registration.Lock(JetLockRegion.TableRead, Page, exclusive: true, "T"));
+        Assert.True(registration.Lock(JetLockRegion.TableRead, Page, exclusive: true, JetLockPurpose.Table, "T"));
         Assert.False(SharedIsFree(other));
         Assert.False(IsFree(other, window + 2, 1));
         Assert.False(IsFree(other, window + 256, 1));
@@ -57,8 +57,8 @@ public class TableLockTests
         using JetLockFile other = OtherUserOf(copy.Path);
         long window = JetLockLayout.PageWindow(JetLockRegion.TableRead, Page);
 
-        Assert.True(registration.Lock(JetLockRegion.TableRead, Page, exclusive: true, "T"));
-        Assert.False(registration.Lock(JetLockRegion.TableRead, Page, exclusive: false, "T"));   // joined, no OS call
+        Assert.True(registration.Lock(JetLockRegion.TableRead, Page, exclusive: true, JetLockPurpose.Table, "T"));
+        Assert.False(registration.Lock(JetLockRegion.TableRead, Page, exclusive: false, JetLockPurpose.Table, "T"));   // joined, no OS call
         Assert.False(IsFree(other, window + 1, 1));
         Assert.False(SharedIsFree(other));
 
@@ -78,7 +78,7 @@ public class TableLockTests
         using JetLockFile other = OtherUserOf(copy.Path);
         (long offset, long length) = JetLockLayout.ExclusiveRange(JetLockRegion.WriteRead, Page, registration.User);
 
-        Assert.True(registration.Lock(JetLockRegion.WriteRead, Page, exclusive: true));
+        Assert.True(registration.Lock(JetLockRegion.WriteRead, Page, exclusive: true, JetLockPurpose.PageWrite));
         Assert.False(IsFree(other, offset, 1));
         Assert.False(IsFree(other, offset + length - 1, 1));
         Assert.True(IsFree(other, offset + length, 1));
@@ -98,7 +98,7 @@ public class TableLockTests
 
         var wait = Stopwatch.StartNew();
         var refused = Assert.Throws<InvalidOperationException>(
-            () => registration.Lock(JetLockRegion.TableRead, Page, exclusive: true, "Orders"));
+            () => registration.Lock(JetLockRegion.TableRead, Page, exclusive: true, JetLockPurpose.Table, "Orders"));
         wait.Stop();
         Assert.Equal(
             "The database engine could not lock table 'Orders' because it is already in use by another person or process.",
@@ -142,6 +142,56 @@ public class TableLockTests
             shared.Rollback();
         }
         finally { TemporaryDatabase.Delete(renamed); }
+    }
+
+    // Outside every statement, an enumeration of a table's rows holds its table-read byte from its first row until it
+    // ends or is disposed, in a transaction or not — as ACE's open reader holds it until closed, not to COMMIT (measured,
+    // locking.md §4) — and another user's design lock refuses it with 3008.
+    [Fact]
+    public void A_Core_API_enumeration_outside_a_statement_holds_the_tables_read_byte_until_it_is_disposed()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-tablelock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        using JetLockFile other = OtherUserOf(copy.Path);
+        Storage.Table customers = database.OpenTable("Customers");
+        int tdef = customers.Definition.DefinitionPage;
+        (long offset, long length) = JetLockLayout.ExclusiveRange(JetLockRegion.TableRead, tdef, OtherUser);
+        Assert.True(IsFree(other, offset, length));
+
+        foreach (bool inTransaction in (bool[])[false, true])
+        {
+            if (inTransaction) database.BeginTransaction();
+            using (IEnumerator<object?[]> rows = customers.Rows().GetEnumerator())
+            {
+                Assert.True(rows.MoveNext());
+                Assert.False(IsFree(other, offset, length));
+                Assert.True(IsFree(other, JetLockLayout.SharedByte(JetLockRegion.TableRead, tdef, OtherUser), 1));
+            }
+            Assert.True(IsFree(other, offset, length));
+            // Read to its end, it lets go as it ends.
+            using (IEnumerator<object?[]> rows = customers.Rows().GetEnumerator())
+            {
+                while (rows.MoveNext()) { }
+                Assert.True(IsFree(other, offset, length));
+            }
+            if (inTransaction) database.Rollback();
+        }
+
+        // Another user changing the table's design refuses the enumeration, once ACE's retries are spent: ACE's SELECT
+        // from Customers beside another connection's ALTER TABLE Customers in an open transaction fails with 3008
+        // after about 4.4 s, two rounds of its retries (measured).
+        Assert.True(other.TryLock(offset, length));
+        var wait = Stopwatch.StartNew();
+        var refused = Assert.Throws<InvalidOperationException>(() => customers.Rows().First());
+        wait.Stop();
+        Assert.Equal(
+            "The table 'Customers' is already opened exclusively by another user, or it is already open through the user interface and cannot be manipulated programmatically.",
+            refused.Message);
+        Assert.InRange(wait.ElapsedMilliseconds, 3900, 12_000);
+        other.Unlock(offset, length);
+        Assert.NotEmpty(customers.Rows().Take(1).ToList());
+        Assert.True(IsFree(other, offset, length));
     }
 
     private static JetLockFile OtherUserOf(string databasePath) =>

@@ -43,7 +43,45 @@ public sealed class QueryEngine
         // Parse outside the gate — it touches no pages, and holding a file-wide scope across it would
         // serialize parsing for no isolation benefit. The parsed shape then picks the scope.
         SqlStatement parsed = _parser.ParseStatement(sql);
-        return Scoped(CannotWrite(parsed), () => ExecuteQueryCore(parsed, parameters));
+        return Scoped(CannotWrite(parsed), () => HeldWhileRead(ExecuteQueryCore(parsed, parameters)));
+    }
+
+    /// <summary><paramref name="result"/> with the table locks its statement took handed to its rows, which are read
+    /// lazily, after the statement returns: held until the enumeration reading them is disposed — an ADO reader's close
+    /// — whether or not every row has been read, as ACE's open reader holds the table's read byte until it is closed
+    /// (measured, <see cref="PageChannel.KeepStatementTableLocks"/>). Called last in the statement's scope.</summary>
+    private ResultSet HeldWhileRead(ResultSet result)
+    {
+        if (ReferenceEquals(result, ResultSet.Empty) || _database.Channel.KeepStatementTableLocks() is not { } held)
+            return result;
+        return new ResultSet(result.ColumnNames, new HeldRows(result.Rows, held), result.ColumnTypes, () => result.Columns);
+    }
+
+    /// <summary>A result's rows and the table locks they hold (<see cref="HeldWhileRead"/>): the first enumeration
+    /// begun keeps them until it is disposed; one after that reads as the Core API does, under locks of its own.</summary>
+    private sealed class HeldRows(IEnumerable<object?[]> rows, HeldTableLocks held) : IEnumerable<object?[]>
+    {
+        public IEnumerator<object?[]> GetEnumerator()
+        {
+            held.Start();
+            return new Enumerator(rows.GetEnumerator(), held);
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+
+        private sealed class Enumerator(IEnumerator<object?[]> rows, HeldTableLocks held) : IEnumerator<object?[]>
+        {
+            public object?[] Current => rows.Current;
+            object System.Collections.IEnumerator.Current => rows.Current;
+            public bool MoveNext() => rows.MoveNext();
+            public void Reset() => rows.Reset();
+
+            public void Dispose()
+            {
+                try { rows.Dispose(); }
+                finally { held.Dispose(); }
+            }
+        }
     }
 
     /// <summary>Runs <paramref name="action"/> in the page scope its statement needs: shared (concurrent with other
@@ -136,7 +174,7 @@ public sealed class QueryEngine
     }
 
     public int ExecuteNonQuery(string sql, IReadOnlyDictionary<string, object?>? parameters = null)
-        => Execute(sql, parameters).RecordsAffected;
+        => Run(sql, parameters, rowsRead: false).RecordsAffected;
 
     /// <summary>
     /// True when <paramref name="sql"/> holds no statement — blank, or nothing but comments. The ADO batch
@@ -165,13 +203,24 @@ public sealed class QueryEngine
     /// EF Core executes inserts through the reader path to read results back.
     /// </summary>
     public CommandResult Execute(string sql, IReadOnlyDictionary<string, object?>? parameters = null)
+        => Run(sql, parameters, rowsRead: true);
+
+    /// <param name="sql">The statement.</param>
+    /// <param name="parameters">Its parameter values.</param>
+    /// <param name="rowsRead">Whether the caller reads the rows: they then hold the statement's table locks until read
+    /// (<see cref="HeldWhileRead"/>); a caller that drops them lets them go with the statement.</param>
+    private CommandResult Run(string sql, IReadOnlyDictionary<string, object?>? parameters, bool rowsRead)
     {
         // As in ExecuteQuery: nothing to parse, nothing to run. Reported as zero rows affected rather than
         // the -1 a query returns, since a comment is an action that did nothing, not a result set.
         if (_parser.IsStatementless(sql)) return new CommandResult(ResultSet.Empty, RecordsAffected: 0);
 
         SqlStatement parsed = _parser.ParseStatement(sql);
-        return Scoped(CannotWrite(parsed), () => ExecuteCore(parsed, parameters));
+        return Scoped(CannotWrite(parsed), () =>
+        {
+            CommandResult result = ExecuteCore(parsed, parameters);
+            return rowsRead ? result with { Rows = HeldWhileRead(result.Rows) } : result;
+        });
     }
 
     private CommandResult ExecuteCore(SqlStatement parsed, IReadOnlyDictionary<string, object?>? parameters)

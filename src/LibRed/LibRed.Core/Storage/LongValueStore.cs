@@ -54,8 +54,14 @@ public sealed class LongValueStore(PageChannel channel)
             return value;
         }
 
-        VerifyChainStamp(stamp, page);
-        return ReadChain(page, row, length, out pages);
+        // A chain is read under the reader's lock on its first page, as ACE reads one (locking.md §4).
+        (byte[] chained, IReadOnlyList<int> chainPages) = _channel.ReadLongValue(page, () =>
+        {
+            VerifyChainStamp(stamp, page);
+            return (ReadChain(page, row, length, out IReadOnlyList<int> read), read);
+        });
+        pages = chainPages;
+        return chained;
     }
 
     /// <summary>
@@ -67,9 +73,10 @@ public sealed class LongValueStore(PageChannel channel)
     /// <remarks>
     /// ACE enforces this and reports it as <i>"you and another user are attempting to change the same data at
     /// the same time"</i>; the diagnosis is the point, even if the wording is about the cause rather than what
-    /// was found. LibRed takes no lock on a long-value page it reads, so it can meet the interleaving ACE guards
-    /// against, and it can be handed a file another engine wrote: either way it must not read a stale chain as
-    /// though it were live.
+    /// was found. LibRed reads a chain under the reader's lock on its first page only when it is a registered user,
+    /// and holds it no longer than the statement, so it can meet the interleaving ACE guards against — through a
+    /// descriptor read before the lock, or unregistered — and it can be handed a file another engine wrote: either way
+    /// it must not read a stale chain as though it were live.
     /// Only the entry page is checked, because every chunk after it is reached from a page already validated.
     /// </remarks>
     private void VerifyChainStamp(uint declared, int page)

@@ -185,11 +185,11 @@ public class AllocationLockStatementTests
         Assert.Equal(21, Ids(engine)[^1]);
     }
 
-    // A design change to the table after the early write and another user's statement on it: the ALTER TABLE lays the
-    // definition page out afresh from the page as the file has it, so neither their AutoNumber nor their count is lost,
-    // and the transaction's own rows are counted onto theirs at COMMIT.
+    // A design change to the table after the transaction's own INSERT is refused at once, as ACE refuses it on this
+    // table (measured: 3211 with no wait, the transaction having the table in use), and changes nothing: the COMMIT
+    // still counts the transaction's row onto the other user's count and keeps their AutoNumber.
     [Fact]
-    public void An_ALTER_TABLE_after_the_early_write_keeps_another_users_AutoNumber_and_row_count()
+    public void An_ALTER_TABLE_after_the_transactions_own_INSERT_is_refused_and_the_COMMIT_keeps_another_users_counts()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
         using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
@@ -201,15 +201,19 @@ public class AllocationLockStatementTests
         engine.ExecuteNonQuery("BEGIN TRANSACTION");
         engine.ExecuteNonQuery("INSERT INTO T (A) VALUES ('three')");
         OtherUserCounts(other, copy.Path, tdef, lastAutoNumber: 10, rowsChange: -1);
-        engine.ExecuteNonQuery("ALTER TABLE T ADD COLUMN B LONG");
-        engine.ExecuteNonQuery("INSERT INTO T (A, B) VALUES ('four', 4)");
+        var wait = System.Diagnostics.Stopwatch.StartNew();
+        var refused = Assert.Throws<InvalidOperationException>(() => engine.ExecuteNonQuery("ALTER TABLE T ADD COLUMN B LONG"));
+        Assert.Equal(
+            "The database engine could not lock table 'T' because it is already in use by another person or process.",
+            refused.Message);
+        Assert.True(wait.ElapsedMilliseconds < 1000, $"The refusal took {wait.ElapsedMilliseconds} ms.");
         engine.ExecuteNonQuery("COMMIT");
 
         AssertNothingLocked(other, copy.Path);
-        Assert.Equal(11, LastAutoNumber(copy.Path, tdef));
-        Assert.Equal(3, RowCount(copy.Path, tdef));
-        Assert.Equal([1, 2, 3, 11], Ids(engine));
-        Assert.Equal(4, Convert.ToInt32(engine.ExecuteQuery("SELECT B FROM T WHERE Id = 11").Rows.Single()[0]));
+        Assert.Equal(10, LastAutoNumber(copy.Path, tdef));
+        Assert.Equal(2, RowCount(copy.Path, tdef));
+        Assert.Equal([1, 2, 3], Ids(engine));
+        Assert.Equal(["Id", "A"], engine.ExecuteQuery("SELECT * FROM T").ColumnNames);
         LibRed.Core.Tests.TestDatabases.AssertPageOwnership(database);
     }
 
