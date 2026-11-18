@@ -1953,7 +1953,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
 
         var shape = new JoinShape(JoinedColumns(leftColumns, rightColumns), leftColumns.Count, join.Keep);
         IReadOnlyList<OutputColumn> columns = shape.Columns;
-        var rightRows = rightRowsEnum.ToList(); // re-iterated per left row
+        List<object?[]>? rightRows = null; // read at the first left row, then re-iterated per left row
         if (on is null && join.Kind != JoinKind.Cross)
             throw new NotSupportedException("Joins require an ON condition.");
 
@@ -1966,7 +1966,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
         {
             var onScope = new EvalScope(columns, [], outer); // one scope/evaluator, rebound per combined row
             var onEval = new ExpressionEvaluator(onScope, this, parameters: _parameters, session: _session);
-            bool[]? rightMatched = rightOuter ? new bool[rightRows.Count] : null;
+            bool[]? rightMatched = null;
 
             // The hoisted subqueries see the left row only: binding them against the combined row would let a
             // bare name resolve to the right side, which is the case Invariants already declines to hoist.
@@ -1977,6 +1977,9 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
 
             foreach (object?[] left in leftRows)
             {
+                rightRows ??= rightRowsEnum.ToList();
+                if (rightOuter) rightMatched ??= new bool[rightRows.Count];
+
                 Expression? rowOn = on;
                 if (leftEval is not null && on is not null)
                 {
@@ -2007,7 +2010,10 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
             }
 
             // Right-preserving tail: every right row no left row matched, null-padded on the left.
-            for (int r = 0; rightMatched is not null && r < rightMatched.Length; r++)
+            if (!rightOuter) yield break;
+            rightRows ??= rightRowsEnum.ToList();
+            rightMatched ??= new bool[rightRows.Count];
+            for (int r = 0; r < rightMatched.Length; r++)
                 if (!rightMatched[r])
                     yield return shape.Combine(null, rightRows[r]);
         }
