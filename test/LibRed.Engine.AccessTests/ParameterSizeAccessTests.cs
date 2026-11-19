@@ -77,6 +77,54 @@ public class ParameterSizeAccessTests : TempDatabaseTest
         Assert.Equal(seattle, CountByCity(connection, "Seattle", size: -1));
     }
 
+    // A Boolean bound as text reaches ACE as the text "True" or "False" - and that text is then clipped to Size
+    // the way a string is, or it is not. Read back both from SELECT ? and from what an INSERT stored.
+    [Fact]
+    public void Ace_clips_a_Boolean_bound_as_text_to_the_declared_size_as_it_clips_a_string()
+    {
+        string path = TemporaryDatabase.CopyPath(
+            Path.Combine(AppContext.BaseDirectory, "Data", "Northwind.accdb"), "paramsizebool-");
+
+        using OleDbConnection connection = AceTestDatabase.Open(path);
+        using (OleDbCommand ddl = connection.CreateCommand())
+        {
+            ddl.CommandText = "CREATE TABLE ParamSizeBool (Id LONG PRIMARY KEY, V TEXT(10))";
+            ddl.ExecuteNonQuery();
+        }
+
+        OleDbParameter Text(object value) =>
+            new() { ParameterName = "v", OleDbType = OleDbType.VarWChar, Size = 2, Value = value };
+
+        // A bare SELECT ? with this parameter stops the process with an access violation inside ACE (measured), so
+        // the parameter is read in a comparison instead: the rows whose stored text it equals.
+        int Matching(object value)
+        {
+            using OleDbCommand select = connection.CreateCommand();
+            select.CommandText = "SELECT COUNT(*) FROM ParamSizeBool WHERE V = ?";
+            select.Parameters.Add(Text(value));
+            return Convert.ToInt32(select.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        string Stored(int id, object value)
+        {
+            using (OleDbCommand insert = connection.CreateCommand())
+            {
+                insert.CommandText = $"INSERT INTO ParamSizeBool (Id, V) VALUES ({id}, ?)";
+                insert.Parameters.Add(Text(value));
+                insert.ExecuteNonQuery();
+            }
+            using OleDbCommand read = connection.CreateCommand();
+            read.CommandText = $"SELECT V FROM ParamSizeBool WHERE Id = {id}";
+            return Convert.ToString(read.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture)!;
+        }
+
+        // What an INSERT stored, then how many stored rows the parameter equals, each for the string "True", the
+        // Boolean true and the Boolean false.
+        Assert.Equal(
+            "Tr Tr Fa | 2 2 1",
+            $"{Stored(1, "True")} {Stored(2, true)} {Stored(3, false)} | {Matching("True")} {Matching(true)} {Matching(false)}");
+    }
+
     private static int CountByValue(OleDbConnection connection, byte[] value, int size)
     {
         using OleDbCommand command = connection.CreateCommand();

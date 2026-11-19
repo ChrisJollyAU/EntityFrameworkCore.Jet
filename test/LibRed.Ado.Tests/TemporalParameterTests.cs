@@ -72,6 +72,48 @@ public class TemporalParameterTests
         Assert.Equal(epoch, reader.GetFieldValue<DateTime>(0));
     }
 
+    // A Boolean bound as text is the text "True" or "False", clipped to the parameter's Size as a string is. Measured
+    // with ACE over OLE DB (ParameterSizeAccessTests): VarWChar, Size 2, into a TEXT(10) column stores "Tr" for the
+    // string "True" and for true, "Fa" for false, and each such parameter then equals the rows that hold its clip.
+    [Fact]
+    public void A_Boolean_bound_as_text_is_clipped_to_the_declared_size_as_a_string_is()
+    {
+        using var conn = OpenTemp();
+        Exec(conn, "CREATE TABLE `B` (`Id` LONG PRIMARY KEY, `V` TEXT(10))");
+
+        System.Data.Common.DbCommand Command(string sql, object value)
+        {
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            var p = cmd.CreateParameter();
+            p.ParameterName = "@v";
+            p.DbType = System.Data.DbType.String;
+            p.Size = 2;
+            p.Value = value;
+            cmd.Parameters.Add(p);
+            return cmd;
+        }
+
+        string Stored(int id, object value)
+        {
+            using (var insert = Command($"INSERT INTO `B` (`Id`, `V`) VALUES ({id}, @v)", value))
+                insert.ExecuteNonQuery();
+            using var read = conn.CreateCommand();
+            read.CommandText = $"SELECT `V` FROM `B` WHERE `Id` = {id}";
+            return (string)read.ExecuteScalar()!;
+        }
+
+        int Matching(object value)
+        {
+            using var select = Command("SELECT COUNT(*) FROM `B` WHERE `V` = @v", value);
+            return Convert.ToInt32(select.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        Assert.Equal(
+            "Tr Tr Fa | 2 2 1",
+            $"{Stored(1, "True")} {Stored(2, true)} {Stored(3, false)} | {Matching("True")} {Matching(true)} {Matching(false)}");
+    }
+
     public static IEnumerable<object[]> TemporalCases() =>
     [
         [new TimeSpan(10, 9, 8), new TimeSpan(10, 9, 8)],

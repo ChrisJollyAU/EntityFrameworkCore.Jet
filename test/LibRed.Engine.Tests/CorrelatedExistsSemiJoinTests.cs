@@ -387,6 +387,16 @@ public class CorrelatedExistsSemiJoinTests : TempDatabaseTest
                 """));
 
     [Fact]
+    public void An_indexed_column_compared_with_a_parameter_beside_the_correlation_still_decorrelates()
+    {
+        // Keyed on the indexed i.Id, with a second indexed column held against a parameter: that comparison is the
+        // same with the key beside it or without, so reading the body once answers as reading it per row does.
+        QueryEngine e = Fresh();
+        e.ExecuteNonQuery("CREATE INDEX IX_I_Keep ON I (Keep)");
+        Assert.True(Decorrelates(e, "SELECT o.Id FROM O AS o WHERE EXISTS (SELECT 1 FROM I AS i WHERE i.Id = o.Id AND i.Keep > @p)"));
+    }
+
+    [Fact]
     public void An_uncorrelated_exists_is_unaffected()
         => Assert.Equal([1, 2, 3, 4, 5],
             Ids(Fresh(), "SELECT o.Id FROM O AS o WHERE EXISTS (SELECT 1 FROM I AS i WHERE i.Keep = 1)"));
@@ -498,5 +508,37 @@ public class CorrelatedExistsSemiJoinTests : TempDatabaseTest
                 WHERE (`c`.`CustomerID` LIKE 'F%') AND `o0`.`OrderID` = `o`.`OrderID` AND `o0`.`ProductID` = `o`.`ProductID`)
             """);
         Assert.Equal(164, deleted);
+    }
+
+    // A grouped body keyed on a Yes/No column the outer join leaves Null for an unmatched row. The body is read for
+    // each outer row until DecorrelationGate opens, well inside 20,000 outer rows, and once for them all after: every
+    // outer row with the same value must be kept or dropped alike by both readings.
+    [Fact]
+    public void A_grouped_body_keyed_on_a_YesNo_column_an_outer_join_leaves_Null_keeps_every_outer_row_with_the_same_value_alike()
+    {
+        QueryEngine e = Fresh();
+        e.ExecuteNonQuery("CREATE TABLE DG (D LONG)");
+        for (int d = 0; d < 10; d++)
+            e.ExecuteNonQuery($"INSERT INTO DG VALUES ({d})");
+        e.ExecuteNonQuery("CREATE TABLE TL (ID LONG PRIMARY KEY, V LONG, B YESNO)");
+        e.ExecuteNonQuery("INSERT INTO TL (ID, V, B) SELECT q.K, IIf(q.K Mod 7 = 0, Null, q.K Mod 4 - 1), q.K Mod 2 = 0 FROM (SELECT a.D"
+            + " + 10 * b.D + 100 * c.D + 1000 * d.D + 10000 * e.D + 1 AS K FROM DG AS a, DG AS b, DG AS c, DG AS d, DG AS e) AS q WHERE q.K <= 20000");
+        e.ExecuteNonQuery("CREATE TABLE SN (ID LONG PRIMARY KEY, Y YESNO)");
+        e.ExecuteNonQuery("INSERT INTO SN VALUES (1, True)");
+        e.ExecuteNonQuery("INSERT INTO SN VALUES (2, False)");
+        e.ExecuteNonQuery("CREATE TABLE A (ID LONG)");
+        foreach (int id in (int[])[1, 2, 3])
+            e.ExecuteNonQuery($"INSERT INTO A VALUES ({id})");
+
+        foreach (string column in (string[])["V", "B"])
+        {
+            Dictionary<string, int> PerValue(string sql) => e.ExecuteQuery(sql).Rows
+                .GroupBy(r => r[0] is null ? "Null" : Convert.ToString(r[0], System.Globalization.CultureInfo.InvariantCulture)!)
+                .ToDictionary(g => g.Key, g => g.Count());
+            Dictionary<string, int> all = PerValue($"SELECT TL.{column} FROM TL");
+            Dictionary<string, int> kept = PerValue(
+                $"SELECT TL.{column} FROM TL WHERE EXISTS (SELECT SN.ID FROM A LEFT JOIN SN ON A.ID = SN.ID WHERE SN.Y = TL.{column} GROUP BY SN.ID)");
+            Assert.All(kept, pair => Assert.Equal(all[pair.Key], pair.Value));
+        }
     }
 }

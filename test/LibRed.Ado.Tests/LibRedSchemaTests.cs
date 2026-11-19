@@ -102,6 +102,69 @@ public class LibRedSchemaTests
         Assert.Equal(0x02L | 0x08L | 0x10L | 0x40L, column["COLUMN_FLAGS"]);
     }
 
+    // A calculated column is as nullable as the type it reports: one yielding Yes/No is not nullable although it is
+    // stored in two bytes, and a calculated Long or Text one is. Measured: ACE's Columns rowset says Id:N A:N B:R L:N X:N
+    // for this table (CalculatedColumnSqlAccessTests), as do INFORMATION_SCHEMA.COLUMNS and the scaffolder.
+    [Fact]
+    public void Columns_calls_a_calculated_YesNo_column_not_nullable_as_ACE_does()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "schema-calc-");
+        using var connection = new LibRedConnection($"Data Source={path}");
+        connection.Open();
+        using (DbCommand create = connection.CreateCommand())
+        {
+            create.CommandText =
+                "CREATE TABLE T (Id LONG PRIMARY KEY, A LONG, B YESNO AS ([A] > 0), L LONG AS ([A]*2), X TEXT(20) AS (\"n\" & [A]))";
+            create.ExecuteNonQuery();
+        }
+
+        var columns = connection.GetSchema("Columns", [null, null, "T", null]).Rows.Cast<DataRow>()
+            .OrderBy(r => Convert.ToInt64(r["ORDINAL_POSITION"], CultureInfo.InvariantCulture))
+            .Select(r => $"{r["COLUMN_NAME"]}:{((bool)r["IS_NULLABLE"] ? "N" : "R")}");
+        Assert.Equal("Id:N A:N B:R L:N X:N", string.Join(" ", columns));
+    }
+
+    // A calculated column's type, length, precision and nullability are those of the type it reports, and the Columns
+    // rowset and INFORMATION_SCHEMA.COLUMNS describe it alike. Measured: ACE's Columns rowset gives exactly the facets
+    // below for this table (CalculatedColumnSqlAccessTests) — the Text result as long text of length 0.
+    [Fact]
+    public void Columns_and_INFORMATION_SCHEMA_describe_calculated_columns_alike()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "schema-calc-facets-");
+        using var connection = new LibRedConnection($"Data Source={path}");
+        connection.Open();
+        using (DbCommand create = connection.CreateCommand())
+        {
+            create.CommandText =
+                "CREATE TABLE T (Id LONG PRIMARY KEY, A LONG, B YESNO AS ([A] > 0), L LONG AS ([A]*2), X TEXT(20) AS (\"n\" & [A]), "
+                + "D DOUBLE AS ([A]/3))";
+            create.ExecuteNonQuery();
+        }
+
+        static string Facet(object value) => value is DBNull ? "-" : Convert.ToString(value, CultureInfo.InvariantCulture)!;
+
+        var rowset = connection.GetSchema("Columns", [null, null, "T", null]).Rows.Cast<DataRow>()
+            .OrderBy(r => Convert.ToInt64(r["ORDINAL_POSITION"], CultureInfo.InvariantCulture)).ToList();
+        string facets = string.Join(" ", rowset.Select(r =>
+            $"{r["COLUMN_NAME"]}:{Facet(r["DATA_TYPE"])}/{Facet(r["CHARACTER_MAXIMUM_LENGTH"])}/{Facet(r["NUMERIC_PRECISION"])}"
+            + $"/{((bool)r["IS_NULLABLE"] ? "N" : "R")}"));
+
+        var view = new List<string>();
+        using (DbCommand select = connection.CreateCommand())
+        {
+            select.CommandText = "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM `INFORMATION_SCHEMA.COLUMNS` "
+                + "WHERE TABLE_NAME = 'T' ORDER BY ORDINAL_POSITION";
+            using DbDataReader reader = select.ExecuteReader();
+            while (reader.Read()) view.Add($"{reader.GetString(0)}:{reader.GetString(1)}/{(reader.GetBoolean(2) ? "N" : "R")}");
+        }
+
+        Assert.Equal("Id:3/-/10/N A:3/-/10/N B:11/2/-/R L:3/-/10/N X:130/0/-/N D:5/-/15/N", facets);
+        Assert.Equal("Id:integer/N A:integer/N B:bit/R L:integer/N X:longchar/N D:double/N", string.Join(" ", view));
+        Assert.Equal(
+            rowset.Select(r => $"{r["COLUMN_NAME"]}:{((bool)r["IS_NULLABLE"] ? "N" : "R")}"),
+            view.Select(v => v.Split(':')[0] + ":" + v[^1]));
+    }
+
     [Fact]
     public void Columns_reports_a_views_output_columns()
     {

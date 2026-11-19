@@ -110,6 +110,68 @@ public class ScaffoldingTests
         finally { try { File.Delete(path); } catch (IOException) { } }
     }
 
+    // A calculated column is as nullable as the type it reports: one yielding Yes/No is not nullable although it is
+    // stored in two bytes, and a calculated Long or Text one is. Measured: ACE's Columns rowset says Id:N A:N B:R L:N X:N
+    // for this table (CalculatedColumnSqlAccessTests), as do INFORMATION_SCHEMA.COLUMNS and the Columns rowset.
+    [Fact]
+    public void A_calculated_YesNo_column_scaffolds_as_not_nullable_as_ACE_reports_it()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"scaffold-calc-{Guid.NewGuid():N}.accdb");
+        File.Copy(Northwind, path);
+        try
+        {
+            using (var conn = new LibRedConnection($"Data Source={path}"))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "CREATE TABLE T (Id LONG PRIMARY KEY, A LONG, B YESNO AS ([A] > 0), L LONG AS ([A]*2), " +
+                                  "X TEXT(20) AS (\"n\" & [A]))";
+                cmd.ExecuteNonQuery();
+            }
+
+            var columns = Factory().Create($"Data Source={path}", new DatabaseModelFactoryOptions())
+                .Tables.Single(t => t.Name == "T").Columns;
+            Assert.Equal("Id:N A:N B:R L:N X:N", string.Join(" ", columns.Select(c => $"{c.Name}:{(c.IsNullable ? "N" : "R")}")));
+        }
+        finally { try { File.Delete(path); } catch (IOException) { } }
+    }
+
+    // A calculated column scaffolds as the type it reports, which INFORMATION_SCHEMA.COLUMNS gives too: ACE's Columns
+    // rowset reports the Yes/No result as a not-nullable Yes/No and the Text result as long text of length 0, whatever
+    // their descriptors store (measured, CalculatedColumnSqlAccessTests).
+    [Fact]
+    public void Calculated_columns_scaffold_as_INFORMATION_SCHEMA_reports_them()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"scaffold-calc-types-{Guid.NewGuid():N}.accdb");
+        File.Copy(Northwind, path);
+        try
+        {
+            var view = new List<string>();
+            using (var conn = new LibRedConnection($"Data Source={path}"))
+            {
+                conn.Open();
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "CREATE TABLE T (Id LONG PRIMARY KEY, A LONG, B YESNO AS ([A] > 0), L LONG AS ([A]*2), " +
+                                      "X TEXT(20) AS (\"n\" & [A]), D DOUBLE AS ([A]/3))";
+                    cmd.ExecuteNonQuery();
+                }
+                using var select = conn.CreateCommand();
+                select.CommandText = "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM `INFORMATION_SCHEMA.COLUMNS` " +
+                                     "WHERE TABLE_NAME = 'T' ORDER BY ORDINAL_POSITION";
+                using var reader = select.ExecuteReader();
+                while (reader.Read()) view.Add($"{reader.GetString(0)}:{reader.GetString(1)}:{(reader.GetBoolean(2) ? "N" : "R")}");
+            }
+
+            var columns = Factory().Create($"Data Source={path}", new DatabaseModelFactoryOptions())
+                .Tables.Single(t => t.Name == "T").Columns;
+            string scaffolded = string.Join(" ", columns.Select(c => $"{c.Name}:{c.StoreType}:{(c.IsNullable ? "N" : "R")}"));
+            Assert.Equal("Id:integer:N A:integer:N B:bit:R L:integer:N X:longchar:N D:double:N", scaffolded);
+            Assert.Equal(string.Join(" ", view), scaffolded);
+        }
+        finally { try { File.Delete(path); } catch (IOException) { } }
+    }
+
     [Fact]
     public void On_delete_set_null_foreign_key_scaffolds_as_set_null()
     {

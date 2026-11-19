@@ -61,7 +61,7 @@ internal static class SubqueryCorrelation
         PlanNode plan;
         try
         {
-            plan = QueryPlanner.PlanSelect(subquery);
+            plan = QueryPlanner.PlanSelect(subquery, database);
         }
         catch (Exception)
         {
@@ -74,8 +74,12 @@ internal static class SubqueryCorrelation
         var outerKeys = new List<Expression>();
         var nullSafe = new List<bool>();
         var keyTypes = new List<Type?>();
+        var keys = new List<Expression>();
+        var asWritten = new List<Expression>();
         var residual = new List<Expression>();
         var residualHaving = new List<Expression>();
+        // The keys hashed by their truth (SameKind), which the lookup read for each outer row must take so too.
+        var truthKeys = new List<Expression>();
 
         // HAVING is searched for correlations too, but only for conjuncts whose subquery side is a GROUPING KEY.
         // Such a predicate is constant within a group, so it selects whole groups rather than filtering rows
@@ -100,19 +104,42 @@ internal static class SubqueryCorrelation
             if (operands is var (left, right)
                 && Orient(left, right, innerAliases, outerAliases) is var (inner, outer)
                 && inner is ColumnReference innerCol
-                && (!fromHaving || IsGroupingKey(inner, subquery.GroupBy))
-                && SameKind(innerCol, plan, database, outer, outerColumns, lookup, out Type? keyType))
+                && (!fromHaving || IsGroupingKey(inner, subquery.GroupBy, plan, database))
+                && SameKind(innerCol, plan, database, outer, outerColumns, lookup, out Type? keyType, out bool byTruth))
             {
                 innerKeys.Add(inner);
                 outerKeys.Add(outer);
                 nullSafe.Add(conjunct is not BinaryExpression { Operator: BinaryOperator.Equal });
                 keyTypes.Add(keyType);
+                // A Yes/No key beside a value a lookup takes by its truth is hashed as written where the body is not a
+                // lookup, which compares it by truth only where it reads an index for it: it is checked below.
+                (!lookup && byTruth ? asWritten : keys).Add(conjunct);
+                if (keyType == typeof(bool))
+                    truthKeys.Add(conjunct);
             }
             else
             {
                 (fromHaving ? residualHaving : residual).Add(conjunct);
             }
         }
+
+        // The body is read for each outer row until reading it once pays (DecorrelationGate), so the two readings must
+        // agree: where a Yes/No comparison left in the body is answered from one index beside the keys and from
+        // another without them, or a key hashed as written is compared by truth when the body is read for each outer
+        // row, or a key hashed by truth is not (beside another key on a column that leads an index ACE looks the row
+        // up by that index and compares the Yes/No column as a number — verified vs ACE: s.ID = t.ID AND s.Y = t.V
+        // with ID the primary key), the body stays read for each outer row.
+        if (IndexSelection.TruthDependsOn(keys, [.. residual, .. residualHaving, .. asWritten], truthKeys, plan, database, outerAliases))
+            return null;
+
+        // A body that aggregates is read once grouped by its keys, which refuses a Yes/No key an outer join leaves
+        // Null for an unmatched row (QueryExecutor); read for each outer row, the key's own condition drops that row
+        // before any grouping does, so the body stays read for each outer row.
+        if (QueryPlanner.IsGrouped(subquery)
+            && OuterJoined(plan)
+            && innerKeys.Any(key => key is ColumnReference column
+                && IndexSelection.ResolveColumn(column, plan, database) is { Column.Type: JetDataType.Boolean }))
+            return null;
 
         // Every outer reference must have been consumed as a key, or the body would still vary per outer row.
         //
@@ -140,14 +167,28 @@ internal static class SubqueryCorrelation
 
         static Expression? And(List<Expression> conjuncts)
             => conjuncts.Count == 0 ? null : conjuncts.Aggregate((a, b) => new BinaryExpression(BinaryOperator.And, a, b));
+
+        static bool OuterJoined(PlanNode node)
+            => node is JoinNode { Kind: not (JoinKind.Inner or JoinKind.Cross or JoinKind.CrossApply) }
+                    or HashJoinNode { Kind: not (JoinKind.Inner or JoinKind.Cross or JoinKind.CrossApply) }
+                || node.Children.Any(OuterJoined);
     }
 
     /// <summary>
     ///     Whether <paramref name="inner" /> is one of the GROUP BY key expressions — the condition for lifting a
-    ///     correlation out of HAVING.
+    ///     correlation out of HAVING. Two columns are the same key when they name the same column of the same
+    ///     source of <paramref name="from" />, written with or without its qualifier (verified vs ACE) — the one
+    ///     output column the executor's grouping check finds for each (QueryExecutor.RequireGrouped). A name more
+    ///     than one source has binds to none, and two names for one stored column are two columns (verified vs ACE:
+    ///     <c>HAVING d.B &gt; 1</c> where d's A and B both read ID is refused under GROUP BY d.A).
     /// </summary>
-    private static bool IsGroupingKey(Expression inner, IReadOnlyList<Expression> groupBy)
-        => groupBy.Any(k => SameOperand(k, inner));
+    internal static bool IsGroupingKey(Expression inner, IReadOnlyList<Expression> groupBy, PlanNode from, JetDatabase database)
+        => groupBy.Any(k => SameOperand(k, inner)
+            || (k is ColumnReference key && inner is ColumnReference column
+                && string.Equals(key.Column, column.Column, StringComparison.OrdinalIgnoreCase)
+                && IndexSelection.ResolveColumn(key, from, database) is { } a
+                && IndexSelection.ResolveColumn(column, from, database) is { } b
+                && string.Equals(a.Alias, b.Alias, StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>
     ///     Recognises EF's null-safe equality — <c>a = b OR (a IS NULL AND b IS NULL)</c> — returning the two
@@ -225,7 +266,8 @@ internal static class SubqueryCorrelation
     ///     the per-row comparison compares them (measured against ACE): as Singles, but as Doubles where the
     ///     subquery's column is an indexed Double, which the comparison seeks. <paramref name="lookup" /> says the
     ///     subquery asks only whether a matching row exists — EXISTS, IN — which ACE answers by looking the outer
-    ///     value up in the subquery's column, in that column's type.
+    ///     value up in the subquery's column, in that column's type. <paramref name="byTruth" /> says such a lookup
+    ///     compares the two by the outer value's truth, whether or not this is one.
     /// </summary>
     internal static bool SameKind(
         ColumnReference innerCol,
@@ -234,9 +276,11 @@ internal static class SubqueryCorrelation
         Expression outer,
         IReadOnlyList<OutputColumn> outerColumns,
         bool lookup,
-        out Type? keyType)
+        out Type? keyType,
+        out bool byTruth)
     {
         keyType = null;
+        byTruth = false;
         if (IndexSelection.ResolveColumn(innerCol, innerPlan, database) is not { } inner
             || IndexSelection.Classify(inner.Column.Type) is not { } innerKind)
         {
@@ -250,18 +294,18 @@ internal static class SubqueryCorrelation
             return false;
         }
 
-        OutputColumn outerColumn = outerColumns.FirstOrDefault(
-            c => string.Equals(c.Name, outerCol.Column, StringComparison.OrdinalIgnoreCase)
-                && (outerCol.Table is null || string.Equals(c.Qualifier, outerCol.Table, StringComparison.OrdinalIgnoreCase)));
+        // An outer name more than one outer column has is the evaluator's ambiguity to report, row by row.
+        if (OutputColumn.Find(outerColumns, outerCol) is not { } outerColumn)
+        {
+            return false;
+        }
         Type? clr = outerColumn.ClrType;
 
         // A number or date looked up in a Yes/No column is compared by its truth, so both sides are hashed as
         // Booleans (verified vs ACE: EXISTS (… WHERE s.Y = t.V) holds for a t.V of 1 or 2 where s.Y is True). A
         // Decimal is compared as the number it is; a Currency is not a Decimal here.
-        if (lookup && inner.Column.Type == JetDataType.Boolean && clr is not null
-            && (Nullable.GetUnderlyingType(clr) ?? clr) is var looked && looked != typeof(bool)
-            && (looked == typeof(DateTime)
-                || (KindOf(looked) == IndexSelection.TypeKind.Numeric && (looked != typeof(decimal) || outerColumn.Currency))))
+        byTruth = inner.Column.Type == JetDataType.Boolean && ExpressionEvaluator.ComparedByTruth(clr, outerColumn.Currency);
+        if (lookup && byTruth)
         {
             keyType = typeof(bool);
             return true;

@@ -19,13 +19,30 @@ public static class JetStoreType
     /// rowset, and DAO reports <c>Required = False</c> for it; treating the flag alone as decisive
     /// contradicted both.</para>
     /// <para>A Yes/No column is never nullable either, whether or not it is Required: its value is one bit of the
-    /// row, a Null written to it is stored as False, and ACE's OLE DB schema rowset reports it so (verified).</para></summary>
-    public static bool IsNullable(ColumnDef column) =>
-        (!column.IsAutoNumber || column.Type == JetDataType.Complex) && column.Type != JetDataType.Boolean && column.IsNullable;
+    /// row, a Null written to it is stored as False, and ACE's OLE DB schema rowset reports it so (verified).
+    /// That goes by the type the column reports, so a calculated column whose expression yields Yes/No is not
+    /// nullable although its value is stored in two bytes, while a calculated Long or Text one is (verified against
+    /// ACE's Columns rowset).</para>
+    /// <para>The column's own <c>Required</c> property comes on top of what its type allows
+    /// (<see cref="TypeHoldsNull"/>).</para></summary>
+    public static bool IsNullable(ColumnDef column) => TypeHoldsNull(column) && column.IsNullable;
+
+    /// <summary>Whether the column's type can hold a Null at all, whatever its <c>Required</c> property says — what a
+    /// view over the column reports (verified against ACE's Columns rowset for a view: an AutoNumber, a stored and a
+    /// calculated Yes/No are not nullable, a required Long and a calculated Long are). See
+    /// <see cref="IsNullable"/>.</summary>
+    public static bool TypeHoldsNull(ColumnDef column) =>
+        (!column.IsAutoNumber || column.Type == JetDataType.Complex) && ClrTypeHoldsNull(JetClrTypeMap.ToClrType(column.ReportedType));
+
+    /// <summary>Whether a value of <paramref name="clrType"/> can be Null: a Yes/No never is. For a view's computed
+    /// column, which has no stored column behind it, this is the whole answer.</summary>
+    public static bool ClrTypeHoldsNull(Type? clrType) => clrType != typeof(bool);
 
     /// <summary>The bare type name (no facets) — <c>INFORMATION_SCHEMA.COLUMNS.DATA_TYPE</c>, with length /
-    /// precision / scale reported in their own columns. Mirrors <c>AdoxSchema.GetDataTypeString</c>.</summary>
-    public static string TypeName(ColumnDef column) => column.Type switch
+    /// precision / scale reported in their own columns. Mirrors <c>AdoxSchema.GetDataTypeString</c>. Like every
+    /// facet here it names the type the column reports (<see cref="ColumnDef.ReportedType"/>), not a calculated
+    /// column's storage type.</summary>
+    public static string TypeName(ColumnDef column) => column.ReportedType switch
     {
         JetDataType.Boolean => "bit",
         JetDataType.Byte => "byte",
@@ -59,7 +76,7 @@ public static class JetStoreType
 
     /// <summary>Length facet: characters for text (on-disk bytes are 2 per char), bytes for binary; null for
     /// everything else. This is <c>CHARACTER_MAXIMUM_LENGTH</c>.</summary>
-    public static int? MaxLength(ColumnDef column) => column.Type switch
+    public static int? MaxLength(ColumnDef column) => column.ReportedType switch
     {
         JetDataType.Text => Math.Max(1, column.Length / 2),
         JetDataType.Binary or JetDataType.BigBinary => Math.Max(1, column.Length),
@@ -73,7 +90,7 @@ public static class JetStoreType
     public static string StoreType(ColumnDef column)
     {
         string name = TypeName(column);
-        return column.Type switch
+        return column.ReportedType switch
         {
             JetDataType.FixedPoint => $"{name}({column.Precision},{column.Scale})",
             JetDataType.Text or JetDataType.Binary or JetDataType.BigBinary => $"{name}({MaxLength(column)})",

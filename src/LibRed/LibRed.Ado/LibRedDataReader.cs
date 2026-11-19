@@ -19,6 +19,7 @@ public sealed class LibRedDataReader : DbDataReader, IDbColumnSchemaGenerator
     private readonly IEnumerator<object?[]> _rows;
     private readonly int _recordsAffected;
     private readonly bool _singleRow;
+    private readonly bool _keyInfo;
     private readonly LibRedConnection? _ownedConnection;
     private object?[] _current = [];
     private bool _pendingFirst;
@@ -33,9 +34,9 @@ public sealed class LibRedDataReader : DbDataReader, IDbColumnSchemaGenerator
     /// <c>CloseConnection</c> hands the reader <paramref name="connection"/>'s lifetime — closing the reader
     /// then closes it, as ACE does. <c>SingleResult</c> is already the only shape this reader has (a batch
     /// returns its last statement's rows and <c>NextResult</c> is always false), <c>SequentialAccess</c> asks
-    /// for a restriction on a row that is already in memory, and the key and base-column information
-    /// <c>KeyInfo</c> asks for costs a catalog lookup that <c>GetSchemaTable</c> makes anyway — so those three
-    /// are accepted and need nothing.
+    /// for a restriction on a row that is already in memory — so those two are accepted and need nothing.
+    /// <c>KeyInfo</c> changes what the schema says about nulls (<see cref="Described"/>). The key and base-column
+    /// information it asks for costs a catalog lookup the schema makes anyway, so that is reported either way.
     /// </param>
     /// <param name="connection">The connection to close when this reader closes, for <c>CloseConnection</c>.</param>
     internal LibRedDataReader(
@@ -46,6 +47,7 @@ public sealed class LibRedDataReader : DbDataReader, IDbColumnSchemaGenerator
         _rows = result.Rows.GetEnumerator();
         _recordsAffected = recordsAffected;
         _singleRow = behavior.HasFlag(CommandBehavior.SingleRow);
+        _keyInfo = behavior.HasFlag(CommandBehavior.KeyInfo);
         _ownedConnection = behavior.HasFlag(CommandBehavior.CloseConnection) ? connection : null;
 
         // Buffer the first row eagerly so column types (GetFieldType/GetDataTypeName) are available
@@ -144,7 +146,14 @@ public sealed class LibRedDataReader : DbDataReader, IDbColumnSchemaGenerator
     /// from a table the stored column behind it — its table, its own name, and whether it is a key, unique,
     /// an AutoNumber or computed.</summary>
     public ReadOnlyCollection<DbColumn> GetColumnSchema() =>
-        new(_result.Columns.Select((c, i) => (DbColumn)new LibRedDbColumn(c, i)).ToList());
+        new(Described.Select((c, i) => (DbColumn)new LibRedDbColumn(c, i)).ToList());
+
+    /// <summary>The result's columns as this reader describes them to <c>GetSchemaTable</c> and
+    /// <c>GetColumnSchema</c>: with <c>KeyInfo</c>, each column's nullability as the engine describes it
+    /// (<c>SchemaRowsets.Describe</c> states the rule); without it, every column nullable, as ACE's reader calls
+    /// them.</summary>
+    private IReadOnlyList<ResultColumn> Described =>
+        _keyInfo ? _result.Columns : [.. _result.Columns.Select(c => c with { AllowNull = true })];
 
     /// <summary>The same description in the older <c>DataTable</c> form, with the column set ADO.NET
     /// defines for it.</summary>
@@ -168,9 +177,10 @@ public sealed class LibRedDataReader : DbDataReader, IDbColumnSchemaGenerator
         })
             table.Columns.Add(name, type);
 
-        for (int i = 0; i < _result.Columns.Count; i++)
+        IReadOnlyList<ResultColumn> described = Described;
+        for (int i = 0; i < described.Count; i++)
         {
-            ResultColumn c = _result.Columns[i];
+            ResultColumn c = described[i];
             table.Rows.Add(
                 c.Name, i, (object?)c.Size ?? DBNull.Value,
                 c.Precision is { } p ? (short)p : DBNull.Value, c.Scale is { } s ? (short)s : DBNull.Value,

@@ -80,6 +80,10 @@ public sealed class ColumnDef
     /// expression itself is separate (see the format spec).</summary>
     public bool IsCalculated { get; init; }
 
+    /// <summary>A Yes/No column whose value IS its null-bitmap bit (set = True), with no data of its own, so it never
+    /// holds a Null. A calculated Yes/No is not one: its result has a real slot, and its bit means "present".</summary>
+    public bool IsBitFlag => Type == JetDataType.Boolean && !IsCalculated;
+
     /// <summary>Whether a calculated column's expression may be evaluated — extended-flag bit 0x10/0x80, which ACE
     /// writes with <see cref="IsCalculated"/> on every TDEF write. Without it ACE evaluates nothing and refuses
     /// every read of the column as an invalid expression, and so does LibRed.</summary>
@@ -109,6 +113,16 @@ public sealed class ColumnDef
     /// (a <c>CDbl</c> expression on a column declared LONG reads Double here and Int32 there). Null when the
     /// column is not calculated, or when the blob did not carry the property.</summary>
     public JetDataType? CalculatedResultType { get; internal set; }
+
+    /// <summary>The type the column reports through every schema surface. For an ordinary column that is
+    /// <see cref="Type"/>; a calculated one reports its <see cref="CalculatedResultType"/> instead, because its
+    /// descriptor holds a storage promotion of it (a Yes/No result is stored in two bytes and reports Yes/No). A Text
+    /// result reports as long text: ACE's OLE DB Columns rowset gives it the type, zero maximum length and long flag
+    /// of a Memo column, whatever length it was declared with (verified).</summary>
+    public JetDataType ReportedType =>
+        IsCalculated && CalculatedResultType is { } result
+            ? result == JetDataType.Text ? JetDataType.Memo : result
+            : Type;
 
     /// <summary>AutoNumber (COUNTER) seed and increment. The increment is read from the TDEF header (0x18);
     /// the seed is the header's last-assigned value (0x14) plus the increment — which equals the original

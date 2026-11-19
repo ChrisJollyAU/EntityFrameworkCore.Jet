@@ -21,6 +21,8 @@ public static class ExpressionTree
         CaseExpression c => c.WhenClauses
             .SelectMany(w => new[] { w.Condition, w.Result })
             .Concat(c.ElseResult is { } otherwise ? new[] { otherwise } : []),
+        SoughtValue s => new[] { s.Value },
+        ComparedAsWritten w => new[] { w.Value },
         _ => null,
     };
 
@@ -38,6 +40,8 @@ public static class ExpressionTree
             WhenClauses = c.WhenClauses.Select(w => w with { Condition = map(w.Condition), Result = map(w.Result) }).ToList(),
             ElseResult = c.ElseResult is null ? null : map(c.ElseResult),
         },
+        SoughtValue s => s with { Value = map(s.Value) },
+        ComparedAsWritten w => w with { Value = map(w.Value) },
         _ => expression,
     };
 }

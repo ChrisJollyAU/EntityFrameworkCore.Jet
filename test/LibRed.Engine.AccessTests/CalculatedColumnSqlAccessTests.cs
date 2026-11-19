@@ -89,6 +89,138 @@ public class CalculatedColumnSqlAccessTests(ITestOutputHelper output) : TempData
         finally { TemporaryDatabase.Delete(path); }
     }
 
+    // A calculated column's nullability, against ACE's own answer on the same file: its Columns rowset (IS_NULLABLE),
+    // which INFORMATION_SCHEMA.COLUMNS, JetStoreType.IsNullable (the scaffolder's source) and LibRed's Columns rowset
+    // must all give, and a reader's schema without KeyInfo, where ACE calls every column nullable. A Yes/No result is
+    // stored in two bytes, so the descriptor's type is not the one the column reports.
+    [Fact]
+    public void A_calculated_YesNo_column_is_as_nullable_on_every_schema_surface_as_ACE_reports_it()
+    {
+        string path = TemporaryDatabase.CreatePath("calc-nullable-");
+        try
+        {
+            JetDatabase.Create(path);
+            using (var database = JetDatabase.Open(path, readOnly: false))
+            {
+                var engine = new QueryEngine(database);
+                engine.ExecuteNonQuery(
+                    "CREATE TABLE T (Id LONG PRIMARY KEY, A LONG, B YESNO AS ([A] > 0), L LONG AS ([A]*2), "
+                    + "X TEXT(20) AS (\"n\" & [A]))");
+                engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (1, 7)");
+            }
+
+            static string ColumnsRowset(System.Data.Common.DbConnection c) =>
+                string.Join(" ", c.GetSchema("Columns", [null, null, "T", null]).Rows.Cast<System.Data.DataRow>()
+                    .OrderBy(r => Convert.ToInt64(r["ORDINAL_POSITION"], System.Globalization.CultureInfo.InvariantCulture))
+                    .Select(r => $"{r["COLUMN_NAME"]}:{((bool)r["IS_NULLABLE"] ? "N" : "R")}"));
+
+            static string ReaderSchema(System.Data.Common.DbConnection c, System.Data.CommandBehavior behavior) =>
+                BooleanValueParityAccessTests.ReaderNullability(c, "SELECT Id, B, L, X FROM T", behavior);
+
+            string aceRowset, aceDefault, aceKeyInfo;
+            using (var ace = AceTestDatabase.Open(path))
+            {
+                aceRowset = ColumnsRowset(ace);
+                aceDefault = ReaderSchema(ace, System.Data.CommandBehavior.Default);
+                aceKeyInfo = ReaderSchema(ace, System.Data.CommandBehavior.KeyInfo);
+            }
+            System.Data.OleDb.OleDbConnection.ReleaseObjectPool();
+
+            string libredRowset, libredInformationSchema, libredStoreType, libredDefault, libredKeyInfo;
+            using (var libred = new LibRed.Data.LibRedConnection($"Data Source={path}"))
+            {
+                libred.Open();
+                libredRowset = ColumnsRowset(libred);
+                libredDefault = ReaderSchema(libred, System.Data.CommandBehavior.Default);
+                libredKeyInfo = ReaderSchema(libred, System.Data.CommandBehavior.KeyInfo);
+                using var command = libred.CreateCommand();
+                command.CommandText =
+                    "SELECT COLUMN_NAME, IS_NULLABLE FROM `INFORMATION_SCHEMA.COLUMNS` WHERE TABLE_NAME = 'T' ORDER BY ORDINAL_POSITION";
+                using var reader = command.ExecuteReader();
+                var rows = new List<string>();
+                while (reader.Read()) rows.Add($"{reader.GetString(0)}:{(reader.GetBoolean(1) ? "N" : "R")}");
+                libredInformationSchema = string.Join(" ", rows);
+            }
+            using (var database = JetDatabase.Open(path, readOnly: true))
+                libredStoreType = string.Join(" ", database.Catalog.FindTable("T")!.Columns
+                    .Select(c => c.Name + ":" + (Schema.JetStoreType.IsNullable(c) ? "N" : "R")));
+
+            output.WriteLine($"  ACE Columns rowset      : {aceRowset}");
+            output.WriteLine($"  ACE reader, Default     : {aceDefault}");
+            output.WriteLine($"  ACE reader, KeyInfo     : {aceKeyInfo}");
+            output.WriteLine($"  LibRed Columns rowset   : {libredRowset}");
+            output.WriteLine($"  LibRed INFORMATION_SCHEMA: {libredInformationSchema}");
+            output.WriteLine($"  LibRed JetStoreType     : {libredStoreType}");
+            output.WriteLine($"  LibRed reader, Default  : {libredDefault}");
+            output.WriteLine($"  LibRed reader, KeyInfo  : {libredKeyInfo}");
+
+            Assert.Equal(aceRowset, libredRowset);
+            Assert.Equal(aceRowset, libredInformationSchema);
+            Assert.Equal(aceRowset, libredStoreType);
+            Assert.Equal(aceDefault, libredDefault);
+            Assert.Equal(aceKeyInfo, libredKeyInfo);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // Every facet ACE's Columns rowset reports for a calculated column — data type, character maximum length,
+    // numeric precision and nullability — against LibRed's Columns rowset on the same file. Each column's descriptor
+    // carries a promoted storage type and a constant declared length, so none of these can be read off the descriptor.
+    [Fact]
+    public void Calculated_columns_report_the_type_length_precision_and_nullability_ACE_reports()
+    {
+        string path = TemporaryDatabase.CreatePath("calc-facets-");
+        try
+        {
+            JetDatabase.Create(path);
+            using (var database = JetDatabase.Open(path, readOnly: false))
+            {
+                var engine = new QueryEngine(database);
+                engine.ExecuteNonQuery(
+                    "CREATE TABLE T (Id LONG PRIMARY KEY, A LONG, B YESNO AS ([A] > 0), L LONG AS ([A]*2), "
+                    + "X TEXT(20) AS (\"n\" & [A]), D DOUBLE AS ([A]/3))");
+                engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (1, 7)");
+            }
+
+            static string Facets(System.Data.Common.DbConnection c) =>
+                string.Join(" ", c.GetSchema("Columns", [null, null, "T", null]).Rows.Cast<System.Data.DataRow>()
+                    .OrderBy(r => Convert.ToInt64(r["ORDINAL_POSITION"], System.Globalization.CultureInfo.InvariantCulture))
+                    .Select(r => $"{r["COLUMN_NAME"]}:{Facet(r["DATA_TYPE"])}/{Facet(r["CHARACTER_MAXIMUM_LENGTH"])}"
+                        + $"/{Facet(r["NUMERIC_PRECISION"])}/{((bool)r["IS_NULLABLE"] ? "N" : "R")}"));
+
+            static string Facet(object value) =>
+                value is DBNull ? "-" : Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture)!;
+
+            static string Flags(System.Data.Common.DbConnection c) =>
+                string.Join(" ", c.GetSchema("Columns", [null, null, "T", null]).Rows.Cast<System.Data.DataRow>()
+                    .OrderBy(r => Convert.ToInt64(r["ORDINAL_POSITION"], System.Globalization.CultureInfo.InvariantCulture))
+                    .Select(r => $"{r["COLUMN_NAME"]}:0x{Convert.ToInt64(r["COLUMN_FLAGS"], System.Globalization.CultureInfo.InvariantCulture):X}"));
+
+            string ace, aceFlags;
+            using (var connection = AceTestDatabase.Open(path))
+            {
+                ace = Facets(connection);
+                aceFlags = Flags(connection);
+            }
+            System.Data.OleDb.OleDbConnection.ReleaseObjectPool();
+
+            string libred, libredFlags;
+            using (var connection = new LibRed.Data.LibRedConnection($"Data Source={path}"))
+            {
+                connection.Open();
+                libred = Facets(connection);
+                libredFlags = Flags(connection);
+            }
+
+            output.WriteLine($"  ACE    Columns rowset: {ace}");
+            output.WriteLine($"  LibRed Columns rowset: {libred}");
+            output.WriteLine($"  ACE    COLUMN_FLAGS  : {aceFlags}");
+            output.WriteLine($"  LibRed COLUMN_FLAGS  : {libredFlags}");
+            Assert.Equal(ace, libred);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
     // A CHECK constraint is expression text in LvProp too. Measured on this statement: ACE stores
     // `CHECK (`Qty` > 0)` with its backticks, and so does LibRed; this machine's ACE then enforces it — a passing
     // row written, a failing one refused. (ACE 2010 and the 2016 redistributable read `Qty` as a field named with

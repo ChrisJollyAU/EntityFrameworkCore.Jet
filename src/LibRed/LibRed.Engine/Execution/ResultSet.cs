@@ -53,7 +53,8 @@ public sealed class ResultSet
 /// <param name="ClrType">The CLR type of the column's values.</param>
 /// <param name="BaseTableName">The table the value is read from, or null when nothing stored stands behind it.</param>
 /// <param name="BaseColumnName">Its name in that table, which an alias in the query does not change.</param>
-/// <param name="AllowNull">Whether the column can hold a null.</param>
+/// <param name="AllowNull">Whether the column can hold a null, by the rule <c>SchemaRowsets.Describe</c> states (the
+/// reader relaxes it without KeyInfo).</param>
 /// <param name="IsExpression">Whether the value is computed rather than read from a stored column.</param>
 /// <param name="IsAutoIncrement">Whether the stored column behind it is an AutoNumber.</param>
 /// <param name="IsKey">Whether it is part of the table's primary key.</param>

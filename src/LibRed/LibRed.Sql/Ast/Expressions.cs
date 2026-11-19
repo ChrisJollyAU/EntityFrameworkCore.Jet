@@ -29,6 +29,17 @@ public sealed record SystemVariableExpression(string Name) : Expression;
 /// parsed.</summary>
 public sealed record OutputColumnPosition(int Position) : Expression;
 
+/// <summary><paramref name="Value"/> as the index on <paramref name="Column"/> takes it: converted as storing it in the
+/// column converts it. Made by the planner, never parsed. <paramref name="Bound"/>: it is a range bound, where a value
+/// the column cannot store is an error rather than no row. Its only operand is <paramref name="Value"/>; the column
+/// names whose type the value is converted to, and is read by the comparison beside it.</summary>
+public sealed record SoughtValue(ColumnReference Column, Expression Value, bool Bound) : Expression;
+
+/// <summary>Whether <paramref name="Value"/>, beside a Yes/No column whose index is read, is compared as written
+/// rather than by its truth — decided for each row by the value's type. Made by the planner, never parsed. Its only
+/// operand is <paramref name="Value"/>.</summary>
+public sealed record ComparedAsWritten(Expression Value) : Expression;
+
 /// <summary><c>*</c> in a projection or aggregate.</summary>
 public sealed record StarExpression : Expression;
 

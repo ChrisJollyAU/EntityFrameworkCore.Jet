@@ -92,8 +92,8 @@ public static class InformationSchema
                         // ORDINAL_POSITION is 0-based, matching EFCore.Jet's AdoxSchema.GetColumns (ADOX reports
                         // the OpenSchema position minus one; consumers only ORDER BY it).
                         rows.Add([t.Name, c.Name, c.Index, JetStoreType.TypeName(c), JetStoreType.IsNullable(c),
-                            JetStoreType.MaxLength(c), c.Type == JetDataType.FixedPoint ? (int)c.Precision : (object?)null,
-                            c.Type == JetDataType.FixedPoint ? (int)c.Scale : (object?)null, c.DefaultValue,
+                            JetStoreType.MaxLength(c), c.ReportedType == JetDataType.FixedPoint ? (int)c.Precision : (object?)null,
+                            c.ReportedType == JetDataType.FixedPoint ? (int)c.Scale : (object?)null, c.DefaultValue,
                             c.ValidationRule, c.ValidationText, c.IsAutoNumber ? c.Seed : (object?)null,
                             c.IsAutoNumber ? c.Increment : (object?)null]);
                 break;

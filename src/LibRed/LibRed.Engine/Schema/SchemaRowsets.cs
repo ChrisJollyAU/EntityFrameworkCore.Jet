@@ -161,7 +161,7 @@ public static class SchemaRowsets
                     if (TableType(t) is not { } type || type == "SYSTEM TABLE") continue;
                     foreach (ColumnDef c in t.Columns)
                         rows.Add([null, null, t.Name, c.Name, null, null, (long)(c.Index + 1),
-                            c.DefaultValue is not null, c.DefaultValue, ColumnFlags(c), Nullable(c),
+                            c.DefaultValue is not null, c.DefaultValue, ColumnFlags(c), JetStoreType.IsNullable(c),
                             DataTypeCode(c), null, CharacterMaxLength(c), CharacterOctetLength(c),
                             NumericPrecision(c), NumericScale(c), DateTimePrecision(c),
                             null, null, null, null, null, null, null, null, null, null,
@@ -180,7 +180,7 @@ public static class SchemaRowsets
                     {
                         var column = described[i];
                         ColumnDef? c = column.Source?.Column;
-                        bool nullable = c is not null ? ViewNullable(c) : column.ClrType != typeof(bool);
+                        bool nullable = c is not null ? JetStoreType.TypeHoldsNull(c) : JetStoreType.ClrTypeHoldsNull(column.ClrType);
                         rows.Add(c is not null
                             ? [null, null, view, column.Name, null, null, (long)(i + 1),
                                 false, null, ViewColumnFlags(c, column.Origin), nullable,
@@ -420,19 +420,23 @@ public static class SchemaRowsets
 
     /// <summary>Describes a query's output columns for the ADO layer's <c>GetSchemaTable</c> /
     /// <c>GetColumnSchema</c>: each column's type and, where a stored column stands behind it, that column's
-    /// table, declared facets and constraints. Same rules as the <c>Columns</c> collection, so a caller reading
-    /// a query's schema and one reading the table's metadata are told the same thing.</summary>
+    /// table, declared facets and constraints, by the same rules as the <c>Columns</c> collection. Nullability is
+    /// ACE's reader's under KeyInfo instead (verified): when every column reads stored columns of one table only,
+    /// and the columns that read exactly one stored column cover that table's whole primary key, the first such
+    /// column for each key column is not nullable; every other column is.</summary>
     internal static IReadOnlyList<Execution.ResultColumn> Describe(IReadOnlyList<Execution.OutputColumn> columns)
     {
         var described = new List<Execution.ResultColumn>(columns.Count);
+        HashSet<int> marked = KeyColumns(columns);
 
-        foreach (Execution.OutputColumn column in columns)
+        for (int i = 0; i < columns.Count; i++)
         {
+            Execution.OutputColumn column = columns[i];
             Type clrType = column.ClrType ?? typeof(object);
             if (column.Source is not (var owner, var c))
             {
                 described.Add(new Execution.ResultColumn(
-                    column.Name, clrType, AllowNull: clrType != typeof(bool), IsExpression: true, IsReadOnly: true,
+                    column.Name, clrType, AllowNull: !marked.Contains(i), IsExpression: true, IsReadOnly: true,
                     Size: (int?)ComputedTextLength(column.ClrType, column.Origin),
                     // A Decimal's own precision (verified vs ACE: DECIMAL(10,2) * 2 reports 12, see NumberTypeOf).
                     Precision: column.Precision ?? ComputedPrecision(column.ClrType, column.Currency), Scale: column.Scale,
@@ -443,12 +447,10 @@ public static class SchemaRowsets
 
             described.Add(new Execution.ResultColumn(
                 column.Name, clrType, owner.Name, c.Name,
-                // A Yes/No column is the one place a reader's schema and the Columns collection differ: ACE's
-                // reader calls it nullable, Required or not, where its Columns row never does (verified).
-                AllowNull: c.Type == JetDataType.Boolean || Nullable(c),
+                AllowNull: !marked.Contains(i),
                 IsExpression: false,
                 IsAutoIncrement: c.IsAutoNumber,
-                IsKey: owner.Indexes.Any(ix => ix.IsPrimaryKey && Covers(ix, c)),
+                IsKey: PrimaryKey(owner) is { } pk && Covers(pk, c),
                 IsUnique: owner.Indexes.Any(ix => ix.IsUnique && ix.Columns.Count == 1 && Covers(ix, c)),
                 IsLong: IsLong(c),
                 // A calculated column cannot be written, and neither can a value a query computed from one.
@@ -464,13 +466,41 @@ public static class SchemaRowsets
 
         static bool Covers(IndexDef index, ColumnDef column) =>
             index.Columns.Any(c => ReferenceEquals(c.Column, column));
+
+        // A table has one primary key at most: ACE refuses a second, as SchemaEditor does.
+        static IndexDef? PrimaryKey(TableDefinition table) => table.Indexes.FirstOrDefault(ix => ix.IsPrimaryKey);
+
+        // The columns ACE's reader calls not nullable. A column whose reads are unknown marks nothing; a bare
+        // aggregate reads nothing and is never marked itself, where a grouping key passes its column through.
+        static HashSet<int> KeyColumns(IReadOnlyList<Execution.OutputColumn> columns)
+        {
+            // A column with a Source reads that stored column alone.
+            if (columns.Any(c => c.Source is null && c.Reads is null)) return [];
+            var tables = columns.SelectMany(c => c.Source is { } source ? new[] { source } : c.Reads!)
+                .Select(r => r.Table).Distinct<TableDefinition>(ReferenceEqualityComparer.Instance).ToList();
+            if (tables is not [var table] || PrimaryKey(table) is not { } pk)
+                return [];
+
+            var marked = new HashSet<int>();
+            foreach (var key in pk.Columns)
+            {
+                int first = Enumerable.Range(0, columns.Count).FirstOrDefault(
+                    i => columns[i].Source is { } source ? ReferenceEquals(source.Column, key.Column)
+                        : columns[i].Origin == Execution.ColumnOrigin.Expression
+                            && columns[i].Reads is [var only] && ReferenceEquals(only.Column, key.Column),
+                    -1);
+                if (first < 0) return [];
+                marked.Add(first);
+            }
+            return marked;
+        }
     }
 
     /// <summary>The provider's name for a column's type, as the DataTypes collection spells it — which for text
     /// and binary means naming the fixed-length forms apart from the variable ones, since the two are different
     /// types there (Char/VarChar, Binary/VarBinary) even though ACE's own flags collapse binary into one.
     /// </summary>
-    private static string ProviderTypeName(ColumnDef c) => EffectiveType(c) switch
+    private static string ProviderTypeName(ColumnDef c) => c.ReportedType switch
     {
         JetDataType.Text => c.IsFixedLength ? "Char" : "VarChar",
         JetDataType.Binary => c.IsFixedLength ? "Binary" : "VarBinary",
@@ -554,7 +584,7 @@ public static class SchemaRowsets
 
     /// <summary>The OLE DB type code ACE reports for a column. A memo and a text column share one code, as do an
     /// OLE and a binary column; what separates them is the long-value flag in <see cref="ColumnFlags"/>.</summary>
-    private static int DataTypeCode(ColumnDef c) => DataTypeCodeOf(EffectiveType(c));
+    private static int DataTypeCode(ColumnDef c) => DataTypeCodeOf(c.ReportedType);
 
     /// <inheritdoc cref="DataTypeCode"/>
     private static int DataTypeCodeOf(JetDataType type) => type switch
@@ -618,13 +648,9 @@ public static class SchemaRowsets
         FlagsEveryColumn
         | (c.IsAutoNumber || origin != Execution.ColumnOrigin.Expression ? FlagWriteUnknown : FlagWrite)
         | (IsFixedLength(c) ? FlagIsFixedLength : 0)
-        | (ViewNullable(c) ? FlagIsNullable : 0)
+        // A view carries the type's own nullability but not the table's Required property.
+        | (JetStoreType.TypeHoldsNull(c) ? FlagIsNullable : 0)
         | (IsLong(c) ? FlagIsLong : 0);
-
-    /// <summary>Whether a view reports the column as nullable. A view carries the type's own nullability but
-    /// not the table's Required property, so a required text column reads as nullable through a view while an
-    /// AutoNumber or Yes/No column — which the type itself forbids nulls in — still does not.</summary>
-    private static bool ViewNullable(ColumnDef c) => !c.IsAutoNumber && c.Type != JetDataType.Boolean;
 
     /// <summary>A computed view column's flags. What a column is computed from changes them: a value read out
     /// of one row is not writable at all and, when it is text, is reported as a long one of no declared length;
@@ -705,14 +731,14 @@ public static class SchemaRowsets
     private static long ColumnFlags(ColumnDef c) =>
         FlagsEveryColumn | (c.IsCalculated ? 0 : FlagWriteUnknown)
         | (IsFixedLength(c) ? FlagIsFixedLength : 0)
-        | (Nullable(c) ? FlagIsNullable : 0)
+        | (JetStoreType.IsNullable(c) ? FlagIsNullable : 0)
         | (IsLong(c) ? FlagIsLong : 0);
 
     /// <summary>Whether ACE calls the column fixed-length: a scalar type always is, whatever its descriptor
     /// says (Access's own system tables carry Long columns the descriptor marks variable, and ACE still
     /// reports them fixed); text and binary follow their descriptor, so a designer-made fixed-width text
     /// column is fixed while one declared through SQL is not; and memo/OLE never are.</summary>
-    private static bool IsFixedLength(ColumnDef c) => EffectiveType(c) switch
+    private static bool IsFixedLength(ColumnDef c) => c.ReportedType switch
     {
         JetDataType.Memo or JetDataType.Ole or JetDataType.Complex => false,
         // A text column is fixed when its descriptor says so — CHAR(n) and NCHAR(n) are, TEXT(n)/VARCHAR(n)
@@ -728,25 +754,11 @@ public static class SchemaRowsets
     };
 
     private static bool IsLong(ColumnDef c) =>
-        EffectiveType(c) is JetDataType.Memo or JetDataType.Ole or JetDataType.Complex;
-
-    /// <summary>The type a column reports as. A calculated column reports what its expression yields, which
-    /// need not be the type its descriptor declares for storage — Access keeps a Yes/No expression in a
-    /// two-byte integer, and reports it as Yes/No.</summary>
-    private static JetDataType EffectiveType(ColumnDef c) =>
-        c.IsCalculated && c.CalculatedResultType is { } result ? result : c.Type;
-
-    /// <summary>Whether a stored column reports as nullable. A complex column's values live outside the row, so
-    /// the AutoNumber flag its descriptor carries (for the complex id) says nothing about nulls; a calculated
-    /// one is as nullable as the type it yields.</summary>
-    private static bool Nullable(ColumnDef c) =>
-        c.IsCalculated ? EffectiveType(c) != JetDataType.Boolean
-        : c.Type == JetDataType.Complex ? c.IsNullable
-        : JetStoreType.IsNullable(c);
+        c.ReportedType is JetDataType.Memo or JetDataType.Ole or JetDataType.Complex;
 
     /// <summary>CHARACTER_MAXIMUM_LENGTH: the declared length in characters for text and bytes for binary, zero
     /// for the unbounded memo/OLE types, and — as ACE reports it — two for a Yes/No column.</summary>
-    private static long? CharacterMaxLength(ColumnDef c) => EffectiveType(c) switch
+    private static long? CharacterMaxLength(ColumnDef c) => c.ReportedType switch
     {
         JetDataType.Text or JetDataType.Binary or JetDataType.BigBinary => JetStoreType.MaxLength(c),
         JetDataType.Memo or JetDataType.Ole or JetDataType.Complex => 0L,
@@ -755,7 +767,7 @@ public static class SchemaRowsets
     };
 
     /// <summary>CHARACTER_OCTET_LENGTH: the storage width of the same, so twice the character count for text.</summary>
-    private static long? CharacterOctetLength(ColumnDef c) => EffectiveType(c) switch
+    private static long? CharacterOctetLength(ColumnDef c) => c.ReportedType switch
     {
         JetDataType.Text => JetStoreType.MaxLength(c) * 2L,
         JetDataType.Binary or JetDataType.BigBinary => JetStoreType.MaxLength(c),
@@ -764,7 +776,7 @@ public static class SchemaRowsets
     };
 
     private static int? NumericPrecision(ColumnDef c) =>
-        EffectiveType(c) == JetDataType.FixedPoint ? c.Precision : NumericPrecisionOf(EffectiveType(c));
+        c.ReportedType == JetDataType.FixedPoint ? c.Precision : NumericPrecisionOf(c.ReportedType);
 
     /// <inheritdoc cref="NumericPrecision"/>
     private static int? NumericPrecisionOf(JetDataType type) => type switch
@@ -782,9 +794,9 @@ public static class SchemaRowsets
         _ => null,
     };
 
-    private static short? NumericScale(ColumnDef c) => EffectiveType(c) == JetDataType.FixedPoint ? c.Scale : null;
+    private static short? NumericScale(ColumnDef c) => c.ReportedType == JetDataType.FixedPoint ? c.Scale : null;
 
-    private static long? DateTimePrecision(ColumnDef c) => EffectiveType(c) == JetDataType.DateTime ? 0L : null;
+    private static long? DateTimePrecision(ColumnDef c) => c.ReportedType == JetDataType.DateTime ? 0L : null;
 
     /// <summary>NULLS: whether the index refuses null keys, ignores them, or takes them as keys like any other.</summary>
     private static int Nulls(IndexDef ix) => ix.Required ? 1 : ix.IgnoreNulls ? 2 : 0;

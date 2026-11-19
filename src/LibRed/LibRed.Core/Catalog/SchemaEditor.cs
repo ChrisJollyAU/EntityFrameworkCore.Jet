@@ -2508,7 +2508,9 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// targets, fixed↔variable, indexed targets, and a Memo/OLE source or target (whose long-value maps are placed
     /// and retired as ADD and DROP COLUMN do). Edits the TDEF in place (<see cref="TableDefinition.EditTargetDescriptor"/>) and re-lays every row — the target's
     /// OLD fixed slot is kept as dead space, its converted value appended at the new offset, count + null bitmap
-    /// updated. Converts values in memory first (throws on bad data before any write); runs in a transaction.</summary>
+    /// updated. Converts values in memory first (throws on bad data before any write); runs in a transaction.
+    /// A CURRENCY value retyped to a binary type is its eight-byte scaled integer, and a GUID refuses it (verified vs
+    /// ACE: 1 becomes <c>10 27 00 00 00 00 00 00</c>).</summary>
     public void AlterColumnTypeInPlace(string tableName, string columnName, ColumnSpec newSpec)
     {
         (TableDefinition oldDef, ColumnDef oldTarget) = CheckAlterColumn(tableName, columnName);
@@ -2542,7 +2544,8 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             .Select(r => (r.Id, Raw: reader.ReadRow(r.Id), Values: (object?[])r.Values.Clone()))
             .ToList();
         foreach (var r in rows)
-            r.Values[oldTarget.Index] = ConvertValue(r.Values[oldTarget.Index], newSpec.Type, newSpec.Name);
+            r.Values[oldTarget.Index] = ConvertValue(
+                r.Values[oldTarget.Index], newSpec.Type, newSpec.Name, currency: oldTarget.Type == JetDataType.Currency);
 
         // The new slot goes where the live fixed columns end, not past a dead slot an existing row still carries:
         // ACE writes it over a dropped or retyped-away column's bytes (verified vs ACE). A row whose own region is
@@ -2824,16 +2827,17 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     }
 
     /// <summary>Converts a stored value to the CLR type for a new column type (ALTER COLUMN). NULL stays NULL;
-    /// an unconvertible value throws (as ACE's rewrite would).</summary>
+    /// an unconvertible value throws (as ACE's rewrite would). <paramref name="currency"/> says a
+    /// <see cref="decimal"/> is a Currency (<see cref="Storage.Types.JetTypeCodec.NumberFromText"/>).</summary>
     /// <remarks>Throwing is the intent; the type has to be actionable. The bare <c>Convert.To*</c> calls leaked
     /// <see cref="InvalidCastException"/>/<see cref="FormatException"/>/<see cref="OverflowException"/>, none
     /// naming the column and none distinguishable from a bug in the rewrite.</remarks>
-    internal static object? ConvertValue(object? value, JetDataType type, string columnName)
+    internal static object? ConvertValue(object? value, JetDataType type, string columnName, bool currency)
     {
         if (value is null) return null;
         try
         {
-            return ConvertCore(value, type);
+            return ConvertCore(value, type, currency);
         }
         catch (Exception ex) when (ex is InvalidCastException or FormatException or OverflowException
                                       or ArgumentException)
@@ -2853,17 +2857,19 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         _ => value.ToString() ?? "",
     };
 
-    private static object? ConvertCore(object value, JetDataType type)
+    private static object? ConvertCore(object value, JetDataType type, bool currency)
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         // A Yes/No retyped to BYTE takes the low byte of its -1, as a write of True does, where a number past a
         // byte's range is refused (verified vs ACE: Yes/No True becomes 255, a SHORT -1 fails the ALTER).
         bool yesNo = value is bool;
+        if (currency && value is decimal number)
+            value = Storage.Types.JetTypeCodec.CurrencyAsStored(type, number);
         value = Storage.Types.JetTypeCodec.NumberFromText(type, value);
         return type switch
         {
             JetDataType.Boolean => Storage.RowCodec.IsTruthy(value),
-            JetDataType.Byte => yesNo ? unchecked((byte)(short)value) : Convert.ToByte(value, inv),
+            JetDataType.Byte => yesNo ? Storage.Types.JetTypeCodec.LowByte(value) : Convert.ToByte(value, inv),
             JetDataType.Int16 => Convert.ToInt16(value, inv),
             JetDataType.Int32 => Convert.ToInt32(value, inv),
             JetDataType.Int64 => Convert.ToInt64(value, inv),
@@ -2872,13 +2878,12 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             JetDataType.Currency or JetDataType.FixedPoint => JetDecimalConverter.ToDecimal(value, inv),
             JetDataType.DateTime => Storage.Types.JetTypeCodec.ToDate(value, inv),
             JetDataType.Text or JetDataType.Memo => Storage.Types.VbaText.Of(value),
-            // A number becomes a GUID or binary value where the row is encoded (JetTypeCodec.ToStoredValue), as a
-            // written one does: its own bytes, not its text.
-            JetDataType.Guid => value is Guid or int or byte or string or decimal ? value : Guid.Parse(value.ToString()!),
-            JetDataType.Binary or JetDataType.BigBinary or JetDataType.Ole =>
-                value is byte[] or short or int or byte or float or double or decimal or DateTime
-                    ? value
-                    : System.Text.Encoding.Unicode.GetBytes(value.ToString()!),
+            // As a written value becomes one. Bytes too few for a GUID are left for the write to refuse as too small,
+            // which declaring a DEFAULT does not check.
+            JetDataType.Guid => Storage.Types.JetTypeCodec.AsGuid(value)
+                ?? throw Storage.Types.JetTypeCodec.TypeMismatch(type, value.GetType().Name),
+            JetDataType.Binary or JetDataType.BigBinary or JetDataType.Ole => Storage.Types.JetTypeCodec.AsBinary(value, currency: false)
+                ?? throw Storage.Types.JetTypeCodec.TypeMismatch(type, value.GetType().Name),
             _ => value,
         };
     }

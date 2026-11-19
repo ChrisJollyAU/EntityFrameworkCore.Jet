@@ -45,6 +45,42 @@ public class InformationSchemaTests : TempDatabaseTest
         Assert.Equal(2, rows.Count);
     }
 
+    // A calculated column is as nullable as the type it reports, so one yielding Yes/No is not nullable although it is
+    // stored in two bytes, and a calculated Long or Text one is: ACE's Columns rowset says Id:N A:N B:R L:N X:N for
+    // this table (measured, CalculatedColumnSqlAccessTests), and so do the Columns rowset and the scaffolder.
+    [Fact]
+    public void Columns_view_calls_a_calculated_YesNo_column_not_nullable_as_ACE_does()
+    {
+        var e = Seeded();
+        e.ExecuteNonQuery(
+            "CREATE TABLE T (Id LONG PRIMARY KEY, A LONG, B YESNO AS ([A] > 0), L LONG AS ([A]*2), X TEXT(20) AS (\"n\" & [A]))");
+        var rows = e.ExecuteQuery(
+            "SELECT `COLUMN_NAME`, `IS_NULLABLE` FROM `INFORMATION_SCHEMA.COLUMNS` WHERE `TABLE_NAME` = 'T' ORDER BY `ORDINAL_POSITION`")
+            .Rows.Select(r => $"{r[0]}:{((bool)r[1]! ? "N" : "R")}");
+        Assert.Equal("Id:N A:N B:R L:N X:N", string.Join(" ", rows));
+    }
+
+    // A calculated column reports the type its result has, on every facet, not the promoted type its descriptor stores
+    // — and the scaffolder's JetStoreType gives the same. ACE's Columns rowset reports these columns as Long, Long,
+    // Yes/No (not nullable), Long, long text (length 0) and Double (measured, CalculatedColumnSqlAccessTests).
+    [Fact]
+    public void Columns_view_reports_calculated_columns_by_the_type_they_report_on_every_facet()
+    {
+        var e = Seeded();
+        e.ExecuteNonQuery(
+            "CREATE TABLE T (Id LONG PRIMARY KEY, A LONG, B YESNO AS ([A] > 0), L LONG AS ([A]*2), X TEXT(20) AS (\"n\" & [A]), "
+            + "D DOUBLE AS ([A]/3))");
+        string view = string.Join(" ", e.ExecuteQuery(
+            "SELECT `COLUMN_NAME`, `DATA_TYPE`, `CHARACTER_MAXIMUM_LENGTH`, `IS_NULLABLE` FROM `INFORMATION_SCHEMA.COLUMNS` "
+            + "WHERE `TABLE_NAME` = 'T' ORDER BY `ORDINAL_POSITION`")
+            .Rows.Select(r => $"{r[0]}:{r[1]}/{r[2] ?? "-"}/{((bool)r[3]! ? "N" : "R")}"));
+        string storeType = string.Join(" ", e.Database.Catalog.FindTable("T")!.Columns.Select(c =>
+            $"{c.Name}:{Schema.JetStoreType.TypeName(c)}/{(object?)Schema.JetStoreType.MaxLength(c) ?? "-"}/{(Schema.JetStoreType.IsNullable(c) ? "N" : "R")}"));
+
+        Assert.Equal("Id:integer/-/N A:integer/-/N B:bit/-/R L:integer/-/N X:longchar/-/N D:double/-/N", view);
+        Assert.Equal(view, storeType);
+    }
+
     [Fact]
     public void All_seven_views_bind_and_execute()
     {

@@ -316,11 +316,21 @@ Points verified against ACE that aren't obvious from that page:
   the same way, and its True becomes 255 in a `BYTE` where a `SHORT` holding -1 fails the same `ALTER`.
 - **A number stored into a binary column is its own little-endian bytes** (verified, on `INSERT`, `UPDATE`, a
   `DEFAULT` and `ALTER COLUMN`, into `BINARY`, `VARBINARY` and `LONGBINARY`): an Int16 two — so `True` stores
-  `FF FF` — a Long and a stored Byte four, a Single four, a Double and a date (its serial) eight; a fixed-width
-  column zero-pads it and one too narrow refuses it. A Decimal stores the UTF-16 bytes of its text, as a string does.
+  `FF FF` — a Long and a stored Byte four, a Single four, a Double and a date (its serial) eight, and a **Currency
+  its eight-byte scaled integer** (`CCur(1)`, and a `CURRENCY` 1 written by `INSERT … SELECT` or `UPDATE … JOIN` or
+  retyped, store `10 27 00 00 00 00 00 00`); a fixed-width column zero-pads it and one too narrow refuses it. A
+  Decimal and a Large Number (`BIGINT`) store the UTF-16 bytes of their text, as a string does (`1.5` stores
+  `31 00 2E 00 35 00`, a `BIGINT` 1 `31 00`), and **a GUID its sixteen bytes** in `ToByteArray` order
+  (`{00000001-0002-0003-0004-000000000005}` stores `01 00 00 00 02 00 03 00 00 04 00 00 00 00 00 05`) — on
+  `INSERT`, `INSERT … SELECT`, `UPDATE` and `ALTER COLUMN` alike, text wider than the column being refused (verified).
 - **A Long or a Byte stored into a GUID column is the GUID's first four bytes** (verified: 1 stores
   `{00000001-0000-0000-0000-000000000000}`, -1 `{FFFFFFFF-0000-…}`), and **text that is not a GUID stores the zero
-  GUID**. An Int16 — a Boolean among them — a Single, a Double and a Currency are refused.
+  GUID**. **A Decimal, a Large Number and a binary value are their bytes as a binary column stores them, which are
+  the GUID when there are sixteen** (verified: the Decimal 1.234567 stores `{002E0031-0032-0033-3400-350036003700}`,
+  and a `BINARY(16)` retyped to GUID keeps its bytes); fewer are refused, ACE reporting that the field is too small
+  (1.5, a `BIGINT` 1). An Int16 — a Boolean among them — a Single, a Double and a Currency are refused as a data type
+  mismatch. All of
+  this holds on `INSERT`, `INSERT … SELECT`, `UPDATE` and `ALTER COLUMN` alike.
 - **A Yes/No column stores whether the number rounded half to even is not 0** (verified: 0.5, -0.5 and 0.0001
   store False; 0.6, 1.5 and 2.5 True). **A Null written to it is stored as False, and is False to everything that
   checks the row** (verified): a `NOT NULL` Yes/No accepts it, a unique index refuses a second one as a duplicate

@@ -10,21 +10,25 @@ namespace LibRed.Engine.Planning;
 /// </summary>
 public static class QueryPlanner
 {
-    public static PlanNode Plan(BoundStatement bound)
+    /// <summary>Plans a bound statement. <paramref name="database"/> is the one it runs on, whose catalog binds an
+    /// unqualified column of a WHERE to the table of its FROM that has it (<see cref="PushPredicates"/>).</summary>
+    public static PlanNode Plan(BoundStatement bound, JetDatabase? database = null)
     {
-        return PlanStatement(bound.Statement);
+        return PlanStatement(bound.Statement, database);
     }
 
     /// <summary>Plans a SELECT or a set operation over SELECTs. Public because an append query's source is
-    /// either — <c>INSERT INTO t SELECT …</c>, or a UNION feeding one.</summary>
-    public static PlanNode PlanStatement(SqlStatement statement) => statement switch
+    /// either — <c>INSERT INTO t SELECT …</c>, or a UNION feeding one. <paramref name="database"/> is the one it
+    /// runs on, whose catalog binds an unqualified column of a WHERE to the table of its FROM that has it
+    /// (<see cref="PushPredicates"/>).</summary>
+    public static PlanNode PlanStatement(SqlStatement statement, JetDatabase? database = null) => statement switch
     {
-        SelectStatement select => PlanSelect(select),
+        SelectStatement select => PlanSelect(select, database),
         // ORDER BY and paging on a set operation apply to its combined result, so they sit ABOVE the node —
         // sorting an operand instead is what `A UNION B ORDER BY x` used to do, and it silently returned the
         // rows in the wrong order (measured against ACE).
         SetOperationStatement set => PageAndSort(
-            new SetOperationNode(PlanStatement(set.Left), PlanStatement(set.Right), set.Operator),
+            new SetOperationNode(PlanStatement(set.Left, database), PlanStatement(set.Right, database), set.Operator),
             OrderByPositions(set.OrderBy ?? [], _ => null), set.Top, set.Offset, set.WithTies),
         ValuesStatement values => new ValuesNode(values.Rows),
         TransformStatement transform => new CrosstabNode(transform),
@@ -55,12 +59,13 @@ public static class QueryPlanner
         ? orderBy
         : throw new InvalidOperationException("TOP … WITH TIES needs an ORDER BY: the ties are rows with equal ORDER BY keys.");
 
-    /// <summary>Plans a SELECT statement directly (used for subqueries).</summary>
-    public static PlanNode PlanSelect(SelectStatement select)
+    /// <summary>Plans a SELECT statement directly (used for subqueries). <paramref name="database"/> is as for
+    /// <see cref="PlanStatement"/>.</summary>
+    public static PlanNode PlanSelect(SelectStatement select, JetDatabase? database)
     {
         // Shape: From (Scan/Join/Derived) → Filter → Sort → Project → Limit. ORDER BY is
         // applied over the source columns (before projection) so it can reference them.
-        PlanNode node = PlanFrom(select.From);
+        PlanNode node = PlanFrom(select.From, database);
 
         // The sort runs on the source rows, below the projection, so a position becomes the projected expression
         // it names; only a SELECT * sorts rows that are already its output.
@@ -75,7 +80,7 @@ public static class QueryPlanner
         }
 
         if (select.Where is not null)
-            node = PushPredicates(node, select.Where);
+            node = PushPredicates(node, select.Where, database);
 
         // Window functions see the post-WHERE rows and are computed before ORDER BY, which may sort by one — so
         // the node goes here. Each call is lifted out of the projection into a reference to the column the node
@@ -86,9 +91,7 @@ public static class QueryPlanner
 
         // A window whose arguments or keys hold an aggregate — RANK() OVER (ORDER BY SUM(x)) — makes the query
         // grouped by itself, as an aggregate in the projection does.
-        bool aggregate = select.GroupBy.Count > 0 || select.Having is not null
-            || select.Projection.Any(i => HasAggregate(i.Value))
-            || windows.Any(w => w.Function.Expressions().Any(HasAggregate));
+        bool aggregate = IsGrouped(select) || windows.Any(w => w.Function.Expressions().Any(HasAggregate));
 
         // A * names no column to group or total by (verified vs ACE, with GROUP BY and with an aggregate alike; a
         // table's * names the table).
@@ -242,7 +245,7 @@ public static class QueryPlanner
     private static PlanNode PushSort(PlanNode node, IReadOnlyList<OrderByItem> keys)
     {
         if (node is JoinNode { Kind: JoinKind.Inner or JoinKind.Left or JoinKind.Cross } j
-            && keys.All(k => Qualifiers(k.Value) is { Count: > 0 } q && q.IsSubsetOf(SubtreeAliases(j.Left))))
+            && keys.All(k => Qualifiers(k.Value, j, null) is { Count: > 0 } q && q.IsSubsetOf(SubtreeAliases(j.Left))))
         {
             return j with { Left = PushSort(j.Left, keys) };
         }
@@ -325,12 +328,12 @@ public static class QueryPlanner
         return new ColumnReference(null, name);
     }
 
-    private static PlanNode PlanFrom(TableReference? from) => from switch
+    internal static PlanNode PlanFrom(TableReference? from, JetDatabase? database) => from switch
     {
         null => new SingleRowNode(), // FROM-less SELECT (e.g. `SELECT 2`) — one row, no columns
         NamedTable t => new ScanNode(t.Name, t.Alias, t.Database),
-        JoinTable j => new JoinNode(PlanFrom(j.Left), PlanFrom(j.Right), j.Kind, j.On),
-        SubqueryTable s => new DerivedTableNode(PlanStatement(s.Query), s.Alias, s.Columns), // alias optional (Access allows aliasless)
+        JoinTable j => new JoinNode(PlanFrom(j.Left, database), PlanFrom(j.Right, database), j.Kind, j.On),
+        SubqueryTable s => new DerivedTableNode(PlanStatement(s.Query, database), s.Alias, s.Columns), // alias optional (Access allows aliasless)
         _ => throw new NotSupportedException($"Unsupported FROM source {from.GetType().Name}."),
     };
 
@@ -339,9 +342,11 @@ public static class QueryPlanner
     /// predicate onto that table's scan, a two-table equality onto the join of those tables — instead of
     /// filtering the full cross product on top. This is what makes an Access comma-join
     /// (<c>FROM a, b, c WHERE a.x=b.x AND …</c>, planned as CROSS joins) tractable: the nested-loop join
-    /// evaluates the pushed predicate inside its loop, so intermediate results stay small.
+    /// evaluates the pushed predicate inside its loop, so intermediate results stay small. An unqualified column is
+    /// placed as the table of <paramref name="joinTree"/> that <paramref name="database"/>'s catalog binds it to
+    /// would be (<see cref="Qualifiers"/>).
     /// </summary>
-    internal static PlanNode PushPredicates(PlanNode joinTree, Expression where)
+    internal static PlanNode PushPredicates(PlanNode joinTree, Expression where, JetDatabase? database)
     {
         var conjuncts = new List<Expression>();
         SplitAnd(where, conjuncts);
@@ -352,16 +357,18 @@ public static class QueryPlanner
         // selection recognises. Over a lateral join it lands above the join instead, and the difference is
         // seeking the inner table once per outer row versus rescanning all of it.
         HashSet<string> introduced = SubtreeAliases(joinTree);
-        (PlanNode node, List<Expression> unplaced) = Place(joinTree, conjuncts, introduced);
+        (PlanNode node, List<Expression> unplaced) = Place(joinTree, conjuncts, introduced, c => Qualifiers(c, joinTree, database), database);
         return unplaced.Count == 0 ? node : new FilterNode(node, CombineAnd(unplaced));
     }
 
     /// <summary>Pushes each conjunct that lies entirely within <paramref name="node"/>'s subtree as deep as it
     /// fits; returns the rewritten node and the conjuncts that reference tables outside it (to bubble up).
     /// <paramref name="introduced"/> is the alias set of the whole tree — qualifiers outside it are the
-    /// enclosing query's and are ignored when deciding where a conjunct fits.</summary>
+    /// enclosing query's and are ignored when deciding where a conjunct fits. <paramref name="qualifiers"/> gives a
+    /// conjunct's tables (<see cref="Qualifiers"/>).</summary>
     private static (PlanNode Node, List<Expression> Unplaced) Place(
-        PlanNode node, List<Expression> conjuncts, HashSet<string> introduced)
+        PlanNode node, List<Expression> conjuncts, HashSet<string> introduced, Func<Expression, HashSet<string>?> qualifiers,
+        JetDatabase? database)
     {
         // A tree planned already — a saved query's, given its caller's WHERE (IndexSelection) — holds the filters its
         // own WHERE was placed as. Each is taken apart and placed again with the new conjuncts, which lands them
@@ -370,21 +377,21 @@ public static class QueryPlanner
         {
             var all = new List<Expression>(conjuncts);
             SplitAnd(filtered.Predicate, all);
-            return Place(filtered.Input, all, introduced);
+            return Place(filtered.Input, all, introduced, qualifiers, database);
         }
 
         HashSet<string> aliases = SubtreeAliases(node);
         var candidates = new List<Expression>();
         var outside = new List<Expression>();
         foreach (Expression c in conjuncts)
-            (Qualifiers(c) is { } q && q.Count > 0 && q.Where(introduced.Contains).All(aliases.Contains)
+            (qualifiers(c) is { } q && q.Count > 0 && q.Where(introduced.Contains).All(aliases.Contains)
                 ? candidates : outside).Add(c);
 
         // Only CROSS/INNER joins are safe to push below (an outer join's null-supplying side changes meaning).
         if (node is JoinNode { Kind: JoinKind.Cross or JoinKind.Inner } j)
         {
-            (PlanNode left, List<Expression> afterLeft) = Place(j.Left, candidates, introduced);
-            (PlanNode right, List<Expression> both) = Place(j.Right, afterLeft, introduced);
+            (PlanNode left, List<Expression> afterLeft) = Place(j.Left, candidates, introduced, qualifiers, database);
+            (PlanNode right, List<Expression> both) = Place(j.Right, afterLeft, introduced, qualifiers, database);
             // `both` reference columns from each side → this is the lowest join that sees them: fold into ON.
             Expression? on = j.On;
             foreach (Expression c in both) on = on is null ? c : new BinaryExpression(BinaryOperator.And, on, c);
@@ -396,9 +403,19 @@ public static class QueryPlanner
         // removed after, and saves joining it at all. Nothing is pushed into the RIGHT side — under OUTER APPLY
         // or a LEFT JOIN a filter there can empty an otherwise matching row and so manufacture the very
         // null-padded row the WHERE was there to drop.
+        // A LEFT join whose WHERE compares a column of its optional table with a value — =, <, >, <=, >=, IN or
+        // BETWEEN — is an inner join: the comparison is Null on every null-padded row, so drops them all. ACE plans it
+        // as one (verified vs ACE: t LEFT JOIN s … WHERE s.Y = 2 is read as the inner join is, the Y index answering).
+        if (node is JoinNode { Kind: JoinKind.Left, Right: ScanNode optional } leftJoin
+            && database is not null
+            && Execution.ExternalDatabases.Open(database, optional.Database).Catalog.FindTable(optional.Table) is { } def
+            && candidates.Any(c => qualifiers(c) is { } q && q.Where(introduced.Contains).All(SubtreeAliases(optional).Contains)
+                && IndexSelection.Restriction(c, optional.Alias ?? optional.Table, def, []) is not null))
+            return Place(leftJoin with { Kind = JoinKind.Inner }, conjuncts, introduced, qualifiers, database);
+
         if (node is JoinNode { Kind: JoinKind.CrossApply or JoinKind.OuterApply or JoinKind.Left } a)
         {
-            (PlanNode left, List<Expression> rest) = Place(a.Left, candidates, introduced);
+            (PlanNode left, List<Expression> rest) = Place(a.Left, candidates, introduced, qualifiers, database);
             PlanNode lateral = a with { Left = left };
             return (rest.Count > 0 ? new FilterNode(lateral, CombineAnd(rest)) : lateral, outside);
         }
@@ -442,18 +459,21 @@ public static class QueryPlanner
     };
 #pragma warning restore IDE0028
 
-    /// <summary>The set of table qualifiers an expression's column references use, or <see langword="null"/>
-    /// if it can't be safely placed — an unqualified column (ambiguous) or a subquery (references an inner
-    /// scope). Such a conjunct stays at the top filter.</summary>
-    private static HashSet<string>? Qualifiers(Expression e)
+    /// <summary>The set of table qualifiers an expression's column references use, an unqualified column counting as
+    /// the source of <paramref name="from"/> that <paramref name="database"/>'s catalog binds it to
+    /// (<see cref="IndexSelection.ResolveColumn"/>); or <see langword="null"/> if it can't be safely placed — an
+    /// unqualified column no one source has (or with no catalog), or a subquery (references an inner scope). Such a
+    /// conjunct stays at the top filter.</summary>
+    private static HashSet<string>? Qualifiers(Expression e, PlanNode from, JetDatabase? database)
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         return Collect(e, result) ? result : null;
 
-        static bool Collect(Expression e, HashSet<string> acc) => e switch
+        bool Collect(Expression e, HashSet<string> acc) => e switch
         {
             ColumnReference { Table: { } t } => Add(acc, t),
-            ColumnReference => false, // unqualified — can't determine its table
+            ColumnReference c => database is not null
+                && IndexSelection.ResolveColumn(c, from, database) is { Alias: { } alias } && Add(acc, alias),
             LiteralExpression or ParameterExpression or SystemVariableExpression => true,
             // Anything without operands — subqueries (scalar/EXISTS/IN), qualified star, etc. — isn't pushed.
             _ => e.Operands()?.All(a => Collect(a, acc)) ?? false,
@@ -470,6 +490,11 @@ public static class QueryPlanner
         }
         else into.Add(e);
     }
+
+    /// <summary>Whether <paramref name="select"/> is read grouped — by its GROUP BY, its HAVING, or an aggregate in its
+    /// select list — as the planner plans it (beside an aggregate inside a window, which only planning extracts).</summary>
+    internal static bool IsGrouped(SelectStatement select) =>
+        select.GroupBy.Count > 0 || select.Having is not null || select.Projection.Any(i => HasAggregate(i.Value));
 
     internal static Expression CombineAnd(IReadOnlyList<Expression> conjuncts) =>
         conjuncts.Aggregate((a, b) => new BinaryExpression(BinaryOperator.And, a, b));

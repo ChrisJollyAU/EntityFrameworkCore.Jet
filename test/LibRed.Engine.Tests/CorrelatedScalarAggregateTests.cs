@@ -98,6 +98,16 @@ public class CorrelatedScalarAggregateTests : TempDatabaseTest
     }
 
     [Fact]
+    public void An_indexed_column_compared_with_a_parameter_beside_the_correlation_still_decorrelates()
+    {
+        // Keyed on the indexed i.Id, with a second indexed column held against a parameter: that comparison is the
+        // same with the key beside it or without, so reading the body once answers as reading it per row does.
+        QueryEngine e = Fresh();
+        e.ExecuteNonQuery("CREATE INDEX IX_I_Keep ON I (Keep)");
+        Assert.True(Decorrelates(e, "SELECT o.Id, (SELECT COUNT(*) FROM I AS i WHERE i.Id = o.Id AND i.Keep > @p) FROM O AS o"));
+    }
+
+    [Fact]
     public void A_predicate_over_the_aggregate_selects_the_right_rows()
         => Assert.Equal([1],
             Ids(Fresh(), "SELECT o.Id FROM O AS o WHERE (SELECT COUNT(*) FROM I AS i WHERE i.K = o.K) > 1"));
@@ -230,5 +240,72 @@ public class CorrelatedScalarAggregateTests : TempDatabaseTest
             sql).Rows.Count();
 
         Assert.Equal(2155, rows);
+    }
+
+    // The body is read for each outer row until DecorrelationGate opens, well inside 20,000 outer rows, and once for
+    // them all after: every outer row with the same TL.V must get the same count from both readings. Per row, an
+    // indexed Yes/No column compared with the outer row's number is compared by that number's truth.
+    [Fact]
+    public void A_count_over_an_indexed_YesNo_column_is_the_same_for_every_outer_row_with_the_same_value()
+    {
+        QueryEngine e = Fresh();
+        e.ExecuteNonQuery("CREATE TABLE DG (D LONG)");
+        for (int d = 0; d < 10; d++)
+            e.ExecuteNonQuery($"INSERT INTO DG VALUES ({d})");
+        e.ExecuteNonQuery("CREATE TABLE TL (ID LONG PRIMARY KEY, V LONG)");
+        e.ExecuteNonQuery("INSERT INTO TL (ID, V) SELECT q.K, IIf(q.K Mod 7 = 0, Null, q.K Mod 4 - 1) FROM (SELECT a.D + 10 * b.D + 100 * c.D"
+            + " + 1000 * d.D + 10000 * e.D + 1 AS K FROM DG AS a, DG AS b, DG AS c, DG AS d, DG AS e) AS q WHERE q.K <= 20000");
+        e.ExecuteNonQuery("CREATE TABLE SL (ID LONG PRIMARY KEY, Y YESNO)");
+        e.ExecuteNonQuery("CREATE INDEX IX_SL ON SL (Y)");
+        e.ExecuteNonQuery("INSERT INTO SL VALUES (1, True)");
+        e.ExecuteNonQuery("INSERT INTO SL VALUES (2, False)");
+
+        var counts = e.ExecuteQuery("SELECT TL.V, (SELECT COUNT(*) FROM SL WHERE SL.Y = TL.V) FROM TL").Rows
+            .GroupBy(r => r[0] is null ? "Null" : Convert.ToString(r[0], System.Globalization.CultureInfo.InvariantCulture))
+            .ToDictionary(g => g.Key!, g => string.Join(",", g.Select(r => Convert.ToInt32(r[1])).Distinct()));
+        Assert.Equal(5, counts.Count);
+        Assert.All(counts.Values, value => Assert.DoesNotContain(",", value, StringComparison.Ordinal));
+    }
+
+    // Read for each outer row, a Yes/No column is compared with the outer row's number as written where it has no
+    // index, and by the number's truth where it has one; read once, it is hashed as written.
+    [Fact]
+    public void A_YesNo_column_compared_with_an_outer_number_decorrelates_only_while_it_has_no_index()
+    {
+        QueryEngine e = Fresh();
+        e.ExecuteNonQuery("CREATE TABLE SY (ID LONG PRIMARY KEY, Y YESNO)");
+        const string sql = "SELECT o.Id, (SELECT COUNT(*) FROM SY AS s WHERE s.Y = o.K) FROM O AS o";
+        Assert.True(Decorrelates(e, sql));
+        e.ExecuteNonQuery("CREATE INDEX IX_SY ON SY (Y)");
+        Assert.False(Decorrelates(e, sql));
+    }
+
+    // As above, with the Yes/No column on the unmatched side of an outer join: the rows it gives Nulls for never equal
+    // the outer row's value, so the body reading them for each outer row answers.
+    [Fact]
+    public void A_count_keyed_on_a_YesNo_column_an_outer_join_leaves_Null_is_the_same_for_every_outer_row_with_the_same_value()
+    {
+        QueryEngine e = Fresh();
+        e.ExecuteNonQuery("CREATE TABLE DG (D LONG)");
+        for (int d = 0; d < 10; d++)
+            e.ExecuteNonQuery($"INSERT INTO DG VALUES ({d})");
+        e.ExecuteNonQuery("CREATE TABLE TL (ID LONG PRIMARY KEY, V LONG, B YESNO)");
+        e.ExecuteNonQuery("INSERT INTO TL (ID, V, B) SELECT q.K, IIf(q.K Mod 7 = 0, Null, q.K Mod 4 - 1), q.K Mod 2 = 0 FROM (SELECT a.D"
+            + " + 10 * b.D + 100 * c.D + 1000 * d.D + 10000 * e.D + 1 AS K FROM DG AS a, DG AS b, DG AS c, DG AS d, DG AS e) AS q WHERE q.K <= 20000");
+        e.ExecuteNonQuery("CREATE TABLE SN (ID LONG PRIMARY KEY, Y YESNO)");
+        e.ExecuteNonQuery("INSERT INTO SN VALUES (1, True)");
+        e.ExecuteNonQuery("INSERT INTO SN VALUES (2, False)");
+        e.ExecuteNonQuery("CREATE TABLE A (ID LONG)");
+        foreach (int id in (int[])[1, 2, 3])
+            e.ExecuteNonQuery($"INSERT INTO A VALUES ({id})");
+
+        foreach (string column in (string[])["V", "B"])
+        {
+            var counts = e.ExecuteQuery($"SELECT TL.{column}, (SELECT COUNT(*) FROM A LEFT JOIN SN ON A.ID = SN.ID WHERE SN.Y = TL.{column}) FROM TL")
+                .Rows
+                .GroupBy(r => r[0] is null ? "Null" : Convert.ToString(r[0], System.Globalization.CultureInfo.InvariantCulture))
+                .ToDictionary(g => g.Key!, g => string.Join(",", g.Select(r => Convert.ToInt32(r[1])).Distinct()));
+            Assert.All(counts.Values, value => Assert.DoesNotContain(",", value, StringComparison.Ordinal));
+        }
     }
 }

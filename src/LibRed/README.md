@@ -227,6 +227,24 @@ Treat the number as of its date — an EF Core version bump moves it.
   defines, where ACE refuses both with "JOIN expression not supported". It refuses an ON that does not reference
   both sides (`… INNER JOIN c ON c.k = 1`) with the same message; LibRed takes any condition in an ON — constants,
   functions and subqueries included — and evaluates it as written.
+  **A comparison or other Boolean expression is typed Boolean, deliberately unlike ACE's:** `NOT F`, `F IS NULL`,
+  `F = G`, `F AND G`, `IsNull(F)`, `x <> NULL`, and a `UNION` of a Yes/No column with `True` return Boolean
+  `True`/`False`, where ACE returns the Int16 `-1`/`0`. The values agree; only the CLR type differs.
+  **Aggregates over a Yes/No column and over an Int32 deliberately differ from ACE's in type:** `SUM(F)`, `MIN(F)`
+  and `MAX(F)` give `Int32 -1`, `True` and `False`, where ACE gives `Double -1`, `Int16 -1` and `Int16 0`; and
+  `SUM` of an Int32 is an Int32, where ACE widens it to a Double. LibRed's numeric aggregates follow the types
+  LINQ's `Sum` overloads give, which is what EF Core reads them as (`RunningAggregate`), not ACE's widened ones.
+  **A CURRENCY zero deliberately differs from ACE's in scale:** a column defaulting to `0` reads as the Decimal
+  `0` from LibRed and `0.0000` from ACE. The values are equal.
+  **A DateTime parameter is deliberately a date**, where ACE, under the OLE DB client's default binding
+  (and `DbType.DateTime`, `DbType.Date`, `OleDbType.DBDate` and `OleDbType.DBTimeStamp`), receives it as text:
+  `VarType(@p)` is 8 and `TypeName(@p)` is `String`, so comparing it with a number or a Yes/No column is a "Data type
+  mismatch", or finds no rows where an index answers the comparison (`WHERE ID = @p`). LibRed's parameter is the
+  date itself, which is what ACE sees when the parameter is bound as `OleDbType.Date`, and under that binding the
+  two agree.
+  **A column's nullability follows ACE's OLE DB schema, not DAO's:** DAO reports a Yes/No column and a COUNTER
+  column with `Required = False`; ACE's OLE DB Columns rowset reports both not nullable, and so does LibRed's
+  `IsNullable`.
   `WITH OWNERACCESS OPTION` is taken wherever ACE takes it and changes nothing — LibRed has no users to act for —
   but a stored query keeps it.
   **`TRANSFORM … PIVOT … [IN (…)]`**, the crosstab, with ACE's column naming and ordering, its fixed headings, row
@@ -307,6 +325,9 @@ Treat the number as of its date — an EF Core version bump moves it.
     the expression is on. Swapping the tables in the FROM clause, making the column side an expression
     (`b.F + 0`), or using `<`, `>` or `<>` gives the right rows, so it is ACE's equality lookup keying on the bare
     column. LibRed matches the same rows in either FROM order (`DecimalEvaluationRuleTests`).
+  - **A Large Number's text is cut short in a UNION beside a binary column.** ACE gives a `BIGINT` there as the
+    UTF-16 bytes of its text, cut: 123456789 comes back as 8 bytes beside a `BINARY(4)` and as its first 16 bytes
+    beside a `BINARY(16)` or `VARBINARY(16)`, while a Decimal's text is not cut. LibRed returns the whole text.
 - **ADO.NET** — connection / command / reader / parameter / transaction / factory over the engine, with the
   generated-AutoNumber `@@IDENTITY` round-trip carried up through Engine → Ado → EF Core.
   Transactions commit/roll back for real via a deferred-write page overlay in `PageChannel` (writes are

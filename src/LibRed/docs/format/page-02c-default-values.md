@@ -110,6 +110,30 @@ cannot be smuggled past it: a column-ref default written to `LvProp` opens clean
   column's width** rather than refused: `DEFAULT 'abcdefghijklmnopqrstuvwxyz'` on a `TEXT(20)` stores its first 20
   characters, and `DEFAULT Now()` the first 20 of the date's text, where the same value supplied by an `INSERT` is
   refused (verified, on `TEXT` and `CHAR` alike).
+- A `BINARY`, `VARBINARY` or `BIGBINARY` default is cut to the column's width the same way (verified):
+  - `DEFAULT 1.5` on a `BINARY(4)` or `VARBINARY(4)` stores `31 00 2E 00`;
+  - `'abc'` on a `BINARY(4)` stores `61 00 62 00`;
+  - `CCur(1)` on a `BINARY(4)` stores `10 27 00 00`;
+  - `'abcdefghij'` on a `BIGBINARY(10)` stores its first 10 bytes.
+
+  A `LONGBINARY` default is stored whole.
+- A `DECIMAL` default too wide for the column's precision stores Null, and the insert succeeds (verified):
+  - on a `DECIMAL(4,1)`, `1000`, `70000`, `3000000000`, `#1/1/2000#`, `Now()` and `12345.67` store Null;
+  - `999.9`, `-999.9`, `1.5` and `'12.5'` are stored, and `999.95` stores `999.9`.
+
+  The same values supplied by an `INSERT` are refused.
+- A Yes/No column's default is checked as an Integer (Int16) when it is declared, in `CREATE TABLE`,
+  `ADD COLUMN` and `ALTER COLUMN … SET DEFAULT` alike (verified):
+  - `32768`, `-32769`, `70000`, `CLng(70000)`, `CDbl(70000)`, `#1/1/2000#` and `Now()` fail the statement with
+    "Overflow", and `3000000000` with "Type mismatch";
+  - `32767`, `-32768`, `1.5`, `12345.67` and `'5'` are accepted.
+
+  Retyping a column to Yes/No makes no such check: a `LONG` (Int32) 70000 becomes True.
+- A GUID column's default is refused when it is declared only for a type the column refuses — a Currency
+  (`CCur(1)`), a Double or a Boolean fail the statement with "Type mismatch" — and not for bytes too few
+  for a GUID: `DEFAULT 1.5` and `DEFAULT 12345678.1` are declared, in `CREATE TABLE`, `ADD COLUMN` and
+  `ALTER COLUMN … SET DEFAULT` alike, and every insert that applies them fails, while `DEFAULT 1.234567`, whose text
+  is sixteen bytes, stores that GUID (verified).
 - The DAO **255-character** cap on `DefaultValue` is a **DAO-API limit, not an engine/file-format one**: ACE
   accepts and applies a 300-char default expression; LibRed round-trips 300+ char defaults. (A many-operator
   expression separately hits "Expression too complex" — an operator-count limit, unrelated to length.)

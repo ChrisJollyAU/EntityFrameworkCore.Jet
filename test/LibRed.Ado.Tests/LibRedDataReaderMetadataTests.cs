@@ -142,7 +142,7 @@ public class LibRedDataReaderMetadataTests
         Assert.True(key.IsKey);
         Assert.True(key.IsAutoIncrement);
         Assert.True(key.IsIdentity);
-        Assert.False(key.AllowDBNull);
+        Assert.True(key.AllowDBNull);
         Assert.False(key.IsAliased);
 
         DbColumn aliased = columns[1];
@@ -191,7 +191,7 @@ public class LibRedDataReaderMetadataTests
         Assert.Equal("Long", key["DataTypeName"]);
         Assert.True((bool)key[SchemaTableColumn.IsKey]);
         Assert.True((bool)key[SchemaTableOptionalColumn.IsAutoIncrement]);
-        Assert.False((bool)key[SchemaTableColumn.AllowDBNull]);
+        Assert.True((bool)key[SchemaTableColumn.AllowDBNull]);
 
         // A Jet file has no server, catalog or schema, no row versions, and hides no column.
         Assert.Equal(DBNull.Value, key[SchemaTableOptionalColumn.BaseServerName]);

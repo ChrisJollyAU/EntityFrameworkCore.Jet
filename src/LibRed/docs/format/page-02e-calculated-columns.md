@@ -81,6 +81,12 @@ or fails outright:
 
 Reading `ResultType` removes the guess entirely.
 
+**The type a calculated column reports is `ResultType`, not the descriptor's.** ACE's OLE DB Columns rowset
+describes each calculated column by its result type: a Yes/No result reports as Boolean (type 11, maximum length
+2, not nullable) although its descriptor is Int16, and Long and Double results report as Int32 and Double. A
+Text result reports as **long text** — type 130, maximum length 0, the long flag set — exactly as a Memo column
+does, whatever length it was declared with.
+
 ## The expression language ACE accepts
 
 Enumerated over every Access / VBA scalar function [functions.md](../functions.md) catalogues plus every operator.

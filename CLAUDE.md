@@ -383,6 +383,14 @@ of one field that disagreed, a merged path that lost a check only one copy had, 
 a pointer, test helpers re-implementing Core and drifting from it. A genuinely new member is fine when nothing
 existing does the job; say what you checked.
 
+**A duplicate is removed, never noted.** When a change adds a method, local function, overload, wrapper, type,
+field, parameter, flag, constant or list of types, either the existing code that does that job is made to serve
+and the addition goes, or the concrete input for which the existing code and the addition give different results is
+stated, with file:line for both. "Accepted", "left for later", "pre-existing", "that is the pattern here", "not a
+pure wrapper" and "they answer different questions" are not reasons. A duplicate found in review is removed in the
+same turn or handed to an agent in the same turn; it is never carried forward as a list. A reviewer — an
+orchestrating session included — confirms a claimed difference by reading both sites, not from a report.
+
 **Never change a test because a change makes it fail.** A failing test is evidence against the change, not a test
 to update. For every failing test, measure what ACE itself produces for that exact query, on that test's own schema
 and data — not a similar expression, another table, or a function ACE does not have. If ACE agrees with the test,

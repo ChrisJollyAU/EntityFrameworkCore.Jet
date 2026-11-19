@@ -133,7 +133,7 @@ internal sealed class ExistsSemiJoin
             Expression output = subquery.Projection[0].Value;
             // A number IN a Yes/No column is left to the evaluator: it is compared by its truth there, but as a
             // number under NOT IN, and only the evaluator knows which this is.
-            if (!SubqueryCorrelation.SameKind((ColumnReference)output, split.Plan, database, inValue, outerColumns, lookup: true, out Type? inType)
+            if (!SubqueryCorrelation.SameKind((ColumnReference)output, split.Plan, database, inValue, outerColumns, lookup: true, out Type? inType, out _)
                 || inType == typeof(bool))
             {
                 return null;
@@ -186,8 +186,7 @@ internal sealed class ExistsSemiJoin
     ///     </para>
     /// </remarks>
     private static bool EmptyInputMeansNoRows(SelectStatement subquery)
-        => subquery.GroupBy.Count > 0
-            || (subquery.Having is null && !subquery.Projection.Any(p => QueryPlanner.HasAggregate(p.Value)));
+        => subquery.GroupBy.Count > 0 || !QueryPlanner.IsGrouped(subquery);
 
     /// <summary>
     ///     Whether the body's <c>TOP</c> can be ignored when all we are asking is whether ANY row exists.

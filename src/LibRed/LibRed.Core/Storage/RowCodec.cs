@@ -438,7 +438,7 @@ public sealed class RowCodec(IReadOnlyList<ColumnDef> columns, JetFormatBase for
             // A CALCULATED Boolean is the exception, and a silent one: it carries a real variable-length
             // slot, and its bitmap bit means "present" like every other calculated column, so it is set
             // for a stored False too. Reading the bit here would report True for every row.
-            if (column.Type == JetDataType.Boolean && !column.IsCalculated)
+            if (column.IsBitFlag)
             {
                 values[column.Index] = present ? BoxedTrue : BoxedFalse;
                 continue;

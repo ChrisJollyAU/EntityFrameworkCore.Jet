@@ -259,7 +259,7 @@ public sealed class QueryEngine
     /// (or, for NOT EXISTS, when it doesn't). @@ROWCOUNT reflects the THEN, or 0 when the guard skips it.</summary>
     private CommandResult ExecuteIfThen(IfThenStatement ifThen, IReadOnlyDictionary<string, object?>? parameters)
     {
-        var condPlan = IndexSelection.Apply(QueryPlanner.PlanStatement(ifThen.Condition), _database);
+        var condPlan = IndexSelection.Apply(QueryPlanner.PlanStatement(ifThen.Condition, _database), _database);
         bool hasRows = new QueryExecutor(_database, parameters, _session).ExecuteQuery(condPlan).Rows.Any();
         if (hasRows == ifThen.Negated)
             return new CommandResult(ResultSet.Empty, 0); // guard not satisfied — skip the body
@@ -269,7 +269,7 @@ public sealed class QueryEngine
     /// <summary>Plans a bound statement, then applies index selection (turning scans into index seeks where a
     /// predicate allows). Root-query column pruning runs at the executor's shared entry.</summary>
     private PlanNode PlanWithIndexes(BoundStatement bound) =>
-        IndexSelection.Apply(QueryPlanner.Plan(bound), _database);
+        IndexSelection.Apply(QueryPlanner.Plan(bound, _database), _database);
 
     /// <summary>The optimised plan for a query — exposed for tests to assert the chosen access path/strategy
     /// (e.g. that an unindexed equi-join becomes a hash join).</summary>

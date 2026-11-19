@@ -61,8 +61,9 @@ public sealed class LibRedParameter : DbParameter
     /// -1, and under String or Object stores the text "True"). Decimal and the integer types Access has no
     /// column for reach ACE as text — "1" or "0" — and behave as that text wherever they go (measured: 1 in a
     /// number column, <c>31 00</c> in a binary one, a type mismatch in a date). The types that client cannot
-    /// convert a Boolean to are refused as it refuses them.</para></summary>
-    internal object? EffectiveValue => Value is bool flag && _dbType is { } declared
+    /// convert a Boolean to are refused as it refuses them. The text a Boolean becomes is clipped to <see cref="Size"/>
+    /// like any other string (measured: True as String with Size 2 stores "Tr").</para></summary>
+    internal object? EffectiveValue => (Value is bool flag && _dbType is { } declared
         ? declared switch
         {
             DbType.Boolean => Value,
@@ -77,13 +78,11 @@ public sealed class LibRedParameter : DbParameter
                 or DbType.Object => flag ? "True" : "False",
             _ => throw new InvalidCastException($"Failed to convert parameter value from a Boolean to a {declared}."),
         }
-        : _size <= 0
-        ? Value
-        : Value switch
+        : Value) switch
         {
-            string s when s.Length > _size => s[.._size],
-            byte[] b when b.Length > _size => b[.._size],
-            _ => Value,
+            string s when _size > 0 && s.Length > _size => s[.._size],
+            byte[] b when _size > 0 && b.Length > _size => b[.._size],
+            var value => value,
         };
 
     // The base DbParameter.Precision/Scale are no-ops (get => 0; set { }) unless a concrete parameter type

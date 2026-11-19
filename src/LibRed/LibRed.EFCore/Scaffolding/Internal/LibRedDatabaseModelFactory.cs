@@ -103,7 +103,7 @@ public class LibRedDatabaseModelFactory(IDiagnosticsLogger<DbLoggerCategory.Scaf
                 // Store type + nullability come from the shared JetStoreType so INFORMATION_SCHEMA and this
                 // scaffolder can never report a column differently (see JetStoreType).
                 string storeType = JetStoreType.StoreType(column);
-                int maxLength = column.Type == JetDataType.Text ? Math.Max(1, column.Length / 2) : 0;
+                int maxLength = column.ReportedType == JetDataType.Text ? JetStoreType.MaxLength(column)!.Value : 0;
                 bool nullable = JetStoreType.IsNullable(column);
 
                 // DefaultValue is the expression's source text (e.g. "0", "'hi'"), read from the same blob.

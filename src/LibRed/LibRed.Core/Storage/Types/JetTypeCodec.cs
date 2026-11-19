@@ -408,47 +408,80 @@ public static class JetTypeCodec
             JetDataType.DateTime => ToOaDate(column, value, c),
             JetDataType.DateTimeExtended => Convert.ToDateTime(value, c),
             JetDataType.Currency => CurrencyToScaled(value, c),
-            // Coerced, not cast: every other type here accepts what the caller has, and SchemaEditor.ConvertValue
-            // parses a string GUID on the ALTER path. A hard cast turned a string reaching a GUID column into an
-            // InvalidCastException with no column named.
-            JetDataType.Guid => value switch
+            // Coerced, not cast: a hard cast turned a string reaching a GUID column into an InvalidCastException
+            // with no column named.
+            JetDataType.Guid => AsGuid(value) switch
             {
                 Guid g => g,
-                byte[] b when b.Length == 16 => new Guid(b),
-                string s when TryParseGuid(s, out Guid parsed) => parsed,
-                // Verified vs ACE: a Long or a Byte is the GUID's first four bytes (1 stores {00000001-0000-…},
-                // -1 {FFFFFFFF-0000-…}), and text that is not a GUID the zero GUID. An Int16, so a Boolean too, a
-                // Single, a Double and a Currency are refused.
-                int n => new Guid(n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-                byte n => new Guid(n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-                string => Guid.Empty,
-                _ => throw new NotSupportedException(
-                    $"Cannot store {value.GetType().Name} in GUID column '{column.Name}'."),
+                // Bytes that are not a GUID's sixteen are refused as too small for the column, not as a mismatch.
+                byte[] bytes => throw new InvalidOperationException(
+                    $"The field '{column.Name}' is too small to accept the amount of data you attempted to add: "
+                    + $"{bytes.Length} bytes into a GUID, which holds 16."),
+                _ => throw CannotStore(column, type, value),
             },
             JetDataType.Text or JetDataType.Memo => VbaText.Of(value),
             // A fixed-length (BINARY) column is zero-padded to its width, as ACE stores it and keys it (verified:
             // ACE refuses 0x01020000 into a UNIQUE BINARY(4) holding 0x0102).
-            JetDataType.Binary or JetDataType.BigBinary => AsBinary(column, value) is var bytes
+            JetDataType.Binary or JetDataType.BigBinary => (AsBinary(value, currency: false) ?? throw CannotStore(column, type, value)) is var bytes
                 && column.IsFixedLength && bytes.Length < column.Length
                     ? [.. bytes, .. new byte[column.Length - bytes.Length]]
                     : bytes,
-            JetDataType.Ole => AsBinary(column, value),
+            JetDataType.Ole => AsBinary(value, currency: false) ?? throw CannotStore(column, type, value),
             JetDataType.FixedPoint => JetDecimalConverter.ToDecimal(value, c),
             _ => value,
         };
     }
 
+    /// <summary>A value a GUID or binary column has no form for (<see cref="AsGuid"/> or <see cref="AsBinary"/> gave
+    /// null), refused where a value is stored: it names the column rather than hard-casting, as a cast raised an
+    /// <see cref="InvalidCastException"/> that names nothing.</summary>
+    internal static NotSupportedException CannotStore(ColumnDef column, JetDataType type, object value) => new(type == JetDataType.Guid
+        ? $"Cannot store {value.GetType().Name} in GUID column '{column.Name}'."
+        : $"Cannot store {value.GetType().Name} in {column.Type} column '{column.Name}': a binary column "
+            + "takes a byte array, a string (stored as its UTF-16LE bytes), or a number (stored as its own bytes).");
+
+    /// <summary>The same refusal where a statement's value or an ALTER COLUMN's conversion meets it: ACE's type
+    /// mismatch, an <see cref="InvalidCastException"/> — the type the conversions' callers catch
+    /// (<c>SchemaEditor.ConvertValue</c>).</summary>
+    internal static InvalidCastException TypeMismatch(JetDataType type, string held) =>
+        new($"Type mismatch: a {(type == JetDataType.Guid ? "GUID" : "binary")} column cannot hold a {held}.");
+
+    /// <summary>A Currency a statement binds to a <paramref name="type"/> column, before <see cref="NumberFromText"/>:
+    /// a Currency and a Decimal are both <see cref="decimal"/>, and only the statement knows which. A Currency is its
+    /// eight-byte scaled integer for a binary column and a type mismatch for a GUID column (verified vs ACE, on INSERT,
+    /// INSERT … SELECT, UPDATE, a DEFAULT and ALTER COLUMN: <c>CCur(1)</c> stores <c>10 27 00 00 00 00 00 00</c>, a
+    /// DEFAULT being refused when it is declared); any other column takes it as the number it is.</summary>
+    internal static object CurrencyAsStored(JetDataType type, decimal value) => type switch
+    {
+        JetDataType.Guid => throw TypeMismatch(type, "Currency"),
+        JetDataType.Binary or JetDataType.BigBinary or JetDataType.Ole => AsBinary(value, currency: true)!,
+        _ => value,
+    };
+
+    /// <summary>The low byte of a whole number, as a Byte column takes one written past its range (verified vs ACE:
+    /// 256 stores 0, -1 and True 255, 300 44).</summary>
+    internal static byte LowByte(object number) =>
+        unchecked((byte)Convert.ToInt64(number, System.Globalization.CultureInfo.InvariantCulture));
+
     /// <summary>
-    /// A value bound for a number column, with text read as VBA reads it as a number (<see cref="VbaText.TextAsNumber"/>;
-    /// verified vs ACE, on INSERT and ALTER COLUMN alike: '$5', '(5)', '5-', '1,000', '&amp;H10' and '1d2' store as
-    /// numbers, in the regional separators and currency symbol) — exactly, for a Currency or Decimal column, where a
-    /// Decimal holds it — and a date as its OLE Automation serial (verified vs ACE: <c>Time()</c> at 20:58 into a
-    /// LONG stores 1, into a DOUBLE its day fraction). Anything else is returned as it is.
+    /// The value a statement binds to a <paramref name="type"/> column, before the column's own conversion
+    /// (<see cref="ToStoredValue"/>). A Currency the statement knows to be one is taken first by
+    /// <see cref="CurrencyAsStored"/>.
     /// </summary>
-    /// <remarks>A Boolean bound for any column is first the Int16 -1 or 0 (VARIANT_BOOL), and from there exactly that
-    /// number (verified vs ACE: True stores what <c>CInt(True)</c> stores — 255 in a BYTE, -1 in a number, "-1" in
-    /// text, 1899-12-29 in a date). A Yes/No column's own value lives in the null bitmap and is read by
-    /// <see cref="LibRed.Storage.RowCodec.IsTruthy"/> before it gets here.</remarks>
+    /// <remarks>
+    /// <list type="bullet">
+    /// <item>A Boolean is the Int16 -1 or 0 (VARIANT_BOOL) for any column, and from there exactly that number (verified
+    /// vs ACE: True stores what <c>CInt(True)</c> stores — 255 in a BYTE, -1 in a number, "-1" in text, 1899-12-29 in a
+    /// date). A Yes/No column's own value lives in the null bitmap and is read by
+    /// <see cref="LibRed.Storage.RowCodec.IsTruthy"/> before it gets here.</item>
+    /// <item>For a number column, text is the number VBA reads (<see cref="VbaText.TextAsNumber"/>; verified vs ACE, on
+    /// INSERT and ALTER COLUMN alike: '$5', '(5)', '5-', '1,000', '&amp;H10' and '1d2' store as numbers, in the regional
+    /// separators and currency symbol) — exactly, for a Currency or Decimal column, where a Decimal holds it — and a
+    /// date its OLE Automation serial (verified vs ACE: <c>Time()</c> at 20:58 into a LONG stores 1, into a DOUBLE its
+    /// day fraction).</item>
+    /// </list>
+    /// Anything else is returned as it is.
+    /// </remarks>
     internal static object NumberFromText(JetDataType type, object value)
     {
         if (value is bool boolean)
@@ -583,7 +616,8 @@ public static class JetTypeCodec
     }
 
     /// <summary>
-    /// The bytes to store for a binary (BINARY/VARBINARY) or OLE column.
+    /// A value's own bytes as a binary (BINARY/VARBINARY) or OLE column holds them, a decimal marked
+    /// <paramref name="currency"/> as its 8-byte scaled Currency integer; null for a value with no binary form.
     /// </summary>
     /// <remarks>
     /// A <b>string</b> written to a binary column stores its UTF-16LE bytes, exactly as text does — verified
@@ -595,27 +629,51 @@ public static class JetTypeCodec
     /// literal: Access has no digitless <c>0x</c> (it rejects it), which is why
     /// <c>JetByteArrayTypeMapping</c> emits <c>''</c> for an empty array.
     /// </remarks>
-    /// <remarks>The fallback names the column rather than hard-casting: a cast raised
-    /// <see cref="InvalidCastException"/>, which names nothing and is indistinguishable from a bug in the
-    /// writer. Same fix as the GUID case above.</remarks>
     /// <remarks>A <b>number</b> stores its own little-endian bytes (verified vs ACE, on INSERT, UPDATE, a DEFAULT
     /// and ALTER COLUMN alike): an Int16 two — a Boolean is the Int16 -1 or 0, so True stores <c>FFFF</c> — an
-    /// Int32 and a Byte four, a Single four, a Double and a date (its serial) eight. A Decimal stores the bytes of
-    /// its text, as a string does.</remarks>
-    private static byte[] AsBinary(ColumnDef column, object value) => value switch
+    /// Int32 and a Byte four, a Single four, a Double and a date (its serial) eight. A Decimal and a Large Number
+    /// (Int64) store the bytes of their text, as a string does, and a GUID its sixteen bytes (verified vs ACE, on
+    /// INSERT, INSERT … SELECT, UPDATE and ALTER COLUMN, and in a UNION beside a binary column: a BIGINT 1 is
+    /// <c>31 00</c>, the GUID {00000001-0002-0003-0004-000000000005} <c>01 00 00 00 02 00 03 00 00 04 00 00 00 00 00 05</c>).</remarks>
+    internal static byte[]? AsBinary(object value, bool currency) => value switch
     {
         byte[] bytes => bytes,
         string text => Encoding.Unicode.GetBytes(text),
+        bool => AsBinary(NumberFromText(JetDataType.Binary, value), currency: false),
         short number => BitConverter.GetBytes(number),
         int number => BitConverter.GetBytes(number),
         byte number => BitConverter.GetBytes((int)number),
         float number => BitConverter.GetBytes(number),
         double number => BitConverter.GetBytes(number),
         DateTime date => BitConverter.GetBytes(date.ToOADate()),
-        decimal number => Encoding.Unicode.GetBytes(VbaText.Of(number)),
-        _ => throw new NotSupportedException(
-            $"Cannot store {value.GetType().Name} in {column.Type} column '{column.Name}': a binary column "
-            + "takes a byte array, a string (stored as its UTF-16LE bytes), or a number (stored as its own bytes)."),
+        Guid guid => guid.ToByteArray(),
+        decimal number when currency =>
+            BitConverter.GetBytes(CurrencyToScaled(number, System.Globalization.CultureInfo.InvariantCulture)),
+        decimal or long => Encoding.Unicode.GetBytes(VbaText.Of(value)),
+        _ => null,
+    };
+
+    /// <summary>
+    /// A value as a GUID column holds it: a GUID itself, a Long or a Byte the GUID's first four bytes, text that reads
+    /// as a GUID that GUID and other text the zero GUID, and a Decimal, a Large Number (Int64) or binary its bytes as
+    /// <see cref="AsBinary"/> gives them, which are the GUID when there are sixteen. Bytes that are not sixteen long
+    /// are returned as they are, for the write to refuse as too small for the column; null for a value the column
+    /// refuses as a type mismatch: an Int16 (so a Boolean), a Single, a Double, a date.
+    /// </summary>
+    /// <remarks>Verified vs ACE, on INSERT, INSERT … SELECT, UPDATE and ALTER COLUMN: 1 stores
+    /// {00000001-0000-…}, -1 {FFFFFFFF-0000-…}; the Decimal 1.234567, whose text is sixteen bytes, stores
+    /// {002E0031-0032-0033-3400-350036003700}; 1.5 and a BIGINT 1 are refused as too small; a <c>BINARY(16)</c>
+    /// retyped to GUID keeps its bytes. Declaring a DEFAULT refuses a mismatch and not a size: <c>DEFAULT 1.5</c> on a
+    /// GUID is declared, and every insert that applies it fails.</remarks>
+    internal static object? AsGuid(object value) => value switch
+    {
+        Guid guid => guid,
+        int n => new Guid(n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        byte n => new Guid(n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        string s => TryParseGuid(s, out Guid parsed) ? parsed : Guid.Empty,
+        byte[] or decimal or long when AsBinary(value, currency: false) is { } bytes =>
+            bytes.Length == 16 ? new Guid(bytes) : bytes,
+        _ => null,
     };
 
     /// <summary>The OLE-automation epoch (1899-12-30), which is also Jet's zero date and the base for
@@ -690,6 +748,13 @@ public static class JetTypeCodec
     /// <summary>The largest precision Jet/ACE accepts on a NUMERIC/DECIMAL column.</summary>
     internal const byte MaxNumericPrecision = 28;
 
+    /// <summary>Whether <paramref name="value"/> has no more whole digits than <paramref name="column"/>'s declared
+    /// precision and scale leave it (DECIMAL(4,1) takes 999.95 and refuses 1000). Excess places do not count: they
+    /// are cut when the value is stored.</summary>
+    internal static bool FitsNumeric(ColumnDef column, decimal value) =>
+        !(column.Precision is >= 1 and <= MaxNumericPrecision && column.Scale <= column.Precision
+            && Math.Abs(value) >= Pow10((byte)(column.Precision - column.Scale)));
+
     /// <summary>Inverse of <see cref="DecodeNumeric"/>.</summary>
     private static byte[] EncodeNumeric(ColumnDef column, decimal value)
     {
@@ -699,8 +764,7 @@ public static class JetTypeCodec
         // narrows the column. The 17-byte payload cannot enforce it — a 20-digit value fits DECIMAL(18,4) as
         // comfortably as a 2-digit one. Tested before scaling, which also stops an out-of-range input
         // overflowing the multiply below and reporting OverflowException instead of this.
-        if (column.Precision is >= 1 and <= MaxNumericPrecision && scale <= column.Precision
-            && Math.Abs(value) >= Pow10((byte)(column.Precision - scale)))
+        if (!FitsNumeric(column, value))
             throw new InvalidOperationException(
                 $"Value {value} does not fit column '{column.Name}', declared "
                 + $"DECIMAL({column.Precision},{column.Scale}): it holds at most {column.Precision - scale} "

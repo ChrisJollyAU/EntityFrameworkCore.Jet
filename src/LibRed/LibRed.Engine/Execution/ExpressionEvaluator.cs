@@ -94,8 +94,34 @@ internal sealed partial class ExpressionEvaluator(
         UnaryExpression u => EvaluateUnary(u),
         SystemVariableExpression v => ResolveSystemVariable(v.Name),
         OutputColumnPosition p => scope.At(p.Position),
+        SoughtValue s => Sought(s),
+        ComparedAsWritten w => !ComparedByTruth(Evaluate(w.Value)?.GetType(), IsCurrency(w.Value)),
         _ => throw new NotSupportedException($"Cannot evaluate {expression.GetType().Name}."),
     };
+
+    // The stored column each sought value is converted for, by node: where a node resolves does not change between rows.
+    private Dictionary<SoughtValue, ColumnDef?>? _soughtColumns;
+
+    /// <summary>The value as the index on its column takes it (<see cref="TryGetSeekKey"/>): converted as storing it in
+    /// the column converts it, Null where the column cannot hold it, and as it is where the index cannot answer for it.</summary>
+    private object? Sought(SoughtValue s)
+    {
+        object? value = Evaluate(s.Value);
+        // IDE0028's only fix here is `[]`, which would drop the comparer and key the nodes structurally.
+#pragma warning disable IDE0028
+        _soughtColumns ??= new Dictionary<SoughtValue, ColumnDef?>(ReferenceEqualityComparer.Instance);
+#pragma warning restore IDE0028
+        if (!_soughtColumns.TryGetValue(s, out ColumnDef? column))
+            _soughtColumns[s] = column = OutputColumn.Find(scope.AllColumns(), s.Column) is { Source: { } source } ? source.Column : null;
+        if (value is null || column is null)
+            return value;
+        return TryGetSeekKey(column, s.Value, value, s.Bound, out object? key) switch
+        {
+            SeekKey.Key => key,
+            SeekKey.OtherKind => value,
+            _ => null,
+        };
+    }
 
     /// <summary>Whether this evaluation is inside ACE's expression service (<see cref="Evaluate"/>).</summary>
     private bool _service;
@@ -182,12 +208,13 @@ internal sealed partial class ExpressionEvaluator(
             // was the membership test over its values, repeated per outer row. Hoisting also builds a hash set,
             // so ask that first and only walk the values when it declines (mixed or non-hashable kinds).
             IEnumerable<object?> items = subqueries.ExecuteColumn(inq.Query, scope);
-            // A number or date looked up in a Yes/No column is compared by its truth (verified vs ACE: 1 and 2 are
-            // IN a subquery's Yes/No column holding True) — not under NOT IN, not against a Boolean the subquery
-            // computes, not where the subquery reads the outer row, and not a Decimal, all of which ACE compares as
-            // numbers.
-            if (membership && !inq.Negated && val is not (null or bool) && (IsNumeric(val) || val is DateTime)
-                && (val is not decimal || IsCurrency(inq.Value))
+            // A number or date looked up in a Yes/No column is compared by its truth (ComparedByTruth; verified vs
+            // ACE: 1 and 2 are IN a subquery's Yes/No column holding True) — not under NOT IN, not against a Boolean
+            // the subquery computes, not where the subquery reads the outer row, and not a value the statement computes
+            // (verified vs ACE: DT.ID * 1 and CLng(DT.ID) are not IN a Yes/No column holding True), which ACE compares
+            // as numbers.
+            if (membership && !inq.Negated && !IsComputed(inq.Value)
+                && val is not null && ComparedByTruth(val.GetType(), inq.Value is ColumnReference && IsCurrency(inq.Value))
                 && inq.Query is SelectStatement { IsSelectStar: false, Projection: [{ Value: ColumnReference }] }
                 && items.FirstOrDefault(item => item is not null) is bool
                 && !SubqueryHoisting.MayReferenceOuter(inq.Query, scope.VisibleAliases().ToHashSet(StringComparer.OrdinalIgnoreCase)))
@@ -212,7 +239,7 @@ internal sealed partial class ExpressionEvaluator(
                     else if (Holds(inq.Comparison,
                             val is string && item is bool || val is bool && item is string
                                 ? inq.Query is SelectStatement { IsSelectStar: false, Projection: [{ Value: ColumnReference body }] }
-                                    ? CompareAsKinds(inq.Value, val, body, item, Text)
+                                    ? CompareAsKinds(inq.Value, val, body, item)
                                     : Compare(Numeric(val), Numeric(item), Text)
                             : val is DateTime != item is DateTime ? Compare(Serial(val), Serial(item), Text)
                             : Compare(val, item, Text)) == any)
@@ -243,7 +270,7 @@ internal sealed partial class ExpressionEvaluator(
         foreach (Expression itemExpr in inl.Items)
         {
             if (Evaluate(itemExpr) is not { } item) hasNull = true;
-            else if (CompareAsKinds(inl.Value, val, itemExpr, item, Text) == 0) { found = true; break; }
+            else if (CompareAsKinds(inl.Value, val, itemExpr, item) == 0) { found = true; break; }
         }
         return !found && hasNull ? null : found != inl.Negated;
     }
@@ -256,7 +283,7 @@ internal sealed partial class ExpressionEvaluator(
         object? val = Evaluate(be.Value), low = Evaluate(be.Low), high = Evaluate(be.High);
         if (val is null || low is null || high is null) return null;
 
-        int toLow = CompareAsKinds(be.Value, val, be.Low, low, Text), toHigh = CompareAsKinds(be.Value, val, be.High, high, Text);
+        int toLow = CompareAsKinds(be.Value, val, be.Low, low), toHigh = CompareAsKinds(be.Value, val, be.High, high);
         bool inside = (toLow >= 0 && toHigh <= 0) || (toLow <= 0 && toHigh >= 0);
         return inside != be.Negated;
     }
@@ -1013,8 +1040,38 @@ internal sealed partial class ExpressionEvaluator(
         _ => 8,             // vbString
     };
 
-    /// <summary>Whether an expression is a Currency: a Currency column, CCur, or arithmetic that keeps one.</summary>
-    private bool IsCurrency(Expression expression) => ClassOf(expression) == NumberClass.Currency;
+    /// <summary>Whether a value of <paramref name="type"/> looked up in a Yes/No column is compared by its truth: a
+    /// number or a date, not a Boolean, and a Decimal only when it is a Currency column's (<paramref name="currencyColumn"/>;
+    /// verified vs ACE: a Currency column is, a Decimal column and a Decimal or Currency the statement computes are
+    /// compared as numbers). The IN subquery here and the hashed EXISTS key (SubqueryCorrelation.SameKind) ask this.</summary>
+    internal static bool ComparedByTruth(Type? type, bool currencyColumn)
+    {
+        Type? t = type is null ? null : Nullable.GetUnderlyingType(type) ?? type;
+        return t == typeof(DateTime) || t == typeof(byte) || t == typeof(short) || t == typeof(int) || t == typeof(long)
+            || t == typeof(float) || t == typeof(double) || (t == typeof(decimal) && currencyColumn);
+    }
+
+    /// <summary>Whether an expression is a Currency (<see cref="IsCurrency(Expression, IReadOnlyList{OutputColumn},
+    /// Func{Expression, Type?}?)"/>) over this scope's columns, worked out once per node as <see cref="ClassOf"/> is.</summary>
+    private bool IsCurrency(Expression expression)
+    {
+        // IDE0028's only fix here is `[]`, which would drop the comparer and key the nodes structurally.
+#pragma warning disable IDE0028
+        _currency ??= new Dictionary<Expression, bool>(ReferenceEqualityComparer.Instance);
+#pragma warning restore IDE0028
+        if (!_currency.TryGetValue(expression, out bool currency))
+            _currency[expression] = currency = IsCurrency(expression, scope.AllColumns());
+        return currency;
+    }
+
+    private Dictionary<Expression, bool>? _currency;
+
+    /// <summary>Whether an expression is a Currency: a Currency column, CCur, or arithmetic that keeps one —
+    /// <paramref name="expression"/> over <paramref name="columns"/> (<see cref="NumberTypeOf"/>), with
+    /// <paramref name="declaredType"/> where its caller knows declared types.</summary>
+    internal static bool IsCurrency(
+        Expression expression, IReadOnlyList<OutputColumn> columns, Func<Expression, Type?>? declaredType = null) =>
+        NumberTypeOf(expression, columns, declaredType ?? (_ => null)).Class == NumberClass.Currency;
 
     /// <summary>The expression's <see cref="NumberClass"/>.</summary>
     /// <remarks>Decided by the expression and the scope's columns, never the row, so it is worked out once per node
@@ -1639,6 +1696,26 @@ internal sealed partial class ExpressionEvaluator(
             : throw new OverflowException($"Overflow: {value} is outside the range of a Currency.");
     }
 
+    /// <summary>Text, or a Double or Single, compared with a Currency column: read as storing it in the column reads it,
+    /// then a Currency as <see cref="ToCurrency"/> makes one — with an index or without. Past a Currency is an
+    /// overflow.</summary>
+    private static decimal AsCurrencyColumn(object value) =>
+        ToCurrency(Dec(JetTypeCodec.NumberFromText(JetDataType.Currency, value)));
+
+    /// <summary>Text compared with a date column, read as storing it in the column reads it — with an index or
+    /// without. Text that is not a date is a type mismatch.</summary>
+    private static DateTime AsDateColumn(object text)
+    {
+        try
+        {
+            return JetTypeCodec.ToDate(text.ToString()!, CultureInfo.InvariantCulture);
+        }
+        catch (Exception e) when (e is FormatException or InvalidCastException or OverflowException)
+        {
+            throw new InvalidCastException($"Data type mismatch: '{text}' cannot be read as a date.", e);
+        }
+    }
+
     /// <summary>A date, or text that reads as one (<see cref="VbaDateText"/>); a number or Null is not.</summary>
     private static bool TryDateText(object? v, out DateTime value)
     {
@@ -2195,7 +2272,7 @@ internal sealed partial class ExpressionEvaluator(
         {
             bool distinct = left is null || right is null
                 ? (left is null) != (right is null)
-                : CompareAsKinds(b.Left, left, b.Right, right, Text) != 0;
+                : CompareAsKinds(b.Left, left, b.Right, right) != 0;
             return distinct == (b.Operator == BinaryOperator.IsDistinctFrom);
         }
 
@@ -2213,6 +2290,11 @@ internal sealed partial class ExpressionEvaluator(
         // '%%', or a '%' the pattern is computed to, stays Null).
         if (left is null && b.Operator == BinaryOperator.Like && b.Right is LiteralExpression { Value: "%" })
             return false;
+
+        // `x <> Null`, with the Null written on the right, is `x Is Not Null` (verified vs ACE, for a Yes/No, number,
+        // text and date column alike; `Null <> x` and a Null parameter stay Null).
+        if (b.Operator == BinaryOperator.NotEqual && b.Right is LiteralExpression { Value: null })
+            return Boxed(left is not null);
 
         if (left is null || right is null)
             return null;
@@ -2443,8 +2525,9 @@ internal sealed partial class ExpressionEvaluator(
     /// mismatch when it is not one. ACE does this for text a function returns; for a text literal or column it
     /// raises a type mismatch instead, which LibRed does not, as SQL Server compares them numerically too.</item>
     /// <item>A date against a number: its serial.</item>
-    /// <item>A GUID or binary value against text, or against the other of the two: both as text (a GUID braced upper
-    /// case, binary as UTF-16). Against a number or date: a type mismatch.</item>
+    /// <item>A GUID or binary value against text: both as text (a GUID braced upper case, binary as UTF-16). A GUID
+    /// against binary: the GUID's sixteen bytes, as a binary column stores it, against the binary's (verified vs ACE,
+    /// with an index on the binary column or without). Against a number or date: a type mismatch.</item>
     /// </list>
     /// </summary>
     private static (object Left, object Right) Comparable(object left, object right)
@@ -2453,8 +2536,10 @@ internal sealed partial class ExpressionEvaluator(
         if (right is char rightChar) right = rightChar.ToString();
         bool leftText = left is string, rightText = right is string;
         bool leftBlob = left is Guid or byte[], rightBlob = right is Guid or byte[];
-        if ((leftText && rightBlob) || (leftBlob && rightText) || (leftBlob && rightBlob && left.GetType() != right.GetType()))
+        if ((leftText && rightBlob) || (leftBlob && rightText))
             return (ConcatText(left), ConcatText(right));
+        if (leftBlob && rightBlob && left.GetType() != right.GetType())
+            return (JetTypeCodec.AsBinary(left, currency: false)!, JetTypeCodec.AsBinary(right, currency: false)!);
         if (leftBlob || rightBlob)
             return leftBlob && rightBlob
                 ? (left, right)
@@ -2480,7 +2565,7 @@ internal sealed partial class ExpressionEvaluator(
                 return -Text.Compare(r, ConstantKey(b.Left, l));
         }
 
-        return CompareAsKinds(b.Left, left, b.Right, right, Text);
+        return CompareAsKinds(b.Left, left, b.Right, right);
     }
 
     // Collation keys of the literal and parameter operands met so far, by node: a statement's constants do not
@@ -2502,40 +2587,91 @@ internal sealed partial class ExpressionEvaluator(
     /// compared with text takes the text's type (verified vs ACE: a numeric parameter against a text column compares
     /// as text, so <c>[S] &gt; ?</c> with 100 counts 'abc' and '11'). So does any number or Boolean beside a text
     /// column that is not a written number (verified vs ACE: <c>[S] = CInt(True)</c> and <c>[S] = (1=1)</c> find
-    /// '-1', <c>[S] &gt; CInt(0)</c> every text sorting after '0'), where a written one is ACE's type mismatch.</summary>
-    private static int CompareAsKinds(
-        Expression leftOperand, object left, Expression rightOperand, object right, JetTextComparer text)
+    /// '-1', <c>[S] &gt; CInt(0)</c> every text sorting after '0'), where a written one is ACE's type mismatch. Text
+    /// that is not written, beside a Large Number (Int64) or date column itself, is 0 to the one and a date to the
+    /// other (verified vs ACE). Text a parameter or function gives, or a Double or Single parameter, beside a
+    /// Currency column is that Currency first, to four places half to even as <c>CCur</c> rounds (verified vs ACE for
+    /// a parameter, with an index or without; a Decimal column takes it as it is). A Currency value or a Decimal
+    /// parameter beside a binary value compares as text, the number's text against the binary read as UTF-16
+    /// (verified vs ACE, where no index answers). <c>=</c> and the other comparison operators, an IN list's items,
+    /// BETWEEN's bounds and IS [NOT] DISTINCT FROM compare through here.</summary>
+    private int CompareAsKinds(Expression leftOperand, object left, Expression rightOperand, object right)
     {
+        bool currencyOnLeft = left is decimal && right is string or char or double or float && leftOperand is ColumnReference
+            && (right is string or char ? NotWritten(rightOperand) : rightOperand is ParameterExpression) && IsCurrency(leftOperand);
+        if (currencyOnLeft || (right is decimal && left is string or char or double or float && rightOperand is ColumnReference
+            && (left is string or char ? NotWritten(leftOperand) : leftOperand is ParameterExpression) && IsCurrency(rightOperand)))
+        {
+            object given = currencyOnLeft ? right : left;
+            try
+            {
+                given = AsCurrencyColumn(given);
+            }
+            catch (OverflowException)
+            {
+                // Past a Currency, the value is compared as it is.
+            }
+            (left, right) = currencyOnLeft ? (left, given) : (given, right);
+        }
+        else if ((left is byte[] ? (Number: right, NumberOperand: rightOperand) : (Number: left, NumberOperand: leftOperand))
+            is { Number: decimal } beside && (left is byte[] || right is byte[])
+            && (beside.NumberOperand is ParameterExpression || IsCurrency(beside.NumberOperand)))
+            (left, right) = (ConcatText(left), ConcatText(right));
+
         // A text column or written text beside a Yes/No column is ACE's type mismatch, whatever the text holds
         // (verified, in a join, a correlated subquery and IN alike; text passed as a parameter is not).
-        if (left is bool && leftOperand is ColumnReference && right is string && rightOperand is ColumnReference or LiteralExpression
-            || right is bool && rightOperand is ColumnReference && left is string && leftOperand is ColumnReference or LiteralExpression)
+        var (yesNo, yesNoOperand, text, textOperand) = left is bool
+            ? (left, leftOperand, right, rightOperand) : (right, rightOperand, left, leftOperand);
+        if (yesNo is bool && yesNoOperand is ColumnReference && text is string && textOperand is ColumnReference or LiteralExpression)
             throw new InvalidCastException("Type mismatch in expression: text cannot be compared with a Yes/No column.");
-        if (right is string && left is not string
-            && (leftOperand is ParameterExpression
-                || (rightOperand is ColumnReference && IsNumeric(left) && IsComputed(leftOperand))))
-            left = ConcatText(left);
-        if (left is string && right is not string
-            && (rightOperand is ParameterExpression
-                || (leftOperand is ColumnReference && IsNumeric(right) && IsComputed(rightOperand))))
-            right = ConcatText(right);
+        bool textOnRight = right is string;
+        var (textSide, textSideOperand, other, otherOperand) = textOnRight
+            ? (right, rightOperand, left, leftOperand) : (left, leftOperand, right, rightOperand);
+        if (textSide is string && other is not string
+            && (otherOperand is ParameterExpression
+                || (textSideOperand is ColumnReference && IsNumeric(other) && IsComputed(otherOperand))))
+        {
+            object converted = ConcatText(other);
+            (left, right) = textOnRight ? (converted, right) : (left, converted);
+        }
+        // Text a parameter or function gives, beside a Large Number (Int64) or date column read as it is rather than
+        // in an expression, is what ACE makes of it outside an index (verified vs ACE): any text is 0 to the Large
+        // Number, and the date column reads it as storing it there reads it, text that is not a date being a type
+        // mismatch.
+        bool columnOnLeft = left is long or DateTime && leftOperand is ColumnReference && right is string or char && NotWritten(rightOperand);
+        if (columnOnLeft || (right is long or DateTime && rightOperand is ColumnReference && left is string or char && NotWritten(leftOperand)))
+        {
+            object column = columnOnLeft ? left : right, given = columnOnLeft ? right : left;
+            object read = column is long ? 0L : AsDateColumn(given);
+            (left, right) = columnOnLeft ? (left, read) : (read, right);
+        }
         // A GUID or binary value sorts below any number or Boolean the statement computes or is passed (verified
         // vs ACE: [G] = CInt(True) and [G] >= (1=1) select nothing, [G] <> ? and [G] < ? every row with a value);
-        // beside a written number it stays Comparable's type mismatch.
-        if (left is Guid or byte[] && IsNumeric(right) && (rightOperand is ParameterExpression || IsComputed(rightOperand)))
-            return -1;
-        if (right is Guid or byte[] && IsNumeric(left) && (leftOperand is ParameterExpression || IsComputed(leftOperand)))
-            return 1;
+        // beside a written number it stays Comparable's type mismatch, and so does a Large Number (Int64) the statement
+        // computes, not one it is passed, beside a binary value (verified vs ACE: [B] = [L] + 0 is "Type mismatch in
+        // expression").
+        // Written once with the GUID or binary value first; the order is the other way round when it is on the right.
+        bool keyOnLeft = left is Guid or byte[];
+        var (key, number, numberOperand) = keyOnLeft ? (left, right, rightOperand) : (right, left, leftOperand);
+        if (key is Guid or byte[] && IsNumeric(number)
+            && !(key is byte[] && number is long && numberOperand is not ParameterExpression)
+            && (numberOperand is ParameterExpression || IsComputed(numberOperand)))
+            return keyOnLeft ? -1 : 1;
         (object l, object r) = Comparable(left, right);
-        return Compare(l, r, text);
+        return Compare(l, r, Text);
     }
 
     /// <summary>Whether an operand is a value the statement computes, rather than a number as it writes one —
     /// <c>1</c>, <c>-1.5</c>, <c>True</c> — or another column. <c>False</c> counts as computed: beside a text
     /// column ACE takes it as a computed 0 (verified: <c>[S] &lt; False</c> answers where <c>[S] &lt; True</c> and
     /// <c>[S] &lt; 0</c> are a type mismatch, as a number column beside it is).</summary>
-    private static bool IsComputed(Expression operand) =>
+    internal static bool IsComputed(Expression operand) =>
         operand is not (LiteralExpression { Value: not false } or ColumnReference or ParameterExpression);
+
+    /// <summary>Whether an operand is a value the statement does not write: a parameter, a function's result, or an
+    /// expression holding either.</summary>
+    private static bool NotWritten(Expression e) =>
+        e is ParameterExpression or FunctionCall || (e.Operands()?.Any(NotWritten) ?? false);
 
     /// <summary>What a value compared with an indexed column is to that column's index — every seek, whether by
     /// <c>=</c>, by a join, or by a range bound, asks here before it builds a key.</summary>
@@ -2545,13 +2681,13 @@ internal sealed partial class ExpressionEvaluator(
         Key,
         /// <summary>A value of another kind: no key range holds the rows, so the caller scans.</summary>
         OtherKind,
-        /// <summary>A number the whole-number column cannot hold, past its range.</summary>
-        PastRange,
-        /// <summary>A number the whole-number column cannot hold, with a fraction.</summary>
-        Fraction,
+        /// <summary>A value the column cannot hold: the index answers that no row matches.</summary>
+        None,
     }
 
-    /// <summary>The key an index seek must use for <paramref name="value"/>, and whether it is one.</summary>
+    /// <summary>The key an index seek must use for <paramref name="value"/>, and whether it is one. With
+    /// <paramref name="bound"/> the value is a range bound, and one the column cannot hold is the error ACE raises
+    /// for it rather than <see cref="SeekKey.None"/>.</summary>
     /// <remarks>
     /// An index answers only in its column's own kind — its keys are encoded and ordered as that type — so a
     /// comparison that happens in a different kind has no key range to seek. <c>S = 1</c> on text compares as
@@ -2563,8 +2699,17 @@ internal sealed partial class ExpressionEvaluator(
     /// of it (verified vs ACE, through its index: no row holds such a value, so <c>=</c> selects nothing, while a
     /// range bound is an error — "Overflow" past the range, "Data type mismatch" for a fraction). A Boolean is the
     /// number -1 or 0 here as everywhere, so True is past a BYTE's range.</para>
+    /// <para>Text a parameter or function gives, compared with a number or date column, is converted as storing it
+    /// in the column converts it — read as a number and rounded to a whole-number column, or read as a date — and
+    /// text that cannot be stored there finds no row, or is "Data type mismatch" as a bound (verified vs ACE,
+    /// through its index). Text written in the statement is left as it is. Into a Currency column that text, and a
+    /// Double or Single parameter, is a Currency, to four places half to even (verified vs ACE).</para>
+    /// <para>A number or Boolean the statement computes or is passed, compared with a GUID or binary column, is
+    /// likewise the value storing it there gives: a Long (Int32) a GUID's first four bytes, a number or Boolean its
+    /// own bytes, a Currency its eight-byte scaled integer — and one the column refuses finds no row, or is "Data type
+    /// mismatch" as a bound (verified vs ACE, through its index).</para>
     /// </remarks>
-    internal static SeekKey TryGetSeekKey(ColumnDef column, Expression operand, object? value, out object? key)
+    internal static SeekKey TryGetSeekKey(ColumnDef column, Expression operand, object? value, bool bound, out object? key)
     {
         key = value;
         if (value is null) return SeekKey.Key;
@@ -2573,6 +2718,43 @@ internal sealed partial class ExpressionEvaluator(
         if (columnKind == IndexSelection.TypeKind.Text && value is not string
             && (operand is ParameterExpression || value is char || (IsNumeric(value) && IsComputed(operand))))
             key = ConcatText(value);
+        else if (value is string or char
+                ? columnKind is IndexSelection.TypeKind.Numeric or IndexSelection.TypeKind.Temporal
+                    && column.Type != JetDataType.Boolean && NotWritten(operand)
+                // A Byte is left to the comparison as written, which gives ACE's answer for CByte: ACE's CByte is an
+                // Integer (Int16), LibRed's a Byte, so converting it here would store the wrong bytes.
+                : (columnKind is IndexSelection.TypeKind.Binary or IndexSelection.TypeKind.Guid
+                    && IsNumeric(value) && value is not byte && (operand is ParameterExpression || IsComputed(operand)))
+                    || (column.Type == JetDataType.Currency && value is double or float && operand is ParameterExpression))
+        {
+            try
+            {
+                key = columnKind switch
+                {
+                    IndexSelection.TypeKind.Temporal => AsDateColumn(value),
+                    IndexSelection.TypeKind.Guid => JetTypeCodec.ToStoredValue(column, column.Type, value),
+                    // Without the zero padding a fixed-length column adds when it stores the value (verified vs ACE).
+                    IndexSelection.TypeKind.Binary => JetTypeCodec.AsBinary(IsCurrency(operand, []) && value is decimal number
+                            ? JetTypeCodec.CurrencyAsStored(column.Type, number)
+                            : JetTypeCodec.NumberFromText(column.Type, value), currency: false)
+                        ?? throw JetTypeCodec.CannotStore(column, column.Type, value),
+                    _ => column.Type switch
+                    {
+                        JetDataType.Byte or JetDataType.Int16 or JetDataType.Int32 or JetDataType.Int64 =>
+                            JetTypeCodec.ToStoredValue(column, column.Type, value),
+                        JetDataType.Currency => AsCurrencyColumn(value),
+                        _ => JetTypeCodec.NumberFromText(column.Type, value),
+                    },
+                };
+            }
+            catch (Exception e) when (e is InvalidCastException or FormatException or NotSupportedException
+                or OverflowException or InvalidOperationException)
+            {
+                if (bound)
+                    throw new InvalidCastException($"Data type mismatch: '{value}' cannot be a bound of column '{column.Name}'.", e);
+                return SeekKey.None;
+            }
+        }
         if (IndexSelection.KindOf(key) != columnKind)
             return SeekKey.OtherKind;
 
@@ -2586,18 +2768,24 @@ internal sealed partial class ExpressionEvaluator(
         };
         if (range is not { } r)
             return SeekKey.Key;
-        decimal exact;
+        decimal exact = 0;
+        bool past;
         try
         {
             exact = Dec(key!);
+            past = exact < r.Min || exact > r.Max;
         }
         catch (OverflowException)
         {
-            return SeekKey.PastRange;
+            past = true;
         }
-        return exact < r.Min || exact > r.Max ? SeekKey.PastRange
-            : exact != decimal.Truncate(exact) ? SeekKey.Fraction
-            : SeekKey.Key;
+        if (!past && exact == decimal.Truncate(exact))
+            return SeekKey.Key;
+        if (!bound)
+            return SeekKey.None;
+        if (past)
+            throw new OverflowException($"Overflow: {key} is past the range of column '{column.Name}'.");
+        throw new InvalidCastException($"Data type mismatch: {key} cannot be a bound of the whole-number column '{column.Name}'.");
     }
 
     private static object Serial(object value) => value is DateTime d ? d.ToOADate() : value;
@@ -2870,7 +3058,8 @@ internal sealed partial class ExpressionEvaluator(
     /// A value converted to the type its result column declares, when it has another: a number to a wider number
     /// (a Boolean as -1 or 0, a Double into a Decimal the OLE Automation way), a date to a number as its serial and a
     /// number to a date as CDate reads it, anything to text as <c>&amp;</c> writes it, and anything to binary as its
-    /// bytes (<see cref="ColumnBytes"/>). Null, or no <paramref name="type"/>, leaves the value as it is.
+    /// bytes as a binary column stores them (<see cref="JetTypeCodec.AsBinary"/>), and anything that has none as its text. Null, or no
+    /// <paramref name="type"/>, leaves the value as it is.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static object? AsColumnType(object? value, Type? type, bool currency)
@@ -2878,7 +3067,8 @@ internal sealed partial class ExpressionEvaluator(
         if (value is null || type is null || value.GetType() == type)
             return value;
         if (type == typeof(string)) return ConcatText(value);
-        if (type == typeof(byte[])) return ColumnBytes(value, currency);
+        if (type == typeof(byte[]))
+            return JetTypeCodec.AsBinary(value, currency) ?? Encoding.Unicode.GetBytes(ConcatText(value));
         if (type == typeof(decimal)) return ArithmeticDecimal(value);
         if (type == typeof(double)) return Oa(value);
         if (type == typeof(float)) return (float)Oa(value);   // a Decimal through its OLE Automation double
@@ -2886,29 +3076,6 @@ internal sealed partial class ExpressionEvaluator(
         if (type == typeof(bool)) return IsTruthy(value);
         return Convert.ChangeType(Numeric(value), type, CultureInfo.InvariantCulture);
     }
-
-    /// <summary>
-    /// A value in a binary result column (verified vs ACE, which writes it so where a UNION mixes binary or GUID
-    /// values with others): text as UTF-16, a GUID as its 16 bytes, a Boolean as a 16-bit -1 or 0, a Byte or a Long
-    /// as 4 bytes, an Integer as 2, a Single as 4 and a Double or a date's serial as 8, Currency as its 8-byte scaled
-    /// integer, and a Decimal or a Large Number as its text. ACE cuts a Large Number's text to 8 bytes, which LibRed
-    /// does not.
-    /// </summary>
-    private static byte[] ColumnBytes(object value, bool currency) => value switch
-    {
-        byte[] bytes => bytes,
-        string text => Encoding.Unicode.GetBytes(text),
-        Guid guid => guid.ToByteArray(),
-        bool b => BitConverter.GetBytes((short)(b ? -1 : 0)),
-        byte b => BitConverter.GetBytes((int)b),
-        short s => BitConverter.GetBytes(s),
-        int i => BitConverter.GetBytes(i),
-        float f => BitConverter.GetBytes(f),
-        double d => BitConverter.GetBytes(d),
-        DateTime date => BitConverter.GetBytes(date.ToOADate()),
-        decimal m when currency => BitConverter.GetBytes(decimal.ToOACurrency(m)),
-        _ => Encoding.Unicode.GetBytes(ConcatText(value)),
-    };
 
     private static object CutFloating(object value, int places)
     {

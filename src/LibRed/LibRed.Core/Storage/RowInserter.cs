@@ -1120,9 +1120,16 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
     {
         foreach (ColumnDef column in _table.Columns)
             if (column.Type == JetDataType.Byte && values[column.Index] is { } value and not byte)
-                values[column.Index] = unchecked((byte)Convert.ToInt64(
-                    Types.JetTypeCodec.NumberFromText(JetDataType.Byte, value), CultureInfo.InvariantCulture));
-            else if (column.Type == JetDataType.Boolean && !column.IsCalculated && values[column.Index] is null or DBNull)
+                values[column.Index] = Types.JetTypeCodec.LowByte(Types.JetTypeCodec.NumberFromText(JetDataType.Byte, value));
+        NullFlagsAsFalse(_table, values);
+    }
+
+    /// <summary>A Null written to a Yes/No column (<see cref="ColumnDef.IsBitFlag"/>) as the False its row stores — see
+    /// <see cref="WrapBytes"/>. An UPDATE applies it before its own rules too, so they see the False.</summary>
+    internal static void NullFlagsAsFalse(TableDefinition table, object?[] values)
+    {
+        foreach (ColumnDef column in table.Columns)
+            if (column.IsBitFlag && values[column.Index] is null or DBNull)
                 values[column.Index] = false;
     }
 
