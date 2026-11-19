@@ -17,9 +17,11 @@ public static class JetStoreType
     /// <para>A complex column is the exception, because it carries the same <c>0x04</c> flag without being a
     /// counter in this sense. ACE reports an attachment column as <b>nullable</b> over OLE DB's schema
     /// rowset, and DAO reports <c>Required = False</c> for it; treating the flag alone as decisive
-    /// contradicted both.</para></summary>
+    /// contradicted both.</para>
+    /// <para>A Yes/No column is never nullable either, whether or not it is Required: its value is one bit of the
+    /// row, a Null written to it is stored as False, and ACE's OLE DB schema rowset reports it so (verified).</para></summary>
     public static bool IsNullable(ColumnDef column) =>
-        (!column.IsAutoNumber || column.Type == JetDataType.Complex) && column.IsNullable;
+        (!column.IsAutoNumber || column.Type == JetDataType.Complex) && column.Type != JetDataType.Boolean && column.IsNullable;
 
     /// <summary>The bare type name (no facets) — <c>INFORMATION_SCHEMA.COLUMNS.DATA_TYPE</c>, with length /
     /// precision / scale reported in their own columns. Mirrors <c>AdoxSchema.GetDataTypeString</c>.</summary>

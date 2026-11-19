@@ -2828,7 +2828,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// <remarks>Throwing is the intent; the type has to be actionable. The bare <c>Convert.To*</c> calls leaked
     /// <see cref="InvalidCastException"/>/<see cref="FormatException"/>/<see cref="OverflowException"/>, none
     /// naming the column and none distinguishable from a bug in the rewrite.</remarks>
-    private static object? ConvertValue(object? value, JetDataType type, string columnName)
+    internal static object? ConvertValue(object? value, JetDataType type, string columnName)
     {
         if (value is null) return null;
         try
@@ -2856,11 +2856,14 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     private static object? ConvertCore(object value, JetDataType type)
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
+        // A Yes/No retyped to BYTE takes the low byte of its -1, as a write of True does, where a number past a
+        // byte's range is refused (verified vs ACE: Yes/No True becomes 255, a SHORT -1 fails the ALTER).
+        bool yesNo = value is bool;
         value = Storage.Types.JetTypeCodec.NumberFromText(type, value);
         return type switch
         {
             JetDataType.Boolean => Storage.RowCodec.IsTruthy(value),
-            JetDataType.Byte => Convert.ToByte(value, inv),
+            JetDataType.Byte => yesNo ? unchecked((byte)(short)value) : Convert.ToByte(value, inv),
             JetDataType.Int16 => Convert.ToInt16(value, inv),
             JetDataType.Int32 => Convert.ToInt32(value, inv),
             JetDataType.Int64 => Convert.ToInt64(value, inv),
@@ -2869,8 +2872,13 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             JetDataType.Currency or JetDataType.FixedPoint => JetDecimalConverter.ToDecimal(value, inv),
             JetDataType.DateTime => Storage.Types.JetTypeCodec.ToDate(value, inv),
             JetDataType.Text or JetDataType.Memo => Storage.Types.VbaText.Of(value),
-            JetDataType.Guid => value is Guid g ? g : Guid.Parse(value.ToString()!),
-            JetDataType.Binary or JetDataType.BigBinary or JetDataType.Ole => value as byte[] ?? System.Text.Encoding.Unicode.GetBytes(value.ToString()!),
+            // A number becomes a GUID or binary value where the row is encoded (JetTypeCodec.ToStoredValue), as a
+            // written one does: its own bytes, not its text.
+            JetDataType.Guid => value is Guid or int or byte or string or decimal ? value : Guid.Parse(value.ToString()!),
+            JetDataType.Binary or JetDataType.BigBinary or JetDataType.Ole =>
+                value is byte[] or short or int or byte or float or double or decimal or DateTime
+                    ? value
+                    : System.Text.Encoding.Unicode.GetBytes(value.ToString()!),
             _ => value,
         };
     }

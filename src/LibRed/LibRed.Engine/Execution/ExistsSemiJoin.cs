@@ -49,6 +49,11 @@ internal sealed class ExistsSemiJoin
     /// <summary>Per key, the IN value's last, the type both sides are hashed as. See <see cref="CorrelationSplit.KeyTypes" />.</summary>
     private readonly IReadOnlyList<Type?> _keyTypes;
 
+    /// <summary>Whether a key is looked up in a Yes/No column by its truth (see
+    /// <see cref="SubqueryCorrelation.SameKind" />) — which the per-row comparison does not do, so this semi-join
+    /// answers from the first row rather than once it has proved the cheaper path.</summary>
+    internal bool ComparesTruth => _keyTypes.Contains(typeof(bool));
+
     private HashSet<object?[]>? _keys;
     private HashSet<object?[]>? _nullTail;
 
@@ -113,7 +118,7 @@ internal sealed class ExistsSemiJoin
         if (subquery.Offset is not null
             || !TopCannotChangeExistence(subquery)
             || !EmptyInputMeansNoRows(subquery)
-            || SubqueryCorrelation.TrySplit(subquery, outerColumns, outerAliases, database) is not { } split)
+            || SubqueryCorrelation.TrySplit(subquery, outerColumns, outerAliases, database, lookup: true) is not { } split)
         {
             return null;
         }
@@ -126,7 +131,10 @@ internal sealed class ExistsSemiJoin
         if (inValue is not null)
         {
             Expression output = subquery.Projection[0].Value;
-            if (!SubqueryCorrelation.SameKind((ColumnReference)output, split.Plan, database, inValue, outerColumns, out Type? inType))
+            // A number IN a Yes/No column is left to the evaluator: it is compared by its truth there, but as a
+            // number under NOT IN, and only the evaluator knows which this is.
+            if (!SubqueryCorrelation.SameKind((ColumnReference)output, split.Plan, database, inValue, outerColumns, lookup: true, out Type? inType)
+                || inType == typeof(bool))
             {
                 return null;
             }

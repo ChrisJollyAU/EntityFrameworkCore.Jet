@@ -55,8 +55,29 @@ public sealed class LibRedParameter : DbParameter
     /// <summary>The value as the engine should see it: clipped to an explicitly-set <see cref="Size"/>, which is
     /// what ACE does to a too-long string or byte[] (measured in <c>ParameterSizeAccessTests</c>).
     /// <see cref="Value"/> is left alone — a caller must read back what it set, so the clip belongs on the way
-    /// out. A size of 0 was never set, and −1 is ADO.NET's "no limit".</summary>
-    internal object? EffectiveValue => _size <= 0
+    /// out. A size of 0 was never set, and −1 is ADO.NET's "no limit".
+    /// <para>A Boolean under an explicitly-set <see cref="DbType"/> is converted to that type first, as the OLE DB
+    /// client converts it before ACE sees it (measured: True under Int16 stores 1 where an undeclared True stores
+    /// -1, and under String or Object stores the text "True"). Decimal and the integer types Access has no
+    /// column for reach ACE as text — "1" or "0" — and behave as that text wherever they go (measured: 1 in a
+    /// number column, <c>31 00</c> in a binary one, a type mismatch in a date). The types that client cannot
+    /// convert a Boolean to are refused as it refuses them.</para></summary>
+    internal object? EffectiveValue => Value is bool flag && _dbType is { } declared
+        ? declared switch
+        {
+            DbType.Boolean => Value,
+            DbType.Byte => Convert.ToByte(flag),
+            DbType.Int16 => Convert.ToInt16(flag),
+            DbType.Int32 => Convert.ToInt32(flag),
+            DbType.Single => Convert.ToSingle(flag),
+            DbType.Double => Convert.ToDouble(flag),
+            DbType.Currency => Convert.ToDecimal(flag),
+            DbType.Decimal or DbType.SByte or DbType.UInt16 or DbType.UInt32 or DbType.UInt64 => flag ? "1" : "0",
+            DbType.String or DbType.AnsiString or DbType.StringFixedLength or DbType.AnsiStringFixedLength
+                or DbType.Object => flag ? "True" : "False",
+            _ => throw new InvalidCastException($"Failed to convert parameter value from a Boolean to a {declared}."),
+        }
+        : _size <= 0
         ? Value
         : Value switch
         {

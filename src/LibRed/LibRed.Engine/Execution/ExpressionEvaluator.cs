@@ -182,6 +182,16 @@ internal sealed partial class ExpressionEvaluator(
             // was the membership test over its values, repeated per outer row. Hoisting also builds a hash set,
             // so ask that first and only walk the values when it declines (mixed or non-hashable kinds).
             IEnumerable<object?> items = subqueries.ExecuteColumn(inq.Query, scope);
+            // A number or date looked up in a Yes/No column is compared by its truth (verified vs ACE: 1 and 2 are
+            // IN a subquery's Yes/No column holding True) — not under NOT IN, not against a Boolean the subquery
+            // computes, not where the subquery reads the outer row, and not a Decimal, all of which ACE compares as
+            // numbers.
+            if (membership && !inq.Negated && val is not (null or bool) && (IsNumeric(val) || val is DateTime)
+                && (val is not decimal || IsCurrency(inq.Value))
+                && inq.Query is SelectStatement { IsSelectStar: false, Projection: [{ Value: ColumnReference }] }
+                && items.FirstOrDefault(item => item is not null) is bool
+                && !SubqueryHoisting.MayReferenceOuter(inq.Query, scope.VisibleAliases().ToHashSet(StringComparer.OrdinalIgnoreCase)))
+                val = IsTruthy(val);
             if (val is not null && membership && subqueries.LookupHoistedIn(inq.Query, val) is var (setFound, setNull))
             {
                 result = setFound ? true : setNull ? null : false;
@@ -197,7 +207,15 @@ internal sealed partial class ExpressionEvaluator(
                         unknown = true;
                         if (val is null) break;
                     }
-                    else if (Holds(inq.Comparison, Compare(val, item, Text)) == any)
+                    // A date beside a number or Boolean is its serial, as = compares them (Comparable), and a Boolean
+                    // beside text the number it is — unless both are columns, which is CompareAsKinds' type mismatch.
+                    else if (Holds(inq.Comparison,
+                            val is string && item is bool || val is bool && item is string
+                                ? inq.Query is SelectStatement { IsSelectStar: false, Projection: [{ Value: ColumnReference body }] }
+                                    ? CompareAsKinds(inq.Value, val, body, item, Text)
+                                    : Compare(Numeric(val), Numeric(item), Text)
+                            : val is DateTime != item is DateTime ? Compare(Serial(val), Serial(item), Text)
+                            : Compare(val, item, Text)) == any)
                     {
                         result = any;
                         break;
@@ -2092,6 +2110,10 @@ internal sealed partial class ExpressionEvaluator(
 
     private object? EvaluateUnary(UnaryExpression u)
     {
+        // NOT EXISTS is not the lookup EXISTS is: ACE compares its correlation as written (ExecuteExists).
+        if (u is { Operator: UnaryOperator.Not, Operand: ExistsExpression notExists })
+            return !subqueries.ExecuteExists(notExists.Query, scope, negated: true);
+
         object? v = Evaluate(u.Operand);
         return u.Operator switch
         {
@@ -2478,15 +2500,42 @@ internal sealed partial class ExpressionEvaluator(
 
     /// <summary>The order of two values once <see cref="Comparable"/> has brought them to a common kind. A parameter
     /// compared with text takes the text's type (verified vs ACE: a numeric parameter against a text column compares
-    /// as text, so <c>[S] &gt; ?</c> with 100 counts 'abc' and '11').</summary>
+    /// as text, so <c>[S] &gt; ?</c> with 100 counts 'abc' and '11'). So does any number or Boolean beside a text
+    /// column that is not a written number (verified vs ACE: <c>[S] = CInt(True)</c> and <c>[S] = (1=1)</c> find
+    /// '-1', <c>[S] &gt; CInt(0)</c> every text sorting after '0'), where a written one is ACE's type mismatch.</summary>
     private static int CompareAsKinds(
         Expression leftOperand, object left, Expression rightOperand, object right, JetTextComparer text)
     {
-        if (leftOperand is ParameterExpression && right is string && left is not string) left = ConcatText(left);
-        if (rightOperand is ParameterExpression && left is string && right is not string) right = ConcatText(right);
+        // A text column or written text beside a Yes/No column is ACE's type mismatch, whatever the text holds
+        // (verified, in a join, a correlated subquery and IN alike; text passed as a parameter is not).
+        if (left is bool && leftOperand is ColumnReference && right is string && rightOperand is ColumnReference or LiteralExpression
+            || right is bool && rightOperand is ColumnReference && left is string && leftOperand is ColumnReference or LiteralExpression)
+            throw new InvalidCastException("Type mismatch in expression: text cannot be compared with a Yes/No column.");
+        if (right is string && left is not string
+            && (leftOperand is ParameterExpression
+                || (rightOperand is ColumnReference && IsNumeric(left) && IsComputed(leftOperand))))
+            left = ConcatText(left);
+        if (left is string && right is not string
+            && (rightOperand is ParameterExpression
+                || (leftOperand is ColumnReference && IsNumeric(right) && IsComputed(rightOperand))))
+            right = ConcatText(right);
+        // A GUID or binary value sorts below any number or Boolean the statement computes or is passed (verified
+        // vs ACE: [G] = CInt(True) and [G] >= (1=1) select nothing, [G] <> ? and [G] < ? every row with a value);
+        // beside a written number it stays Comparable's type mismatch.
+        if (left is Guid or byte[] && IsNumeric(right) && (rightOperand is ParameterExpression || IsComputed(rightOperand)))
+            return -1;
+        if (right is Guid or byte[] && IsNumeric(left) && (leftOperand is ParameterExpression || IsComputed(leftOperand)))
+            return 1;
         (object l, object r) = Comparable(left, right);
         return Compare(l, r, text);
     }
+
+    /// <summary>Whether an operand is a value the statement computes, rather than a number as it writes one —
+    /// <c>1</c>, <c>-1.5</c>, <c>True</c> — or another column. <c>False</c> counts as computed: beside a text
+    /// column ACE takes it as a computed 0 (verified: <c>[S] &lt; False</c> answers where <c>[S] &lt; True</c> and
+    /// <c>[S] &lt; 0</c> are a type mismatch, as a number column beside it is).</summary>
+    private static bool IsComputed(Expression operand) =>
+        operand is not (LiteralExpression { Value: not false } or ColumnReference or ParameterExpression);
 
     /// <summary>What a value compared with an indexed column is to that column's index — every seek, whether by
     /// <c>=</c>, by a join, or by a range bound, asks here before it builds a key.</summary>
@@ -2512,7 +2561,8 @@ internal sealed partial class ExpressionEvaluator(
     /// comparing; the seek converts it the same way and so asks the index the same question.
     /// <para>A number becomes a whole-number column's key only when the column's type holds it without losing any
     /// of it (verified vs ACE, through its index: no row holds such a value, so <c>=</c> selects nothing, while a
-    /// range bound is an error — "Overflow" past the range, "Data type mismatch" for a fraction).</para>
+    /// range bound is an error — "Overflow" past the range, "Data type mismatch" for a fraction). A Boolean is the
+    /// number -1 or 0 here as everywhere, so True is past a BYTE's range.</para>
     /// </remarks>
     internal static SeekKey TryGetSeekKey(ColumnDef column, Expression operand, object? value, out object? key)
     {
@@ -2521,7 +2571,7 @@ internal sealed partial class ExpressionEvaluator(
 
         IndexSelection.TypeKind? columnKind = IndexSelection.Classify(column.Type);
         if (columnKind == IndexSelection.TypeKind.Text && value is not string
-            && (operand is ParameterExpression || value is char))
+            && (operand is ParameterExpression || value is char || (IsNumeric(value) && IsComputed(operand))))
             key = ConcatText(value);
         if (IndexSelection.KindOf(key) != columnKind)
             return SeekKey.OtherKind;
@@ -2534,7 +2584,7 @@ internal sealed partial class ExpressionEvaluator(
             JetDataType.Int64 => (long.MinValue, long.MaxValue),
             _ => null,
         };
-        if (range is not { } r || key is bool)
+        if (range is not { } r)
             return SeekKey.Key;
         decimal exact;
         try
@@ -2833,6 +2883,7 @@ internal sealed partial class ExpressionEvaluator(
         if (type == typeof(double)) return Oa(value);
         if (type == typeof(float)) return (float)Oa(value);   // a Decimal through its OLE Automation double
         if (type == typeof(DateTime)) return ToDate(value);
+        if (type == typeof(bool)) return IsTruthy(value);
         return Convert.ChangeType(Numeric(value), type, CultureInfo.InvariantCulture);
     }
 

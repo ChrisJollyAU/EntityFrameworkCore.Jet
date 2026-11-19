@@ -174,11 +174,35 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
     /// <summary>The parameter values as passed, for the describing executor a scalar subquery is typed with.</summary>
     private readonly IReadOnlyDictionary<string, object?>? _parameterValues;
 
-    public ResultSet ExecuteQuery(PlanNode plan)
+    /// <param name="plan">The query's plan.</param>
+    /// <param name="returned">Whether the rows go back to the caller, rather than into a table (INSERT … SELECT, a
+    /// make-table query). Returned rows read a Yes/No column from an outer join's unmatched side as False — in the
+    /// select list, its expressions, ORDER BY and DISTINCT — where the WHERE clause, an aggregate, a UNION and a
+    /// row being inserted see the Null (all verified vs ACE: <c>SELECT NOT F</c> returns True for an unmatched row
+    /// that <c>WHERE F IS NULL</c> selects, and <c>INSERT … SELECT F</c> stores Null in a LONG).</param>
+    public ResultSet ExecuteQuery(PlanNode plan, bool returned = false)
     {
         // Prepared plans enter here too. Prune at the shared execution boundary so every root query
         // decodes only its referenced columns, regardless of which caller built the plan.
         plan = ColumnPruning.Apply(plan);
+        if (returned)
+        {
+            // What the query's select list, ORDER BY and DISTINCT read: the rows its FROM and WHERE produce. A sort
+            // by anything but columns still sees the Null (verified vs ACE: ORDER BY NOT F puts the unmatched rows
+            // first, where ORDER BY F puts them with the False ones).
+            PlanNode source = plan;
+            while (source is ProjectNode or DistinctNode or LimitNode
+                || source is SortNode sort && sort.Keys.All(k => k.Value is ColumnReference))
+                source = source switch
+                {
+                    ProjectNode p => p.Input,
+                    SortNode s => s.Input,
+                    DistinctNode d => d.Input,
+                    _ => ((LimitNode)source).Input,
+                };
+            if (source is not (AggregateNode or WindowNode or SetOperationNode))
+                _returnedSource = source;
+        }
         var (columns, rows) = Execute(plan, null);
         // A result writes its Variants out as text, as ACE's expression service does (verified vs ACE).
         if (columns.Any(c => c.Variant))
@@ -361,7 +385,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
         }
     }
 
-    bool IScalarSubqueryRunner.ExecuteExists(SqlStatement query, EvalScope outerScope)
+    bool IScalarSubqueryRunner.ExecuteExists(SqlStatement query, EvalScope outerScope, bool negated)
     {
         // An EXISTS that doesn't depend on the outer row at all has one answer for the whole statement.
         if (HoistedExists.TryGetValue(query, out bool hoisted))
@@ -382,13 +406,13 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
                 : null;
         }
 
-        if (semi is null)
+        if (semi is null || (negated && semi.ComparesTruth))
         {
             return ExistsOf(outerScope);
         }
 
         DecorrelationGate gate = Gate(query);
-        if (gate.Ready)
+        if (gate.Ready || semi.ComparesTruth)
         {
             return semi.Matches(this, new ExpressionEvaluator(outerScope, this, _parameters, _session));
         }
@@ -744,7 +768,29 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
         return table;
     }
 
+    /// <summary>The node whose rows a returned query's select list reads (see <see cref="ExecuteQuery"/>).</summary>
+    private PlanNode? _returnedSource;
+
     private (IReadOnlyList<OutputColumn> Columns, IEnumerable<object?[]> Rows) Execute(PlanNode node, EvalScope? outer)
+    {
+        var (columns, rows) = ExecuteNode(node, outer);
+        if (!ReferenceEquals(node, _returnedSource))
+            return (columns, rows);
+
+        int[] yesNo = [.. Enumerable.Range(0, columns.Count)
+            .Where(i => columns[i].Source is { Column: { Type: LibRed.Catalog.JetDataType.Boolean, IsCalculated: false } })];
+        return yesNo.Length == 0 ? (columns, rows) : (columns, rows.Select(row =>
+        {
+            if (!yesNo.Any(i => row[i] is null))
+                return row;
+            object?[] read = (object?[])row.Clone();
+            foreach (int i in yesNo)
+                read[i] ??= false;
+            return read;
+        }));
+    }
+
+    private (IReadOnlyList<OutputColumn> Columns, IEnumerable<object?[]> Rows) ExecuteNode(PlanNode node, EvalScope? outer)
     {
         switch (node)
         {
@@ -2669,6 +2715,11 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
         Type?[] keyTypes = [.. node.GroupBy.Select((key, i) => node.KeyTypes?[i] ?? ItemConversion(key, inColumns).ConvertTo)];
         int[] keySlots = [.. node.GroupBy.Select(key => key is ColumnReference reference
             ? EvalScope.Locate(inColumns, reference, throwIfAmbiguous: false) : -1)];
+        // A Yes/No column has no Null to group by: ACE refuses the query when a row gives it one, which only the
+        // unmatched side of an outer join can (verified: GROUP BY that column fails with these words, and answers
+        // once every row is matched).
+        bool[] yesNoKey = [.. keySlots.Select(slot => slot >= 0
+            && inColumns[slot].Source is { Column: { Type: LibRed.Catalog.JetDataType.Boolean, IsCalculated: false } })];
         foreach (object?[] row in inRowsEnum)
         {
             rowEval.Rebind(row);
@@ -2679,7 +2730,9 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
                 // the group keeps them for ordering the output, where they used to be evaluated and keyed again.
                 var keyValues = new object?[keyCount];
                 for (int i = 0; i < keyValues.Length; i++)
-                    keyValues[i] = ExpressionEvaluator.SortKey(Compared(ExpressionEvaluator.AsColumnType(
+                    keyValues[i] = yesNoKey[i] && row[keySlots[i]] is null
+                        ? throw new InvalidOperationException("No current record.")
+                        : ExpressionEvaluator.SortKey(Compared(ExpressionEvaluator.AsColumnType(
                         keySlots[i] >= 0 ? row[keySlots[i]] : rowEval.Evaluate(node.GroupBy[i]), keyTypes[i], currency: false),
                         keyByText[i]), TextComparer);
                 var key = new GroupKey(keyValues, TextComparer);

@@ -161,8 +161,11 @@ internal interface IScalarSubqueryRunner
     /// <summary>The subquery's single value, correlated to <paramref name="outerScope"/>.</summary>
     object? ExecuteScalar(SqlStatement query, EvalScope outerScope);
 
-    /// <summary>True when the (possibly correlated) subquery returns at least one row.</summary>
-    bool ExecuteExists(SqlStatement query, EvalScope outerScope);
+    /// <summary>True when the (possibly correlated) subquery returns at least one row. <paramref name="negated"/>
+    /// says the question is NOT EXISTS, which ACE answers by comparing the correlation as written where EXISTS
+    /// looks the outer value up in the subquery's column (verified: against a Yes/No column, EXISTS finds 1 and 2
+    /// with True and NOT EXISTS still counts them as unmatched).</summary>
+    bool ExecuteExists(SqlStatement query, EvalScope outerScope, bool negated = false);
 
     /// <summary>The values of the first column of the (possibly correlated) subquery — for <c>IN (subquery)</c>.</summary>
     IEnumerable<object?> ExecuteColumn(SqlStatement query, EvalScope outerScope);

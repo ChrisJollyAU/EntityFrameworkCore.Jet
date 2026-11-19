@@ -163,11 +163,70 @@ internal static class IndexSelection
         };
     }
 
+    /// <summary>
+    /// <paramref name="predicate"/> with each comparison ACE answers from an index a Yes/No column leads — <c>=</c>,
+    /// <c>&lt;</c>, <c>&gt;</c>, <c>&lt;=</c>, <c>&gt;=</c>, IN and BETWEEN, alone or under AND and OR — taking the
+    /// value it compares the column with by its truth, as the seek of that index takes it.
+    /// </summary>
+    /// <remarks>Verified vs ACE, with the column indexed and not: indexed, <c>Y = 2</c>, <c>Y IN (2)</c> and a
+    /// correlated <c>s.Y = t.V</c> with <c>t.V</c> 1 or 2 find the True rows, where unindexed they find none.
+    /// <c>&lt;&gt;</c> and anything under NOT are not answered from the index and compare as numbers either way, and so
+    /// does a written Decimal (<c>Y = 2.5</c> finds nothing) and a Decimal column, though not a Decimal the statement
+    /// computes or is passed. An index the column does not lead changes nothing.</remarks>
+    private static Expression SoughtByTruth(Expression predicate, string alias, TableDefinition def, HashSet<string> outer)
+    {
+        return predicate switch
+        {
+            BinaryExpression { Operator: BinaryOperator.And or BinaryOperator.Or } b => b with
+            {
+                Left = SoughtByTruth(b.Left, alias, def, outer),
+                Right = SoughtByTruth(b.Right, alias, def, outer),
+            },
+            BinaryExpression
+            {
+                Operator: BinaryOperator.Equal or BinaryOperator.LessThan or BinaryOperator.LessThanOrEqual
+                    or BinaryOperator.GreaterThan or BinaryOperator.GreaterThanOrEqual
+            } b => Sought(b.Left) && Seekable(b.Right, outer) ? ByTruth(b, b.Right, value => b with { Right = value })
+                : Sought(b.Right) && Seekable(b.Left, outer) ? ByTruth(b, b.Left, value => b with { Left = value })
+                : b,
+            InListExpression { Negated: false } list when Sought(list.Value) && list.Items.All(item => Seekable(item, outer))
+                => list with { Items = [.. list.Items.Select(item => ByTruth(item, item, value => value))] },
+            BetweenExpression { Negated: false } between
+                when Sought(between.Value) && Seekable(between.Low, outer) && Seekable(between.High, outer)
+                => between with
+                {
+                    Low = ByTruth(between.Low, between.Low, value => value),
+                    High = ByTruth(between.High, between.High, value => value),
+                },
+            _ => predicate,
+        };
+
+        bool Sought(Expression e) => Column(e, alias, def) is { } reference
+            && def.FindColumn(reference.Column) is { Type: JetDataType.Boolean } column && LeadsIndex(def, column);
+
+        // What is written in place of `unchanged` once `value` is taken by its truth. A written Null, Boolean,
+        // Decimal or text stays as written. A column's value is not known to be a Decimal or text until a row gives
+        // it, so VarType decides then (8 is vbString, 14 vbDecimal, which a Currency is not): those keep what was
+        // written — a text column beside a Yes/No column is still the type mismatch it was.
+        static Expression ByTruth(Expression unchanged, Expression value, Func<Expression, Expression> withValue) => value switch
+        {
+            LiteralExpression { Value: null or bool or decimal or string } => unchanged,
+            ColumnReference => new FunctionCall("IIf",
+            [
+                new InListExpression(new FunctionCall("VarType", [value]), [new LiteralExpression(8), new LiteralExpression(14)], false),
+                unchanged,
+                withValue(new FunctionCall("CBool", [value])),
+            ]),
+            _ => withValue(new FunctionCall("CBool", [value])),
+        };
+    }
+
     private static FilterNode RewriteFilterOverScan(FilterNode filter, ScanNode scan, JetDatabase database, HashSet<string> outer)
     {
         if (ExternalDatabases.Open(database, scan.Database).Catalog.FindTable(scan.Table) is not { } def)
             return filter;
         string alias = scan.Alias ?? scan.Table;
+        filter = filter with { Predicate = SoughtByTruth(filter.Predicate, alias, def, outer) };
         var conjuncts = Conjuncts(filter.Predicate).ToList();
 
         // 1. Equality seek. Collect every `col = value` where col is a column of this scan and value is
@@ -183,7 +242,13 @@ internal static class IndexSelection
                 Column(eq.Left, alias, def) is { } c1 && Seekable(eq.Right, outer) ? (c1, eq.Right)
                 : Column(eq.Right, alias, def) is { } c2 && Seekable(eq.Left, outer) ? (c2, eq.Left)
                 : null;
-            if (match is { } m)
+            // `col = True` tests the column's truth rather than comparing it (ExpressionEvaluator.TruthTest; verified
+            // vs ACE, with and without an index: -1, 1 and 2 all qualify), so on any column but a Yes/No it selects
+            // rows no single key holds and is left to the filter.
+            if (match is { } m
+                && !(m.value is LiteralExpression { Value: true }
+                    && def.Columns.Any(c => c.Type != JetDataType.Boolean
+                        && string.Equals(c.Name, m.col.Column, StringComparison.OrdinalIgnoreCase))))
                 equalities.TryAdd(m.col.Column, m.value);
         }
         if (equalities.Count > 0)
@@ -430,7 +495,9 @@ internal static class IndexSelection
     /// <summary>
     /// <paramref name="on"/> with each <c>Single = Double</c> between the join's two sides compared as ACE compares it:
     /// in the type of the join's inner table, the one ACE looks rows up in. Where that is the Double, the Single is
-    /// widened; where it is the Single, the conjunct compares as Singles as written.
+    /// widened; where it is the Single, the conjunct compares as Singles as written. Likewise a number or date beside
+    /// a Yes/No column: where the inner table is the Yes/No's, the number is compared by its truth (verified vs
+    /// ACE: 1 and 2 join True); where it is the number's, the Yes/No is -1 or 0 as written.
     /// </summary>
     /// <remarks>Measured against ACE, with tables of 1 to 50 rows: an outer join's inner table is its optional side;
     /// an inner or comma join's is the side with an index on its column, else the side with more rows, else the
@@ -452,8 +519,16 @@ internal static class IndexSelection
                 return conjunct;
 
             bool singleLeft = lc.Column.Type == JetDataType.Single;
-            if (!(singleLeft ? rc.Column.Type == JetDataType.Double
-                    : lc.Column.Type == JetDataType.Double && rc.Column.Type == JetDataType.Single))
+            bool singleDouble = singleLeft ? rc.Column.Type == JetDataType.Double
+                : lc.Column.Type == JetDataType.Double && rc.Column.Type == JetDataType.Single;
+            // A number or date beside a Yes/No column: looked up in the Yes/No column it is compared by its truth,
+            // so 1 and 2 join True as -1 does; looked up the other way the Yes/No is the number -1 or 0. A Decimal
+            // is compared as a number either way.
+            bool yesNoLeft = lc.Column.Type == JetDataType.Boolean;
+            JetDataType beside = (yesNoLeft ? rc : lc).Column.Type;
+            bool yesNo = yesNoLeft != (rc.Column.Type == JetDataType.Boolean) && beside != JetDataType.FixedPoint
+                && Classify(beside) is TypeKind.Numeric or TypeKind.Temporal;
+            if (!singleDouble && !yesNo)
                 return conjunct;
 
             bool innerLeft = kind switch
@@ -463,6 +538,15 @@ internal static class IndexSelection
                 _ => LeadsIndex(lc.Table, lc.Column) != LeadsIndex(rc.Table, rc.Column) ? LeadsIndex(lc.Table, lc.Column)
                     : Rows(lc) != Rows(rc) ? Rows(lc) > Rows(rc) : true,
             };
+            if (yesNo)
+            {
+                if (innerLeft != yesNoLeft)
+                    return conjunct;
+                widened = true;
+                ColumnReference number = yesNoLeft ? r : l;
+                Expression truth = new FunctionCall("CBool", [number]);
+                return ReferenceEquals(eq.Left, number) ? eq with { Left = truth } : eq with { Right = truth };
+            }
             if (innerLeft == singleLeft)
                 return conjunct;
 

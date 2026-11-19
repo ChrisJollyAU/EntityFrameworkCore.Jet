@@ -1110,15 +1110,20 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
     }
 
     /// <summary>A Byte written to a row takes the whole number's low byte, rounded half to even first, rather than
-    /// refusing one past its range (verified vs ACE, for numbers and text alike: 256 stores 0, -1 255, 300 44 and
-    /// 255.5 0). Done to the row's values before anything is encoded, so the row and every index key carry the
-    /// same byte — and only on a write: a seek for 300 finds nothing, not the 44 a write of 300 stores.</summary>
+    /// refusing one past its range (verified vs ACE, for numbers, text and a Boolean alike: 256 stores 0, -1 and True
+    /// 255, 300 44 and 255.5 0). Done to the row's values before anything is encoded, so the row and every index key
+    /// carry the same byte — and only on a write: a seek for 300 finds nothing, not the 44 a write of 300 stores.
+    /// <para>A Null written to a Yes/No column is the False its row stores, here for the same reason: a required
+    /// column, every index — unique, DISALLOW NULL or IGNORE NULL — and a CHECK all see False, never a Null
+    /// (verified vs ACE: a second Null is a duplicate key, and <c>CHECK (F IS NULL)</c> refuses it).</para></summary>
     private void WrapBytes(object?[] values)
     {
         foreach (ColumnDef column in _table.Columns)
-            if (column.Type == JetDataType.Byte && values[column.Index] is { } value and not (byte or bool))
+            if (column.Type == JetDataType.Byte && values[column.Index] is { } value and not byte)
                 values[column.Index] = unchecked((byte)Convert.ToInt64(
                     Types.JetTypeCodec.NumberFromText(JetDataType.Byte, value), CultureInfo.InvariantCulture));
+            else if (column.Type == JetDataType.Boolean && !column.IsCalculated && values[column.Index] is null or DBNull)
+                values[column.Index] = false;
     }
 
     /// <summary>Writes an oversized calculated result to an LVAL page and returns its in-row descriptor.

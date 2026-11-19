@@ -310,8 +310,21 @@ Points verified against ACE that aren't obvious from that page:
 - **A whole-number column rounds half to even**, from a number or text alike (verified: `'2.5'` stores 2, `'3.5'` 4).
   A **Byte keeps the low byte** of that whole number rather than refusing one past its range (verified, on
   `INSERT`: 256 stores 0, -1 255, 300 44, 255.5 0); `SHORT` and `LONG` refuse one past theirs.
+- **A Boolean stored into a column that is not Yes/No is the Int16 -1 or 0, and from there that number** (verified,
+  on `INSERT`, `UPDATE`, `INSERT … SELECT` and as a parameter: `True` stores what `CInt(True)` stores — -1 in a
+  number, 255 in a `BYTE`, `-1` in text, 1899-12-29 in a date). A Yes/No column retyped by `ALTER COLUMN` converts
+  the same way, and its True becomes 255 in a `BYTE` where a `SHORT` holding -1 fails the same `ALTER`.
+- **A number stored into a binary column is its own little-endian bytes** (verified, on `INSERT`, `UPDATE`, a
+  `DEFAULT` and `ALTER COLUMN`, into `BINARY`, `VARBINARY` and `LONGBINARY`): an Int16 two — so `True` stores
+  `FF FF` — a Long and a stored Byte four, a Single four, a Double and a date (its serial) eight; a fixed-width
+  column zero-pads it and one too narrow refuses it. A Decimal stores the UTF-16 bytes of its text, as a string does.
+- **A Long or a Byte stored into a GUID column is the GUID's first four bytes** (verified: 1 stores
+  `{00000001-0000-0000-0000-000000000000}`, -1 `{FFFFFFFF-0000-…}`), and **text that is not a GUID stores the zero
+  GUID**. An Int16 — a Boolean among them — a Single, a Double and a Currency are refused.
 - **A Yes/No column stores whether the number rounded half to even is not 0** (verified: 0.5, -0.5 and 0.0001
-  store False; 0.6, 1.5 and 2.5 True).
+  store False; 0.6, 1.5 and 2.5 True). **A Null written to it is stored as False, and is False to everything that
+  checks the row** (verified): a `NOT NULL` Yes/No accepts it, a unique index refuses a second one as a duplicate
+  key, an `IGNORE NULL` index holds its key, and `CHECK (F IS NULL)` refuses it.
 - **Narrowing an existing column is checked against its rows.** `ALTER TABLE … ALTER COLUMN c TEXT(5)` on a
   column holding wider values is refused rather than leaving rows that violate the declaration — and so is a
   retype whose converted values are too wide: a Memo or a `LONG` to `TEXT(1)`, a `LONG` to `BINARY(1)`. ACE

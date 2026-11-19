@@ -50,7 +50,8 @@ internal static class SubqueryCorrelation
         SelectStatement subquery,
         IReadOnlyList<OutputColumn> outerColumns,
         HashSet<string> outerAliases,
-        JetDatabase database)
+        JetDatabase database,
+        bool lookup = false)
     {
         if (subquery is not { From: not null })
         {
@@ -100,7 +101,7 @@ internal static class SubqueryCorrelation
                 && Orient(left, right, innerAliases, outerAliases) is var (inner, outer)
                 && inner is ColumnReference innerCol
                 && (!fromHaving || IsGroupingKey(inner, subquery.GroupBy))
-                && SameKind(innerCol, plan, database, outer, outerColumns, out Type? keyType))
+                && SameKind(innerCol, plan, database, outer, outerColumns, lookup, out Type? keyType))
             {
                 innerKeys.Add(inner);
                 outerKeys.Add(outer);
@@ -222,7 +223,9 @@ internal static class SubqueryCorrelation
     ///     <c>'5' ≠ '5.0'</c>), so a cross-kind correlation must stay a per-row comparison.
     ///     <paramref name="keyType" /> is the type both sides are hashed as where a Single meets another number, as
     ///     the per-row comparison compares them (measured against ACE): as Singles, but as Doubles where the
-    ///     subquery's column is an indexed Double, which the comparison seeks.
+    ///     subquery's column is an indexed Double, which the comparison seeks. <paramref name="lookup" /> says the
+    ///     subquery asks only whether a matching row exists — EXISTS, IN — which ACE answers by looking the outer
+    ///     value up in the subquery's column, in that column's type.
     /// </summary>
     internal static bool SameKind(
         ColumnReference innerCol,
@@ -230,6 +233,7 @@ internal static class SubqueryCorrelation
         JetDatabase database,
         Expression outer,
         IReadOnlyList<OutputColumn> outerColumns,
+        bool lookup,
         out Type? keyType)
     {
         keyType = null;
@@ -246,11 +250,22 @@ internal static class SubqueryCorrelation
             return false;
         }
 
-        Type? clr = outerColumns
-            .Where(c => string.Equals(c.Name, outerCol.Column, StringComparison.OrdinalIgnoreCase)
-                && (outerCol.Table is null || string.Equals(c.Qualifier, outerCol.Table, StringComparison.OrdinalIgnoreCase)))
-            .Select(c => c.ClrType)
-            .FirstOrDefault();
+        OutputColumn outerColumn = outerColumns.FirstOrDefault(
+            c => string.Equals(c.Name, outerCol.Column, StringComparison.OrdinalIgnoreCase)
+                && (outerCol.Table is null || string.Equals(c.Qualifier, outerCol.Table, StringComparison.OrdinalIgnoreCase)));
+        Type? clr = outerColumn.ClrType;
+
+        // A number or date looked up in a Yes/No column is compared by its truth, so both sides are hashed as
+        // Booleans (verified vs ACE: EXISTS (… WHERE s.Y = t.V) holds for a t.V of 1 or 2 where s.Y is True). A
+        // Decimal is compared as the number it is; a Currency is not a Decimal here.
+        if (lookup && inner.Column.Type == JetDataType.Boolean && clr is not null
+            && (Nullable.GetUnderlyingType(clr) ?? clr) is var looked && looked != typeof(bool)
+            && (looked == typeof(DateTime)
+                || (KindOf(looked) == IndexSelection.TypeKind.Numeric && (looked != typeof(decimal) || outerColumn.Currency))))
+        {
+            keyType = typeof(bool);
+            return true;
+        }
 
         if (clr is null || KindOf(clr) != innerKind)
         {

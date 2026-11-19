@@ -395,13 +395,6 @@ public static class JetTypeCodec
     internal static object ToStoredValue(ColumnDef column, JetDataType type, object value)
     {
         var c = System.Globalization.CultureInfo.InvariantCulture;
-
-        // Jet represents a boolean as -1 (true) / 0 (false). EF maps a CLR bool onto a numeric
-        // (smallint) column, so a bool value here targets a numeric column — normalise it to the Jet
-        // form so what we write matches Access (which also stores -1). (A real Boolean/YESNO column is
-        // carried in the null bitmap and never reaches this method.)
-        if (value is bool boolean)
-            value = (short)(boolean ? -1 : 0);
         value = NumberFromText(type, value);
 
         return type switch
@@ -423,6 +416,12 @@ public static class JetTypeCodec
                 Guid g => g,
                 byte[] b when b.Length == 16 => new Guid(b),
                 string s when TryParseGuid(s, out Guid parsed) => parsed,
+                // Verified vs ACE: a Long or a Byte is the GUID's first four bytes (1 stores {00000001-0000-…},
+                // -1 {FFFFFFFF-0000-…}), and text that is not a GUID the zero GUID. An Int16, so a Boolean too, a
+                // Single, a Double and a Currency are refused.
+                int n => new Guid(n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+                byte n => new Guid(n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+                string => Guid.Empty,
                 _ => throw new NotSupportedException(
                     $"Cannot store {value.GetType().Name} in GUID column '{column.Name}'."),
             },
@@ -446,8 +445,14 @@ public static class JetTypeCodec
     /// Decimal holds it — and a date as its OLE Automation serial (verified vs ACE: <c>Time()</c> at 20:58 into a
     /// LONG stores 1, into a DOUBLE its day fraction). Anything else is returned as it is.
     /// </summary>
+    /// <remarks>A Boolean bound for any column is first the Int16 -1 or 0 (VARIANT_BOOL), and from there exactly that
+    /// number (verified vs ACE: True stores what <c>CInt(True)</c> stores — 255 in a BYTE, -1 in a number, "-1" in
+    /// text, 1899-12-29 in a date). A Yes/No column's own value lives in the null bitmap and is read by
+    /// <see cref="LibRed.Storage.RowCodec.IsTruthy"/> before it gets here.</remarks>
     internal static object NumberFromText(JetDataType type, object value)
     {
+        if (value is bool boolean)
+            value = (short)(boolean ? -1 : 0);
         if (type is not (JetDataType.Byte or JetDataType.Int16 or JetDataType.Int32 or JetDataType.Int64
                 or JetDataType.Single or JetDataType.Double or JetDataType.Currency or JetDataType.FixedPoint))
             return value;
@@ -593,13 +598,24 @@ public static class JetTypeCodec
     /// <remarks>The fallback names the column rather than hard-casting: a cast raised
     /// <see cref="InvalidCastException"/>, which names nothing and is indistinguishable from a bug in the
     /// writer. Same fix as the GUID case above.</remarks>
+    /// <remarks>A <b>number</b> stores its own little-endian bytes (verified vs ACE, on INSERT, UPDATE, a DEFAULT
+    /// and ALTER COLUMN alike): an Int16 two — a Boolean is the Int16 -1 or 0, so True stores <c>FFFF</c> — an
+    /// Int32 and a Byte four, a Single four, a Double and a date (its serial) eight. A Decimal stores the bytes of
+    /// its text, as a string does.</remarks>
     private static byte[] AsBinary(ColumnDef column, object value) => value switch
     {
         byte[] bytes => bytes,
         string text => Encoding.Unicode.GetBytes(text),
+        short number => BitConverter.GetBytes(number),
+        int number => BitConverter.GetBytes(number),
+        byte number => BitConverter.GetBytes((int)number),
+        float number => BitConverter.GetBytes(number),
+        double number => BitConverter.GetBytes(number),
+        DateTime date => BitConverter.GetBytes(date.ToOADate()),
+        decimal number => Encoding.Unicode.GetBytes(VbaText.Of(number)),
         _ => throw new NotSupportedException(
             $"Cannot store {value.GetType().Name} in {column.Type} column '{column.Name}': a binary column "
-            + "takes a byte array, or a string (stored as its UTF-16LE bytes)."),
+            + "takes a byte array, a string (stored as its UTF-16LE bytes), or a number (stored as its own bytes)."),
     };
 
     /// <summary>The OLE-automation epoch (1899-12-30), which is also Jet's zero date and the base for

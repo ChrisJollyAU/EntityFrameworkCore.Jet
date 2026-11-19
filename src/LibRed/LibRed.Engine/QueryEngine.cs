@@ -73,7 +73,7 @@ public sealed class QueryEngine
         var executor = new QueryExecutor(_database, parameters, _session);
         return bound.Statement is SystemVariableSelectStatement sysSelect
             ? executor.ExecuteSystemVariableSelect(sysSelect)
-            : executor.ExecuteQuery(PlanWithIndexes(bound));
+            : executor.ExecuteQuery(PlanWithIndexes(bound), returned: true);
     }
 
     /// <summary>
@@ -198,7 +198,7 @@ public sealed class QueryEngine
                 return ExecuteWritingStatement(statement, parameters);
             case SelectStatement or SetOperationStatement or TransformStatement:
                 return new CommandResult(
-                    new QueryExecutor(_database, parameters, _session).ExecuteQuery(PlanWithIndexes(new BoundStatement(statement))), -1);
+                    new QueryExecutor(_database, parameters, _session).ExecuteQuery(PlanWithIndexes(new BoundStatement(statement)), returned: true), -1);
             case TransactionControlStatement txnControl:
                 // Transaction control manages the transaction itself — it must NOT go through the implicit
                 // per-statement wrap below (which would open/commit a transaction around it).

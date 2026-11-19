@@ -73,6 +73,8 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             .Where(c => c.Default is not null)
             .Select(c => (c.Name, DefaultSql: c.Default!))
             .ToList();
+        foreach ((string name, string defaultSql) in defaults)
+            CheckDefault(columns.First(c => c.Name == name).Type, name, defaultSql);
 
         var checks = statement.CheckConstraints
             .Select((ck, i) => (Name: ck.Name ?? Generated("CK", i), ck.Expression,
@@ -204,6 +206,28 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         return parsed is LiteralExpression || parsed is ColumnReference c && ExpressionEvaluator.IsNiladicFunction(c)
             ? parsed
             : new LiteralExpression(t);
+    }
+
+    /// <summary>Refuses a DEFAULT its column cannot take when it is declared, rather than when a row first needs it
+    /// (verified vs ACE, for CREATE TABLE, ADD COLUMN and ALTER COLUMN alike: <c>DEFAULT 300</c>, <c>DEFAULT True</c>
+    /// and <c>DEFAULT 'abc'</c> on a BYTE fail the statement, as <c>DEFAULT True</c> does on a GUID). It is converted
+    /// as ALTER COLUMN converts a stored value — a Byte's range checked, where a write keeps the low byte — with a
+    /// Boolean the Int16 it is everywhere. A default that cannot be worked out here is left to the insert.</summary>
+    private void CheckDefault(JetDataType type, string column, string defaultSql)
+    {
+        if (PropertyBlob.IsGenUniqueId(defaultSql))
+            return;
+        object? value;
+        try
+        {
+            value = new ExpressionEvaluator(new EvalScope([], [], null), _scalarRunner, parameters: _parameters)
+                .Evaluate(ParseDefaultExpression(defaultSql));
+        }
+#pragma warning disable CA1031 // a default that cannot be evaluated when declared is evaluated, and refused, when a row takes it
+        catch (Exception) { return; }
+#pragma warning restore CA1031
+        if (value is not null)
+            _ = SchemaEditor.ConvertValue(LibRed.Storage.Types.JetTypeCodec.NumberFromText(type, value), type, column);
     }
 
     /// <summary>Rejects an insert that leaves a NOT NULL (Required) column null after defaults are applied —
@@ -676,6 +700,12 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     private void UpdateRow(Table table, RowId id, object?[] original, object?[] values,
         Dictionary<(int Tdef, RowId Id), object?[]>? stillToWrite, bool cascaded)
     {
+        // A Null written to a Yes/No column is the False its row stores (verified vs ACE, a required column
+        // included), and every rule below sees that — as an inserted row's do, from RowInserter.
+        foreach (ColumnDef column in table.Definition.Columns)
+            if (column.Type == JetDataType.Boolean && !column.IsCalculated && values[column.Index] is null)
+                values[column.Index] = false;
+
         var changed = new HashSet<int>();
         for (int i = 0; i < values.Length; i++)
             if (!Equals(original[i], values[i])) changed.Add(i);
@@ -874,6 +904,8 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         ColumnDefinition column = add.Column;
         // NOT NULL and DEFAULT are written to the column's LvProp properties (Required / DefaultValue).
         ColumnSpec spec = AccessTypeMapper.ToColumnSpec(column);
+        if (column.Default is not null)
+            CheckDefault(spec.Type, spec.Name, column.Default);
         if (!_database.AddColumn(table, spec, column.Default))
             throw new InvalidOperationException($"ALTER TABLE '{table}' ADD COLUMN '{column.Name}': the column already exists.");
         // The column's constraints apply to it as in CREATE TABLE — a primary key, a unique index, a relationship —
@@ -951,7 +983,10 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         var colDef = new ColumnDefinition(alter.Field, alter.TypeName, alter.Size, alter.Scale, NotNull: false, PrimaryKey: false,
             Identity: alter.Identity);
         // A DEFAULT the new type refuses fails the statement, and its transaction takes the type change back with it.
-        _database.AlterColumn(table, alter.Field, AccessTypeMapper.ToColumnSpec(colDef));
+        ColumnSpec spec = AccessTypeMapper.ToColumnSpec(colDef);
+        if (alter.Default is not null)
+            CheckDefault(spec.Type, alter.Field, alter.Default);
+        _database.AlterColumn(table, alter.Field, spec);
         // Apply DEFAULT before Required so the column's property map keeps ACE's order (DefaultValue, then Required).
         if (alter.Default is not null)   // ALTER COLUMN … DEFAULT: set the column's default after the type change
             _database.SetColumnDefault(table, alter.Field, alter.Default);
@@ -962,6 +997,8 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
 
     private int SetColumnDefault(string table, AlterColumnSetDefaultAction set)
     {
+        if (_database.Catalog.FindTable(table)?.FindColumn(set.Field) is { } column)
+            CheckDefault(column.Type, column.Name, set.Default);
         _database.SetColumnDefault(table, set.Field, set.Default);
         return 0;
     }

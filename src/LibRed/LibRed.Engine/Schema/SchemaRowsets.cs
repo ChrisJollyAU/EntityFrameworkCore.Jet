@@ -443,7 +443,9 @@ public static class SchemaRowsets
 
             described.Add(new Execution.ResultColumn(
                 column.Name, clrType, owner.Name, c.Name,
-                AllowNull: Nullable(c),
+                // A Yes/No column is the one place a reader's schema and the Columns collection differ: ACE's
+                // reader calls it nullable, Required or not, where its Columns row never does (verified).
+                AllowNull: c.Type == JetDataType.Boolean || Nullable(c),
                 IsExpression: false,
                 IsAutoIncrement: c.IsAutoNumber,
                 IsKey: owner.Indexes.Any(ix => ix.IsPrimaryKey && Covers(ix, c)),
