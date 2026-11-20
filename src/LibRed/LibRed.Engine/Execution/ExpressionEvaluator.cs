@@ -1051,20 +1051,8 @@ internal sealed partial class ExpressionEvaluator(
             || t == typeof(float) || t == typeof(double) || (t == typeof(decimal) && currencyColumn);
     }
 
-    /// <summary>Whether an expression is a Currency (<see cref="IsCurrency(Expression, IReadOnlyList{OutputColumn},
-    /// Func{Expression, Type?}?)"/>) over this scope's columns, worked out once per node as <see cref="ClassOf"/> is.</summary>
-    private bool IsCurrency(Expression expression)
-    {
-        // IDE0028's only fix here is `[]`, which would drop the comparer and key the nodes structurally.
-#pragma warning disable IDE0028
-        _currency ??= new Dictionary<Expression, bool>(ReferenceEqualityComparer.Instance);
-#pragma warning restore IDE0028
-        if (!_currency.TryGetValue(expression, out bool currency))
-            _currency[expression] = currency = IsCurrency(expression, scope.AllColumns());
-        return currency;
-    }
-
-    private Dictionary<Expression, bool>? _currency;
+    /// <summary>Whether an expression is a Currency over this scope's columns (<see cref="ClassOf"/>).</summary>
+    private bool IsCurrency(Expression expression) => ClassOf(expression) == NumberClass.Currency;
 
     /// <summary>Whether an expression is a Currency: a Currency column, CCur, or arithmetic that keeps one —
     /// <paramref name="expression"/> over <paramref name="columns"/> (<see cref="NumberTypeOf"/>), with
@@ -2597,10 +2585,8 @@ internal sealed partial class ExpressionEvaluator(
     /// BETWEEN's bounds and IS [NOT] DISTINCT FROM compare through here.</summary>
     private int CompareAsKinds(Expression leftOperand, object left, Expression rightOperand, object right)
     {
-        bool currencyOnLeft = left is decimal && right is string or char or double or float && leftOperand is ColumnReference
-            && (right is string or char ? NotWritten(rightOperand) : rightOperand is ParameterExpression) && IsCurrency(leftOperand);
-        if (currencyOnLeft || (right is decimal && left is string or char or double or float && rightOperand is ColumnReference
-            && (left is string or char ? NotWritten(leftOperand) : leftOperand is ParameterExpression) && IsCurrency(rightOperand)))
+        bool currencyOnLeft = CurrencyBeside(left, leftOperand, right, rightOperand);
+        if (currencyOnLeft || CurrencyBeside(right, rightOperand, left, leftOperand))
         {
             object given = currencyOnLeft ? right : left;
             try
@@ -2638,8 +2624,8 @@ internal sealed partial class ExpressionEvaluator(
         // in an expression, is what ACE makes of it outside an index (verified vs ACE): any text is 0 to the Large
         // Number, and the date column reads it as storing it there reads it, text that is not a date being a type
         // mismatch.
-        bool columnOnLeft = left is long or DateTime && leftOperand is ColumnReference && right is string or char && NotWritten(rightOperand);
-        if (columnOnLeft || (right is long or DateTime && rightOperand is ColumnReference && left is string or char && NotWritten(leftOperand)))
+        bool columnOnLeft = TextBesideColumn(left, leftOperand, right, rightOperand);
+        if (columnOnLeft || TextBesideColumn(right, rightOperand, left, leftOperand))
         {
             object column = columnOnLeft ? left : right, given = columnOnLeft ? right : left;
             object read = column is long ? 0L : AsDateColumn(given);
@@ -2659,6 +2645,14 @@ internal sealed partial class ExpressionEvaluator(
             return keyOnLeft ? -1 : 1;
         (object l, object r) = Comparable(left, right);
         return Compare(l, r, Text);
+
+        // Each rule is written with the column first; the caller asks it both ways round.
+        bool CurrencyBeside(object column, Expression columnOperand, object given, Expression givenOperand) =>
+            column is decimal && given is string or char or double or float && columnOperand is ColumnReference
+            && (given is string or char ? NotWritten(givenOperand) : givenOperand is ParameterExpression) && IsCurrency(columnOperand);
+
+        static bool TextBesideColumn(object column, Expression columnOperand, object given, Expression givenOperand) =>
+            column is long or DateTime && columnOperand is ColumnReference && given is string or char && NotWritten(givenOperand);
     }
 
     /// <summary>Whether an operand is a value the statement computes, rather than a number as it writes one —
@@ -2734,9 +2728,8 @@ internal sealed partial class ExpressionEvaluator(
                     IndexSelection.TypeKind.Temporal => AsDateColumn(value),
                     IndexSelection.TypeKind.Guid => JetTypeCodec.ToStoredValue(column, column.Type, value),
                     // Without the zero padding a fixed-length column adds when it stores the value (verified vs ACE).
-                    IndexSelection.TypeKind.Binary => JetTypeCodec.AsBinary(IsCurrency(operand, []) && value is decimal number
-                            ? JetTypeCodec.CurrencyAsStored(column.Type, number)
-                            : JetTypeCodec.NumberFromText(column.Type, value), currency: false)
+                    IndexSelection.TypeKind.Binary => JetTypeCodec.AsBinary(JetTypeCodec.NumberFromText(
+                            column.Type, JetTypeCodec.CurrencyAsStored(column.Type, value, IsCurrency(operand, []))), currency: false)
                         ?? throw JetTypeCodec.CannotStore(column, column.Type, value),
                     _ => column.Type switch
                     {

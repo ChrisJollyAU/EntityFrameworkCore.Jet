@@ -27,7 +27,7 @@ internal static class IndexSelection
         /// <summary>The body of a row-returning positive EXISTS, looked up for each outer row.</summary>
         ExistsLookup,
         /// <summary>The inner table of a join, looked up for each row of the other side: its own comparisons with a
-        /// value of the statement are tested on the fetched row as written (plan D §1.2 P3).</summary>
+        /// value of the statement are tested on the fetched row as written.</summary>
         JoinInner,
     }
 
@@ -71,11 +71,10 @@ internal static class IndexSelection
             DistinctNode d => d with { Input = Apply(d.Input, database, outer, lookup, above) },
             DistinctRowNode dr => dr with { Input = Apply(dr.Input, database, outer, lookup, above) },
             LimitNode l => l with { Input = Apply(l.Input, database, outer, lookup, above) },
-            AggregateNode a when HavingBeforeGroups(a, database) is { } moved => moved with
+            AggregateNode a when HavingBeforeGroups(a, database) is var g => g with
             {
-                Input = Apply(moved.Input, database, outer, above: Read(null, Grouped(moved), moved.Input, database)),
+                Input = Apply(g.Input, database, outer, above: Read(null, Grouped(g), g.Input, database)),
             },
-            AggregateNode a => a with { Input = Apply(a.Input, database, outer, above: Read(null, Grouped(a), a.Input, database)) },
             DerivedTableNode dt => dt with { Input = Apply(dt.Input, database, outer) },
             // Must be here, not left to the `_` arm below: that arm does not merely decline to rewrite this
             // node, it stops DESCENDING, so the whole subtree loses index selection. A WindowNode sits directly
@@ -124,21 +123,21 @@ internal static class IndexSelection
 
     /// <summary>
     /// <paramref name="a"/> with each HAVING conjunct that reads only its grouping columns moved into its input, as a
-    /// WHERE is placed (an unqualified column on the source it binds to); null when none moves.
+    /// WHERE is placed (an unqualified column on the source it binds to); <paramref name="a"/> itself when none moves.
     /// ACE applies such a condition to the rows before grouping them, and binds an unqualified column in it to the
     /// one source of the FROM that has a column of that name (verified vs ACE: <c>HAVING Y = 2</c> on an indexed
     /// Yes/No column is answered from the index, as <c>WHERE Y = 2</c> is, over a join as over one table).
     /// </summary>
-    private static AggregateNode? HavingBeforeGroups(AggregateNode a, JetDatabase database)
+    private static AggregateNode HavingBeforeGroups(AggregateNode a, JetDatabase database)
     {
         if (a.Having is null || a.GroupBy.Count == 0)
-            return null;
+            return a;
         var before = new List<Expression>();
         var rest = new List<Expression>();
         foreach (Expression conjunct in Conjuncts(a.Having))
             (!QueryPlanner.HasAggregate(conjunct) && Grouped(conjunct) ? before : rest).Add(conjunct);
         if (before.Count == 0)
-            return null;
+            return a;
 
         return a with
         {
@@ -406,9 +405,7 @@ internal static class IndexSelection
     /// <remarks>Which index ACE reads through beside the outer row's conjuncts is measured for a Yes/No column only. For
     /// any other column the outer row's other conjuncts are left out, so its comparison is taken alike with a
     /// correlation beside it or without one.</remarks>
-    private static bool FromIndex(
-        TableDefinition def, List<(ColumnDef Column, Expression[] Values, bool Equal, bool Joined, bool ColumnLeft)?> restrictions,
-        int at, bool lookup)
+    private static bool FromIndex(TableDefinition def, List<ColumnRestriction?> restrictions, int at, bool lookup)
     {
         var sought = restrictions[at]!.Value;
         bool joined = restrictions.Any(r => r is { Joined: true });
@@ -450,7 +447,7 @@ internal static class IndexSelection
     /// that is not Yes/No or <c>col = False</c> on a text column, which test the column's truth rather than compare
     /// it (ExpressionEvaluator.TruthTest; verified vs ACE, with and without an index: -1, 1 and 2 all qualify for
     /// True, '0' for False), so select rows no single key holds.</summary>
-    internal static (ColumnDef Column, Expression[] Values, bool Equal, bool Joined, bool ColumnLeft)? Restriction(
+    internal static ColumnRestriction? Restriction(
         Expression conjunct, string alias, TableDefinition def, HashSet<string> outer)
     {
         // ColumnLeft: whether the column is a comparison's left operand (an IN's or BETWEEN's always is).
@@ -472,8 +469,14 @@ internal static class IndexSelection
         ColumnDef column = def.FindColumn(reference.Column)!;
         bool truthTested = p.Equal && column.Type != JetDataType.Boolean && p.Values is [LiteralExpression { Value: bool truth }]
             && (truth || Classify(column.Type) == TypeKind.Text);
-        return truthTested ? null : (column, p.Values, p.Equal, p.Values.Any(HasColumnRef), p.ColumnLeft);
+        return truthTested ? null : new ColumnRestriction(column, p.Values, p.Equal, p.Values.Any(HasColumnRef), p.ColumnLeft);
     }
+
+    /// <summary>What a conjunct restricts (<see cref="Restriction"/>): the <paramref name="Column"/>, the
+    /// <paramref name="Values"/> it is compared with, whether it is held to one value (<paramref name="Equal"/>),
+    /// whether a value is the outer row's (<paramref name="Joined"/>), and whether the column is the comparison's left
+    /// operand (<paramref name="ColumnLeft"/>; an IN's or BETWEEN's always is).</summary>
+    internal readonly record struct ColumnRestriction(ColumnDef Column, Expression[] Values, bool Equal, bool Joined, bool ColumnLeft);
 
     /// <summary>
     /// Whether a comparison among <paramref name="rest"/> that an index answers is taken differently with
@@ -490,14 +493,15 @@ internal static class IndexSelection
         if (rest.Count == 0 && byTruth.Count == 0)
             return false;
         Expression beside = QueryPlanner.CombineAnd([.. rest, .. keys]);
-        var tables = BaseTables(plan).Select(t => (t.Alias, Def: ExternalDatabases.Open(database, t.Database).Catalog.FindTable(t.Table)))
-            .Where(t => t.Def is not null).ToList();
+        List<(string Alias, TableDefinition Def)> tables = [.. BaseTables(plan)
+            .Select(t => (t.Alias, Def: ExternalDatabases.Open(database, t.Database).Catalog.FindTable(t.Table)))
+            .Where(t => t.Def is not null).Select(t => (t.Alias, t.Def!))];
         if (byTruth.Count > 0)
         {
             List<Expression> written = [.. Conjuncts(beside)];
             var taken = new HashSet<Expression>(ReferenceEqualityComparer.Instance);
             foreach (var (alias, def) in tables)
-                foreach (var (sought, conjunct) in Conjuncts(SoughtAsIndexed(beside, alias, def!, outer, Reading.ExistsLookup)).Zip(written))
+                foreach (var (sought, conjunct) in Conjuncts(SoughtAsIndexed(beside, alias, def, outer, Reading.ExistsLookup)).Zip(written))
                     if (!ReferenceEquals(sought, conjunct))
                         taken.Add(conjunct);
             if (byTruth.Any(key => !taken.Contains(key)))
@@ -506,8 +510,8 @@ internal static class IndexSelection
         if (rest.Count == 0)
             return false;
         Expression alone = QueryPlanner.CombineAnd(rest);
-        return tables.Any(t => !Conjuncts(SoughtAsIndexed(beside, t.Alias, t.Def!, outer, Reading.Alone)).Take(rest.Count)
-            .SequenceEqual(Conjuncts(SoughtAsIndexed(alone, t.Alias, t.Def!, NoOuter, Reading.Alone))));
+        return tables.Any(t => !Conjuncts(SoughtAsIndexed(beside, t.Alias, t.Def, outer, Reading.Alone)).Take(rest.Count)
+            .SequenceEqual(Conjuncts(SoughtAsIndexed(alone, t.Alias, t.Def, NoOuter, Reading.Alone))));
     }
 
     private static FilterNode RewriteFilterOverScan(FilterNode filter, ScanNode scan, JetDatabase database, HashSet<string> outer, Reading reading)
@@ -730,7 +734,7 @@ internal static class IndexSelection
         bool inner = j.Kind is JoinKind.Inner or JoinKind.Cross;
         PlanNode left = Apply(j.Left, database, outer, inner && innerLeft == true ? Reading.JoinInner : Reading.Alone, below);
         if (j.On is { } joinOn && innerLeft is { } looked)
-            j = j with { On = InInnerType(joinOn, j.Left, j.Right, database, looked) };
+            j = j with { On = InInnerType(joinOn, pairs, looked) };
 
         // A LEFT join preserves the probing left row: ExecuteJoin's seek loop emits its null-padded result
         // when no candidate passes ON. RIGHT/FULL must also preserve unmatched inner rows, so still hash/scan.
@@ -799,12 +803,11 @@ internal static class IndexSelection
     /// a Yes/No column: where the inner table is the Yes/No's, the number is compared by its truth (verified vs
     /// ACE: 1 and 2 join True); where it is the number's, the Yes/No is -1 or 0 as written.
     /// </summary>
-    /// <remarks>Measured against ACE, with tables of 1 to 50 rows: an outer join's inner table is its optional side;
-    /// an inner or comma join's is the side with an index on its column, else the side with more rows, else the
-    /// first. A comparison ACE makes row by row narrows to single precision, as LibRed's does, and a seek of a real
-    /// index converts to that index's type, as LibRed's does.</remarks>
-    // innerLeft: whether the join's inner table is its left side, as InnerIsLeft decides it for the whole join.
-    private static Expression InInnerType(Expression on, PlanNode left, PlanNode right, JetDatabase database, bool innerLeft)
+    /// <remarks>Which side is the inner table is <see cref="InnerIsLeft"/>'s (<paramref name="innerLeft"/>), and
+    /// <paramref name="pairs"/> are the ON's equalities of a column of each side (<see cref="EqualColumn"/>). A
+    /// comparison ACE makes row by row narrows to single precision, as LibRed's does, and a seek of a real index
+    /// converts to that index's type, as LibRed's does.</remarks>
+    private static Expression InInnerType(Expression on, List<ColumnPair> pairs, bool innerLeft)
     {
         bool widened = false;
         List<Expression> conjuncts = [.. Conjuncts(on).Select(InnerType)];
@@ -812,9 +815,10 @@ internal static class IndexSelection
 
         Expression InnerType(Expression conjunct)
         {
-            if (EqualColumn(conjunct, left, right, database) is not { } pair)
+            int at = pairs.FindIndex(p => ReferenceEquals(p.Eq, conjunct));
+            if (at < 0)
                 return conjunct;
-            var (eq, l, r, lc, rc) = pair;
+            var (eq, l, r, lc, rc) = pairs[at];
 
             bool singleLeft = lc.Column.Type == JetDataType.Single;
             bool singleDouble = singleLeft ? rc.Column.Type == JetDataType.Double
@@ -850,10 +854,7 @@ internal static class IndexSelection
 
     /// <summary><paramref name="conjunct"/> where it is an equality of a column of <paramref name="left"/> with a column
     /// of <paramref name="right"/>, each resolved to its base table; else null.</summary>
-    private static (BinaryExpression Eq, ColumnReference L, ColumnReference R,
-        (JetDatabase Database, TableDefinition Table, ColumnDef Column, string? Alias) Lc,
-        (JetDatabase Database, TableDefinition Table, ColumnDef Column, string? Alias) Rc)? EqualColumn(
-        Expression conjunct, PlanNode left, PlanNode right, JetDatabase database)
+    private static ColumnPair? EqualColumn(Expression conjunct, PlanNode left, PlanNode right, JetDatabase database)
     {
         if (conjunct is not BinaryExpression { Operator: BinaryOperator.Equal, Left: ColumnReference a, Right: ColumnReference b } eq)
             return null;
@@ -861,20 +862,23 @@ internal static class IndexSelection
         if (ResolveColumn(l, left, database) is not { } lc || ResolveColumn(r, right, database) is not { } rc
             || ResolveColumn(l, right, database) is not null || ResolveColumn(r, left, database) is not null)
             return null;
-        return (eq, l, r, lc, rc);
+        return new ColumnPair(eq, l, r, lc, rc);
     }
 
-    // Plan D §1.2 P2(b): R, the one side with a restriction an index answers, drives only when the other side O has more
-    // rows than these, e_R being the rows R's restriction is expected to leave. Class ii (a column of R, none of O, is
-    // read above the join): a ∈ [40.8, 44.3) for b = 0.7, b ∈ (0.612, 0.795); class iii (a column of O is read) doubles
-    // it. Class i (COUNT(*), no column of either read): α ∈ [0.18, 0.20).
+    /// <summary>An equality <paramref name="Eq"/> of a column <paramref name="L"/> of a join's left side with a column
+    /// <paramref name="R"/> of its right side, each resolved to its base table (<see cref="EqualColumn"/>).</summary>
+    private readonly record struct ColumnPair(BinaryExpression Eq, ColumnReference L, ColumnReference R, ResolvedColumn Lc, ResolvedColumn Rc);
+
+    // R, the one side with a restriction an index answers, drives only when the other side O has more rows than these,
+    // e_R being the rows R's restriction is expected to leave: A + B·e_R where a column of R and none of O is read above
+    // the join, twice that where a column of O is read, Alpha·e_R where no column of either is (COUNT(*)).
     private const double DriveRowsA = 42.5;
     private const double DriveRowsB = 0.70;
     private const double DriveRowsAlpha = 0.19;
 
     /// <summary>
     /// Whether ACE looks rows up in the left side of a join whose ON holds <paramref name="pairs"/> equal; null when it
-    /// holds no two base columns equal. Measured against ACE (plan D §1.2): an outer join's inner table is its optional
+    /// holds no two base columns equal. Measured against ACE: an outer join's inner table is its optional
     /// side. Of an inner or comma join, a side is lookup-able when an index of it leads with a column of a pair; where
     /// one side is, it is the inner. Where both are and exactly one, R, has a restriction an index answers, R is the
     /// inner unless the other side O has more rows than <see cref="DriveRowsA"/> + <see cref="DriveRowsB"/>·e_R — twice
@@ -885,10 +889,7 @@ internal static class IndexSelection
     /// on a tie the first.
     /// </summary>
     private static bool? InnerIsLeft(
-        List<(BinaryExpression Eq, ColumnReference L, ColumnReference R,
-            (JetDatabase Database, TableDefinition Table, ColumnDef Column, string? Alias) Lc,
-            (JetDatabase Database, TableDefinition Table, ColumnDef Column, string? Alias) Rc)> pairs,
-        JoinKind kind, PlanNode left, PlanNode right, JetDatabase database, HashSet<string> outer, HashSet<string> reads)
+        List<ColumnPair> pairs, JoinKind kind, PlanNode left, PlanNode right, JetDatabase database, HashSet<string> outer, HashSet<string> reads)
     {
         if (pairs.Count == 0)
             return null;
@@ -931,9 +932,10 @@ internal static class IndexSelection
     /// none.</summary>
     private static (double E, bool KeyEqual, bool YesNoEqual)? Restricted(PlanNode side, JetDatabase database, HashSet<string> outer)
     {
-        if (Unsorted(side) is not FilterNode { Input: ScanNode scan } filter
-            || ExternalDatabases.Open(database, scan.Database) is not { } source
-            || source.Catalog.FindTable(scan.Table) is not { } def)
+        if (Unsorted(side) is not FilterNode { Input: ScanNode scan } filter)
+            return null;
+        JetDatabase source = ExternalDatabases.Open(database, scan.Database);
+        if (source.Catalog.FindTable(scan.Table) is not { } def)
             return null;
         string alias = scan.Alias ?? scan.Table;
         var restrictions = Conjuncts(filter.Predicate).Select(c => Restriction(c, alias, def, outer)).ToList();
@@ -942,11 +944,12 @@ internal static class IndexSelection
         {
             if (restrictions[i] is not { Joined: false } r || !FromIndex(def, restrictions, i, lookup: false))
                 continue;
+            var alone = def.Indexes.Where(x => x.Columns.Count == 1 && Position(x, r.Column) == 0).ToList();
             double e = !r.Equal ? 0
-                : def.Indexes.Any(x => x.IsUnique && x.Columns.Count == 1 && Position(x, r.Column) == 0) ? 1
+                : alone.Any(x => x.IsUnique) ? 1
                 : r.Column.Type == JetDataType.Boolean ? Rows(source, def) / 2.0
                 : 0;
-            bool key = r.Equal && def.Indexes.Any(x => x.IsPrimaryKey && x.Columns.Count == 1 && Position(x, r.Column) == 0);
+            bool key = r.Equal && alone.Any(x => x.IsPrimaryKey);
             bool yesNo = r.Equal && r.Column.Type == JetDataType.Boolean;
             found = found is { } f ? (Math.Min(f.E, e), f.KeyEqual || key, f.YesNoEqual || yesNo) : (e, key, yesNo);
         }
@@ -1062,10 +1065,9 @@ internal static class IndexSelection
     /// the source it binds to (a derived table's own alias for a derived-table column); null if it can't be pinned
     /// down (e.g. the projection is a computed expression, or an unqualified name more than one source has), in which
     /// case a join on it is left as a nested loop rather than risk an unsound hash.</summary>
-    internal static (JetDatabase Database, TableDefinition Table, ColumnDef Column, string? Alias)? ResolveColumn(
-        ColumnReference col, PlanNode subtree, JetDatabase database)
+    internal static ResolvedColumn? ResolveColumn(ColumnReference col, PlanNode subtree, JetDatabase database)
     {
-        (JetDatabase, TableDefinition, ColumnDef, string?)? found = null;
+        ResolvedColumn? found = null;
         int sources = 0;
         foreach ((string alias, string table, ExternalDatabase? external) in BaseTables(subtree))
         {
@@ -1076,9 +1078,9 @@ internal static class IndexSelection
                 && def.Columns.FirstOrDefault(cd => string.Equals(cd.Name, col.Column, StringComparison.OrdinalIgnoreCase)) is { } c)
             {
                 if (col.Table is not null)
-                    return (source, def, c, alias);
+                    return new ResolvedColumn(source, def, c, alias);
                 if (sources++ == 0)
-                    found = (source, def, c, alias);
+                    found = new ResolvedColumn(source, def, c, alias);
             }
         }
 
@@ -1090,8 +1092,7 @@ internal static class IndexSelection
                 continue;
             if (DerivedColumn(d, col.Column, database) is { } inner)
             {
-                (JetDatabase, TableDefinition, ColumnDef, string?)? resolved =
-                    ResolveColumn(inner, d.Input, database) is { } r ? (r.Database, r.Table, r.Column, d.Alias) : null;
+                ResolvedColumn? resolved = ResolveColumn(inner, d.Input, database) is { } r ? r with { Alias = d.Alias } : null;
                 if (col.Table is not null)
                     return resolved;
                 if (sources++ == 0)
@@ -1100,6 +1101,11 @@ internal static class IndexSelection
         }
         return sources == 1 ? found : null;
     }
+
+    /// <summary>A base-table <paramref name="Column"/> a column reference resolves to (<see cref="ResolveColumn"/>): its
+    /// <paramref name="Table"/>, that table's <paramref name="Database"/>, and the <paramref name="Alias"/> of the source
+    /// it binds to.</summary>
+    internal readonly record struct ResolvedColumn(JetDatabase Database, TableDefinition Table, ColumnDef Column, string? Alias);
 
     // A derived table is an opaque boundary: its inner tables/aliases are not visible outside it, so BaseTables
     // stops there (DerivedTables handles the derived level separately).

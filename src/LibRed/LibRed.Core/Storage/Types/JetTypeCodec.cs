@@ -450,13 +450,16 @@ public static class JetTypeCodec
     /// a Currency and a Decimal are both <see cref="decimal"/>, and only the statement knows which. A Currency is its
     /// eight-byte scaled integer for a binary column and a type mismatch for a GUID column (verified vs ACE, on INSERT,
     /// INSERT … SELECT, UPDATE, a DEFAULT and ALTER COLUMN: <c>CCur(1)</c> stores <c>10 27 00 00 00 00 00 00</c>, a
-    /// DEFAULT being refused when it is declared); any other column takes it as the number it is.</summary>
-    internal static object CurrencyAsStored(JetDataType type, decimal value) => type switch
-    {
-        JetDataType.Guid => throw TypeMismatch(type, "Currency"),
-        JetDataType.Binary or JetDataType.BigBinary or JetDataType.Ole => AsBinary(value, currency: true)!,
-        _ => value,
-    };
+    /// DEFAULT being refused when it is declared); any other column takes it as the number it is. A value that is not a
+    /// <see cref="decimal"/> the statement types as a Currency (<paramref name="currency"/>) is returned as it is.</summary>
+    [return: System.Diagnostics.CodeAnalysis.NotNullIfNotNull(nameof(value))]
+    internal static object? CurrencyAsStored(JetDataType type, object? value, bool currency) =>
+        !currency || value is not decimal number ? value : type switch
+        {
+            JetDataType.Guid => throw TypeMismatch(type, "Currency"),
+            JetDataType.Binary or JetDataType.BigBinary or JetDataType.Ole => AsBinary(number, currency: true)!,
+            _ => number,
+        };
 
     /// <summary>The low byte of a whole number, as a Byte column takes one written past its range (verified vs ACE:
     /// 256 stores 0, -1 and True 255, 300 44).</summary>

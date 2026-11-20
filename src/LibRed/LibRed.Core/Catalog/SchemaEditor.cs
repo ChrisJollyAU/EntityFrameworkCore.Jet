@@ -2863,9 +2863,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // A Yes/No retyped to BYTE takes the low byte of its -1, as a write of True does, where a number past a
         // byte's range is refused (verified vs ACE: Yes/No True becomes 255, a SHORT -1 fails the ALTER).
         bool yesNo = value is bool;
-        if (currency && value is decimal number)
-            value = Storage.Types.JetTypeCodec.CurrencyAsStored(type, number);
-        value = Storage.Types.JetTypeCodec.NumberFromText(type, value);
+        value = Storage.Types.JetTypeCodec.NumberFromText(type, Storage.Types.JetTypeCodec.CurrencyAsStored(type, value, currency));
         return type switch
         {
             JetDataType.Boolean => Storage.RowCodec.IsTruthy(value),

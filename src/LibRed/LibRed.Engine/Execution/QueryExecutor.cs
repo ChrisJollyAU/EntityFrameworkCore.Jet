@@ -95,21 +95,10 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
 
     // Optimised plans for subqueries, keyed by their AST node (reference identity). A correlated subquery is
     // executed once per outer row, so planning + index selection must be done ONCE, not on every evaluation.
-    // A positive EXISTS's body is planned as a lookup (IndexSelection.Apply), which can answer differently, so a plan is
-    // keyed by whether it is one as well as by its node.
-    private Dictionary<(SqlStatement Query, bool Lookup), PlanNode> SubqueryPlans => field ??= new(SubqueryPlanKey.Instance);
-
-    /// <summary>A subquery plan's key: its AST node by reference identity, and whether it is planned as a lookup.</summary>
-    private sealed class SubqueryPlanKey : IEqualityComparer<(SqlStatement Query, bool Lookup)>
-    {
-        public static readonly SubqueryPlanKey Instance = new();
-
-        public bool Equals((SqlStatement Query, bool Lookup) x, (SqlStatement Query, bool Lookup) y) =>
-            ReferenceEquals(x.Query, y.Query) && x.Lookup == y.Lookup;
-
-        public int GetHashCode((SqlStatement Query, bool Lookup) key) =>
-            HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(key.Query), key.Lookup);
-    }
+    // A positive EXISTS's body is planned as a lookup (IndexSelection.Apply), which can answer differently, so its
+    // plans are kept apart.
+    private Dictionary<SqlStatement, PlanNode> SubqueryPlans => field ??= new(ReferenceEqualityComparer.Instance);
+    private Dictionary<SqlStatement, PlanNode> LookupPlans => field ??= new(ReferenceEqualityComparer.Instance);
 
     // A correlated plan is executed once per outer row. Its opened sources belong to this executor just
     // as its plan and projection schema do: reopening a source re-read its catalog row and TDEF each time.
@@ -775,10 +764,11 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
     /// EXISTS/scalar pathological.</summary>
     private PlanNode SubqueryPlan(SqlStatement query, EvalScope? outerScope, bool lookup = false)
     {
-        if (!SubqueryPlans.TryGetValue((query, lookup), out PlanNode? plan))
+        Dictionary<SqlStatement, PlanNode> plans = lookup ? LookupPlans : SubqueryPlans;
+        if (!plans.TryGetValue(query, out PlanNode? plan))
         {
             var outerAliases = outerScope?.VisibleAliases().ToHashSet(StringComparer.OrdinalIgnoreCase);
-            SubqueryPlans[(query, lookup)] = plan =
+            plans[query] = plan =
                 ColumnPruning.Apply(
                     Planning.IndexSelection.Apply(QueryPlanner.PlanStatement(query, _database), _database, outerAliases,
                         lookup ? Planning.IndexSelection.Reading.ExistsLookup : Planning.IndexSelection.Reading.Alone));
@@ -1890,16 +1880,13 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (SelectItem item in projection)
-            foreach ((string? qualifier, string column) in References(item.Value).SelectMany(e => e switch
-                {
-                    ColumnReference c => [(c.Table, c.Column)],
-                    QualifiedStarExpression qs => [(qs.Table, "*")],
-                    _ => Array.Empty<(string?, string)>(),
-                }))
+            foreach (Expression reference in References(item.Value))
             {
-                if (qualifier is not null) { result.Add(qualifier); continue; }
+                if (reference is QualifiedStarExpression star) { result.Add(star.Table); continue; }
+                if (reference is not ColumnReference column) continue;
+                if (column.Table is not null) { result.Add(column.Table); continue; }
                 OutputColumn match = columns.FirstOrDefault(
-                    c => string.Equals(c.Name, column, StringComparison.OrdinalIgnoreCase));
+                    c => string.Equals(c.Name, column.Column, StringComparison.OrdinalIgnoreCase));
                 if (match.Qualifier is not null) result.Add(match.Qualifier);
             }
         return result;
@@ -3218,7 +3205,6 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
             _ => _running!.Result,
         };
     }
-
 
     private static IEnumerable<FunctionCall> Aggregates(Expression e)
     {

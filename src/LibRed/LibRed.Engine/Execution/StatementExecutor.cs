@@ -1280,12 +1280,6 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     /// from: NULL stores NULL, DEFAULT takes whatever the column declares.</summary>
     private static readonly object DefaultRowValue = new();
 
-    /// <summary>A value the statement types as a Currency, as <paramref name="column"/> takes one
-    /// (<see cref="LibRed.Storage.Types.JetTypeCodec.CurrencyAsStored"/>): a Currency and a Decimal are both
-    /// <see cref="decimal"/>, and only the statement knows which. Any other value is returned as it is.</summary>
-    private static object? Typed(object? value, bool currency, ColumnDef column) =>
-        currency && value is decimal number ? LibRed.Storage.Types.JetTypeCodec.CurrencyAsStored(column.Type, number) : value;
-
     /// <summary>A table's columns with a DEFAULT value (parsed once), and its AutoNumber column if it has one — Jet
     /// allows at most one, and its value after an insert is @@IDENTITY.</summary>
     private sealed record RowDefaults(List<(int Index, Expression Expression)> Columns, ColumnDef? AutoNumber);
@@ -1331,7 +1325,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
 #pragma warning disable CA1031 // a supplied column's default only sizes the record's slack: one that cannot be evaluated adds none rather than failing a row that never takes it
                 catch (Exception) { value = null; }
 #pragma warning restore CA1031
-            value = Typed(value, ExpressionEvaluator.IsCurrency(expression, []), column);
+            value = LibRed.Storage.Types.JetTypeCodec.CurrencyAsStored(column.Type, value, ExpressionEvaluator.IsCurrency(expression, []));
             if (column.Type == JetDataType.Text && value is not null && JetStoreType.MaxLength(column) is int width
                 && LibRed.Storage.Types.VbaText.Of(value) is var text && text.Length > width)
                 value = text[..width];
@@ -1405,17 +1399,19 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             // An explicit column list is the other rule entirely: it names the targets and the source's
             // values map positionally onto IT, whatever the source calls them.
             if (statement.Columns.Count == 0)
+            {
                 targets = [.. sourceColumns.Select(c => c.Name)];
-            targetColumns = [.. targets.Select(definition.FindColumn)];
+                targetColumns = [.. targets.Select(definition.FindColumn)];
+            }
 
-            // A Currency source column's values, as their target column takes a Currency (Typed). The rows are
-            // copied only when a Currency is selected.
+            // A Currency source column's values, as their target column takes a Currency (CurrencyAsStored). The rows
+            // are copied only when a Currency is selected.
             ColumnDef?[] currencyInto = sourceColumns
                 .Select((c, i) => c.Currency && c.ClrType == typeof(decimal) && i < targetColumns.Length ? targetColumns[i] : null)
                 .ToArray();
             if (currencyInto.Any(c => c is not null))
                 rows = rows.Select(r => r.Select((v, i) => i < currencyInto.Length && currencyInto[i] is { } column
-                    ? Typed(v, currency: true, column)
+                    ? LibRed.Storage.Types.JetTypeCodec.CurrencyAsStored(column.Type, v, currency: true)
                     : v).ToArray()).ToList();
         }
         else
@@ -1425,7 +1421,8 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
                 // InsertRow can tell "take the column's default" apart from any value, NULL included.
                 .Select((e, i) => e is DefaultValueExpression ? DefaultRowValue
                     : i < targetColumns.Length && targetColumns[i] is { } column
-                        ? Typed(evaluator.Evaluate(e), ExpressionEvaluator.IsCurrency(e, []), column)
+                        ? LibRed.Storage.Types.JetTypeCodec.CurrencyAsStored(
+                            column.Type, evaluator.Evaluate(e), ExpressionEvaluator.IsCurrency(e, []))
                         : evaluator.Evaluate(e))
                 .ToArray());
 
@@ -2235,7 +2232,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
                     var key = (tables[ti].CacheKey, combo[ti].Id);
                     if (!dirty.ContainsKey(key)) dirty[key] = (TargetTable(tables, ti), combo[ti].Id, (object?[])shared.Clone(), shared);
                 }
-                shared[col.Index] = Typed(results[i], currency[i], col);
+                shared[col.Index] = LibRed.Storage.Types.JetTypeCodec.CurrencyAsStored(col.Type, results[i], currency[i]);
             }
         }
 
