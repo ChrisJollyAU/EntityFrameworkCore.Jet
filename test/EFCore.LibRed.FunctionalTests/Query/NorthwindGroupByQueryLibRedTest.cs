@@ -25,6 +25,39 @@ namespace EntityFrameworkCore.LibRed.FunctionalTests.Query
         public virtual void Check_all_tests_overridden()
             => TestHelpers.AssertAllMethodsOverridden(GetType());
 
+        public override async Task SelectMany_DefaultIfEmpty_over_GroupBy(bool async)
+        {
+            await base.SelectMany_DefaultIfEmpty_over_GroupBy(async);
+
+            AssertSql(
+                """
+SELECT `p`.`ProductID`, `o0`.`Key`, IIF(`o0`.`Sum` IS NULL, 0, `o0`.`Sum`) AS `Sum`
+FROM `Products` AS `p`
+LEFT JOIN (
+    SELECT `o`.`ProductID` AS `Key`, IIF(SUM(CLNG(`o`.`Quantity`)) IS NULL, 0, SUM(CLNG(`o`.`Quantity`))) AS `Sum`, `o`.`ProductID`
+    FROM `Order Details` AS `o`
+    WHERE `o`.`ProductID` < 10
+    GROUP BY `o`.`ProductID`
+) AS `o0` ON `p`.`ProductID` = `o0`.`ProductID`
+""");
+        }
+
+        public override async Task SelectMany_DefaultIfEmpty_over_Distinct(bool async)
+        {
+            await base.SelectMany_DefaultIfEmpty_over_Distinct(async);
+
+            AssertSql(
+                """
+SELECT `p`.`ProductID`, `o0`.`Key`, IIF(`o0`.`Quantity` IS NULL, CINT(0), `o0`.`Quantity`) AS `Quantity`
+FROM `Products` AS `p`
+LEFT JOIN (
+    SELECT DISTINCT `o`.`ProductID` AS `Key`, `o`.`Quantity`, IIF(`o`.`ProductID` IS NULL, NULL, 1) AS `marker`, `o`.`ProductID`
+    FROM `Order Details` AS `o`
+    WHERE `o`.`ProductID` < 10
+) AS `o0` ON `p`.`ProductID` = `o0`.`ProductID`
+""");
+        }
+
         public override async Task GroupBy_ValueTuple_projection_joined_on_tuple_member(bool async)
         {
             await base.GroupBy_ValueTuple_projection_joined_on_tuple_member(async);

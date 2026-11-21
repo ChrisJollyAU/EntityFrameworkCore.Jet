@@ -158,7 +158,7 @@ namespace EntityFrameworkCore.LibRed.FunctionalTests.TestUtilities
 
         public override Task CleanAsync(DbContext context, bool createTables = true)
         {
-            context.Database.EnsureClean();
+            context.Database.EnsureClean(createTables);
             return base.CleanAsync(context, createTables);
         }
 

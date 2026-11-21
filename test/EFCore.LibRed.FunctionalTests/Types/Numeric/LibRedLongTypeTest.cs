@@ -15,9 +15,9 @@ public class LibRedLongTypeTest(LibRedLongTypeTest.LongTypeFixture fixture, ITes
             """
 @Fixture_Value='-9223372036854775808'
 
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = @Fixture_Value
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = @Fixture_Value
 """);
     }
 
@@ -27,9 +27,9 @@ WHERE [t].[Value] = @Fixture_Value
 
         AssertSql(
             """
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = CAST(-9223372036854775808 AS bigint)
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = -9223372036854775808
 """);
     }
 
@@ -59,11 +59,9 @@ WHERE (
 @p1='1'
 @p0='9223372036854775807'
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [TypeEntity] SET [Value] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `TypeEntity` SET `Value` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 
@@ -106,11 +104,9 @@ WHERE CAST(JSON_VALUE([j].[JsonContainer], '$.Value') AS bigint) = @Fixture_Valu
 @p0='{"OtherValue":9223372036854775807,"Value":9223372036854775807}' (Nullable = false) (Size = 62)
 @p1='1'
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [JsonTypeEntity] SET [JsonContainer] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `JsonTypeEntity` SET `JsonContainer` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 

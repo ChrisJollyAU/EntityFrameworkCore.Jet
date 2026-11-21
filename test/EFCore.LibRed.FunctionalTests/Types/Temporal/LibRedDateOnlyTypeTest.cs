@@ -15,11 +15,11 @@ public class LibRedDateOnlyTypeTest(LibRedDateOnlyTypeTest.DateTypeFixture fixtu
 
         AssertSql(
             """
-@Fixture_Value='01/05/2020' (DbType = Date)
+@Fixture_Value='2020-01-05T00:00:00.0000000' (DbType = Date)
 
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = @Fixture_Value
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = @Fixture_Value
 """);
     }
 
@@ -29,9 +29,9 @@ WHERE [t].[Value] = @Fixture_Value
 
         AssertSql(
             """
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = '2020-01-05'
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = #2020-01-05#
 """);
     }
 
@@ -59,13 +59,11 @@ WHERE (
         AssertSql(
             """
 @p1='1'
-@p0='05/03/2022' (DbType = Date)
+@p0='2022-05-03T00:00:00.0000000' (DbType = Date)
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [TypeEntity] SET [Value] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `TypeEntity` SET `Value` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 
@@ -108,11 +106,9 @@ WHERE CAST(JSON_VALUE([j].[JsonContainer], '$.Value') AS date) = @Fixture_Value
 @p0='{"OtherValue":"2022-05-03","Value":"2022-05-03"}' (Nullable = false) (Size = 48)
 @p1='1'
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [JsonTypeEntity] SET [JsonContainer] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `JsonTypeEntity` SET `JsonContainer` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 

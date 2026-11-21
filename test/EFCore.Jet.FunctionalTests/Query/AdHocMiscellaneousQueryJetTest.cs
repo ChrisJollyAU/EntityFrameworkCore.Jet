@@ -2024,13 +2024,13 @@ FROM `TestEntities` AS `t`
 WHERE EXISTS (
     SELECT 1
     FROM (SELECT CLNG(?) AS `Value`
-    FROM (SELECT COUNT(*) FROM `#Dual`) AS `i_0`
+    FROM (SELECT COUNT(*) FROM `TestEntities`) AS `i_0`
     UNION
     SELECT ? AS `Value`
-    FROM (SELECT COUNT(*) FROM `#Dual`) AS `i_1`
+    FROM (SELECT COUNT(*) FROM `TestEntities`) AS `i_1`
     UNION
     SELECT ? AS `Value`
-    FROM (SELECT COUNT(*) FROM `#Dual`) AS `i_2`) AS `i`
+    FROM (SELECT COUNT(*) FROM `TestEntities`) AS `i_2`) AS `i`
     WHERE `i`.`Value` = `t`.`Id`)
 """,
                 //
@@ -2055,13 +2055,13 @@ FROM `TestEntities` AS `t`
 WHERE EXISTS (
     SELECT 1
     FROM (SELECT CLNG(1) AS `Value`
-    FROM (SELECT COUNT(*) FROM `#Dual`) AS `i_0`
+    FROM (SELECT COUNT(*) FROM `TestEntities`) AS `i_0`
     UNION
     SELECT 2 AS `Value`
-    FROM (SELECT COUNT(*) FROM `#Dual`) AS `i_1`
+    FROM (SELECT COUNT(*) FROM `TestEntities`) AS `i_1`
     UNION
     SELECT 3 AS `Value`
-    FROM (SELECT COUNT(*) FROM `#Dual`) AS `i_2`) AS `i`
+    FROM (SELECT COUNT(*) FROM `TestEntities`) AS `i_2`) AS `i`
     WHERE `i`.`Value` = `t`.`Id`)
 """,
                 //
@@ -2082,6 +2082,44 @@ WHERE 1 = `t`.`Id`
 SELECT `d`.`Id`, IIF(IIF(`d`.`Foo` IS NULL, CINT(99), `d`.`Foo`) = CINT(10), 'A', 'B') AS `Foo`
 FROM `Data` AS `d`
 ORDER BY `d`.`Id`
+""");
+    }
+
+    public override async Task String_conversion_on_string_converted_enum_projection(bool async)
+    {
+        await base.String_conversion_on_string_converted_enum_projection(async);
+
+        AssertSql(
+            """
+SELECT (`u`.`Role` & '')
+FROM `Users` AS `u`
+ORDER BY `u`.`Id`
+""",
+            //
+            """
+SELECT (`u`.`NullableRole` & '')
+FROM `Users` AS `u`
+WHERE `u`.`NullableRole` IS NOT NULL
+ORDER BY `u`.`Id`
+""",
+            //
+            """
+SELECT (`u`.`Role` & '')
+FROM `Users` AS `u`
+ORDER BY `u`.`Id`
+""",
+            //
+            """
+SELECT (`u`.`Role` & '')
+FROM `Users` AS `u`
+ORDER BY `u`.`Id`
+""",
+            //
+            """
+SELECT (`u`.`Role` & '')
+FROM `Users` AS `u`
+WHERE `u`.`Role` = 'Admin'
+ORDER BY `u`.`Id`
 """);
     }
 

@@ -15,11 +15,11 @@ public class JetDateTime2TypeTest(JetDateTime2TypeTest.DateTime2TypeFixture fixt
 
         AssertSql(
             """
-@Fixture_Value='2020-01-05T12:30:45.0000000'
+@Fixture_Value='2020-01-05T12:30:45.0000000' (DbType = DateTime)
 
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = @Fixture_Value
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = CDATE(@Fixture_Value)
 """);
     }
 
@@ -29,9 +29,9 @@ WHERE [t].[Value] = @Fixture_Value
 
         AssertSql(
             """
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = '2020-01-05T12:30:45.0000000'
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = #2020-01-05 12:30:45#
 """);
     }
 
@@ -58,14 +58,12 @@ WHERE (
 
         AssertSql(
             """
+@p0='2022-05-03T00:00:00.0000000' (DbType = DateTime)
 @p1='1'
-@p0='2022-05-03T00:00:00.0000000'
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [TypeEntity] SET [Value] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `TypeEntity` SET `Value` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 
@@ -108,11 +106,9 @@ WHERE CAST(JSON_VALUE([j].[JsonContainer], '$.Value') AS datetime2) = @Fixture_V
 @p0='{"OtherValue":"2022-05-03T00:00:00","Value":"2022-05-03T00:00:00"}' (Nullable = false) (Size = 66)
 @p1='1'
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [JsonTypeEntity] SET [JsonContainer] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `JsonTypeEntity` SET `JsonContainer` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 

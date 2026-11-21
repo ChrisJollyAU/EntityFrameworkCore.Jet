@@ -15,9 +15,9 @@ public class LibRedDoubleTypeTest(LibRedDoubleTypeTest.DoubleTypeFixture fixture
             """
 @Fixture_Value='30.5'
 
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = @Fixture_Value
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = @Fixture_Value
 """);
     }
 
@@ -27,9 +27,9 @@ WHERE [t].[Value] = @Fixture_Value
 
         AssertSql(
             """
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = 30.5E0
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = 30.5
 """);
     }
 
@@ -59,11 +59,9 @@ WHERE (
 @p1='1'
 @p0='30'
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [TypeEntity] SET [Value] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `TypeEntity` SET `Value` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 
@@ -106,11 +104,9 @@ WHERE CAST(JSON_VALUE([j].[JsonContainer], '$.Value') AS float) = @Fixture_Value
 @p0='{"OtherValue":30,"Value":30}' (Nullable = false) (Size = 28)
 @p1='1'
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [JsonTypeEntity] SET [JsonContainer] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `JsonTypeEntity` SET `JsonContainer` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 

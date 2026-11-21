@@ -2638,7 +2638,7 @@ WHERE `c`.`CustomerID` LIKE 'A%'
 
             AssertSql(
                 """
-SELECT DATEPART('w', `o`.`OrderDate`) - 1
+SELECT CLNG(DATEPART('w', `o`.`OrderDate`) - 1)
 FROM `Orders` AS `o`
 """);
         }

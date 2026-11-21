@@ -1265,10 +1265,10 @@ FROM `EntityType` AS `e`
 
         AssertSql(
             """
-SELECT `t`.`Id`, `t`.`ChildProperty`, NULL AS `ChildProperty1`, `t`.`PropertyInsideComplexThing`, `t`.`ChildComplexProperty_PropertyInsideComplexThing`, NULL AS `ChildComplexProperty_PropertyInsideComplexThing1`, 'TpcChild1' AS `Discriminator`
+SELECT `t`.`Id`, `t`.`ChildProperty`, NULL AS `ChildProperty1`, `t`.`BaseComplexProperty_PropertyInsideComplexThing`, `t`.`ChildComplexProperty_PropertyInsideComplexThing`, NULL AS `ChildComplexProperty_PropertyInsideComplexThing1`, 'TpcChild1' AS `Discriminator`
 FROM `TpcChild1` AS `t`
 UNION ALL
-SELECT `t0`.`Id`, CVar(NULL) AS `ChildProperty`, `t0`.`ChildProperty` AS `ChildProperty1`, `t0`.`PropertyInsideComplexThing`, CVar(NULL) AS `ChildComplexProperty_PropertyInsideComplexThing`, `t0`.`ChildComplexProperty_PropertyInsideComplexThing` AS `ChildComplexProperty_PropertyInsideComplexThing1`, 'TpcChild2' AS `Discriminator`
+SELECT `t0`.`Id`, CVar(NULL) AS `ChildProperty`, `t0`.`ChildProperty` AS `ChildProperty1`, `t0`.`BaseComplexProperty_PropertyInsideComplexThing`, CVar(NULL) AS `ChildComplexProperty_PropertyInsideComplexThing`, `t0`.`ChildComplexProperty_PropertyInsideComplexThing` AS `ChildComplexProperty_PropertyInsideComplexThing1`, 'TpcChild2' AS `Discriminator`
 FROM `TpcChild2` AS `t0`
 """);
     }
@@ -1583,24 +1583,24 @@ LEFT JOIN (
 
         AssertSql(
             """
-SELECT TOP(2) [p].[Id], [p].[Items]
-FROM [Parent] AS [p]
-ORDER BY [p].[Id]
+SELECT TOP 2 `p`.`Id`, `p`.`Items`
+FROM `Parent` AS `p`
+ORDER BY `p`.`Id`
 """,
             //
             """
-SELECT [s].[Id], [p3].[Id]
+SELECT `s`.`Id`, `p3`.`Id`
 FROM (
-    SELECT TOP(1) [p].[Id]
-    FROM [Parent] AS [p]
-    ORDER BY [p].[Id]
-) AS [p3]
+    SELECT TOP 1 `p`.`Id`
+    FROM `Parent` AS `p`
+    ORDER BY `p`.`Id`
+) AS `p3`
 INNER JOIN (
-    SELECT [l1].[Id], [p2].[ParentsId]
-    FROM [ParentLinks] AS [p2]
-    INNER JOIN [Link] AS [l1] ON [p2].[LinksId] = [l1].[Id]
-) AS [s] ON [p3].[Id] = [s].[ParentsId]
-ORDER BY [p3].[Id]
+    SELECT `l1`.`Id`, `p2`.`ParentsId`
+    FROM `ParentLinks` AS `p2`
+    INNER JOIN `Link` AS `l1` ON `p2`.`LinksId` = `l1`.`Id`
+) AS `s` ON `p3`.`Id` = `s`.`ParentsId`
+ORDER BY `p3`.`Id`
 """);
     }
 

@@ -1392,7 +1392,7 @@ DROP INDEX `IX_People_SomeField` ON `People`;
 
         AssertSql(
             """
-EXEC sp_rename N'[People].[Foo]', N'foo', 'INDEX';
+ALTER TABLE `People` RENAME INDEX `Foo` TO `foo`;
 """);
     }
 

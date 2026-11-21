@@ -78,9 +78,9 @@ WHERE CAST(JSON_VALUE([d].[ParentComplexType], '$.Nested.NestedInt') AS int) = 5
 
         AssertSql(
             """
-SELECT [c].[ChildComplexType]
-FROM [Drinks] AS [d]
-INNER JOIN [Coke] AS [c] ON [d].[Id] = [c].[Id]
+SELECT `c`.`ChildComplexType`
+FROM `Drinks` AS `d`
+INNER JOIN `Coke` AS `c` ON `d`.`Id` = `c`.`Id`
 """);
     }
 
@@ -90,8 +90,8 @@ INNER JOIN [Coke] AS [c] ON [d].[Id] = [c].[Id]
 
         AssertSql(
             """
-SELECT [d].[ParentComplexType]
-FROM [Drinks] AS [d]
+SELECT `d`.`ParentComplexType`
+FROM `Drinks` AS `d`
 """);
     }
 

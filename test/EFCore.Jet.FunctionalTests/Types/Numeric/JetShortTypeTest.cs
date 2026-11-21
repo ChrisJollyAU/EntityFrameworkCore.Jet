@@ -15,9 +15,9 @@ public class JetShortTypeTest(JetShortTypeTest.ShortTypeFixture fixture, ITestOu
             """
 @Fixture_Value='-32768'
 
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = @Fixture_Value
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = @Fixture_Value
 """);
     }
 
@@ -27,9 +27,9 @@ WHERE [t].[Value] = @Fixture_Value
 
         AssertSql(
             """
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = CAST(-32768 AS smallint)
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = CINT(-32768)
 """);
     }
 
@@ -56,14 +56,12 @@ WHERE (
 
         AssertSql(
             """
-@p1='1'
 @p0='32767'
+@p1='1'
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [TypeEntity] SET [Value] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `TypeEntity` SET `Value` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 
@@ -106,11 +104,9 @@ WHERE CAST(JSON_VALUE([j].[JsonContainer], '$.Value') AS smallint) = @Fixture_Va
 @p0='{"OtherValue":32767,"Value":32767}' (Nullable = false) (Size = 34)
 @p1='1'
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [JsonTypeEntity] SET [JsonContainer] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `JsonTypeEntity` SET `JsonContainer` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 

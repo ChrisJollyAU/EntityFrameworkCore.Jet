@@ -17,9 +17,9 @@ public class LibRedGuidTypeTest(LibRedGuidTypeTest.GuidTypeFixture fixture, ITes
             """
 @Fixture_Value='8f7331d6-cde9-44fb-8611-81fff686f280'
 
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = @Fixture_Value
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = @Fixture_Value
 """);
     }
 
@@ -29,9 +29,9 @@ WHERE [t].[Value] = @Fixture_Value
 
         AssertSql(
             """
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = '8f7331d6-cde9-44fb-8611-81fff686f280'
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = {8f7331d6-cde9-44fb-8611-81fff686f280}
 """);
     }
 
@@ -61,11 +61,9 @@ WHERE (
 @p1='1'
 @p0='ae192c36-9004-49b2-b785-8be10d169627'
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [TypeEntity] SET [Value] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `TypeEntity` SET `Value` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 
@@ -96,11 +94,9 @@ WHERE CAST(JSON_VALUE([j].[JsonContainer], '$.Value') AS uniqueidentifier) = @Fi
 @p0='{"OtherValue":"ae192c36-9004-49b2-b785-8be10d169627","Value":"ae192c36-9004-49b2-b785-8be10d169627"}' (Nullable = false) (Size = 100)
 @p1='1'
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [JsonTypeEntity] SET [JsonContainer] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `JsonTypeEntity` SET `JsonContainer` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 

@@ -111,14 +111,12 @@ public class NavigationsBulkUpdateJetTest(NavigationsJetFixture fixture, ITestOu
 
         AssertExecuteUpdateSql(
             """
-@p='foo_updated' (Size = 4000)
+@p='foo_updated' (Size = 255)
 
-SET NOCOUNT OFF;
-UPDATE [n]
-SET [n].[String] = @p
-FROM [RootEntity] AS [r]
-INNER JOIN [AssociateType] AS [a] ON [r].[RequiredAssociateId] = [a].[Id]
-INNER JOIN [NestedAssociateType] AS [n] ON [a].[RequiredNestedAssociateId] = [n].[Id]
+UPDATE (`RootEntity` AS `r`
+INNER JOIN `AssociateType` AS `a` ON `r`.`RequiredAssociateId` = `a`.`Id`)
+LEFT JOIN `NestedAssociateType` AS `n` ON `a`.`RequiredNestedAssociateId` = `n`.`Id`
+SET `n`.`String` = @p
 """);
     }
 

@@ -511,6 +511,48 @@ WHERE NOT (`e`.`IsDraft`)
         AssertSql();
     }
 
+    public override async Task Query_filter_with_EF_Constant_over_context_property()
+    {
+        await base.Query_filter_with_EF_Constant_over_context_property();
+
+        AssertSql(
+            """
+SELECT `e`.`Id`
+FROM `Entity38151` AS `e`
+WHERE `e`.`TenantId` = 1
+ORDER BY `e`.`Id`
+""");
+    }
+
+    public override async Task Query_filter_with_EF_Parameter_over_context_property()
+    {
+        await base.Query_filter_with_EF_Parameter_over_context_property();
+
+        AssertSql(
+            """
+@ef_filter__TenantId='1'
+
+SELECT `e`.`Id`
+FROM `Entity38151` AS `e`
+WHERE `e`.`TenantId` = @ef_filter__TenantId
+ORDER BY `e`.`Id`
+""");
+    }
+
+    public override async Task Query_filter_with_EF_Constant_literal_throws()
+    {
+        await base.Query_filter_with_EF_Constant_literal_throws();
+
+        AssertSql();
+    }
+
+    public override async Task Query_filter_with_EF_Parameter_literal_throws()
+    {
+        await base.Query_filter_with_EF_Parameter_literal_throws();
+
+        AssertSql();
+    }
+
     public override async Task GroupBy_aggregate_over_required_navigation_with_query_filter(bool async)
     {
         await base.GroupBy_aggregate_over_required_navigation_with_query_filter(async);

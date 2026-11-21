@@ -16,11 +16,11 @@ public class JetByteArrayTypeTest(JetByteArrayTypeTest.ByteArrayTypeFixture fixt
 
         AssertSql(
             """
-@Fixture_Value='0x010203' (Size = 8000)
+@Fixture_Value='0x010203' (Size = 510)
 
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = @Fixture_Value
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = @Fixture_Value
 """);
     }
 
@@ -30,9 +30,9 @@ WHERE [t].[Value] = @Fixture_Value
 
         AssertSql(
             """
-SELECT TOP(2) [t].[Id], [t].[ArrayValue], [t].[OtherValue], [t].[Value]
-FROM [TypeEntity] AS [t]
-WHERE [t].[Value] = 0x010203
+SELECT TOP 2 `t`.`Id`, `t`.`ArrayValue`, `t`.`OtherValue`, `t`.`Value`
+FROM `TypeEntity` AS `t`
+WHERE `t`.`Value` = 0x010203
 """);
     }
 
@@ -46,14 +46,12 @@ WHERE [t].[Value] = 0x010203
 
         AssertSql(
             """
+@p0='0x04050607' (Size = 510)
 @p1='1'
-@p0='0x04050607' (Size = 8000)
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [TypeEntity] SET [Value] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `TypeEntity` SET `Value` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 
@@ -87,11 +85,9 @@ WHERE [v].[Value] = @Fixture_Value
 @p0='{"OtherValue":"BAUGBw==","Value":"BAUGBw=="}' (Nullable = false) (Size = 44)
 @p1='1'
 
-SET IMPLICIT_TRANSACTIONS OFF;
-SET NOCOUNT ON;
-UPDATE [JsonTypeEntity] SET [JsonContainer] = @p0
-OUTPUT 1
-WHERE [Id] = @p1;
+UPDATE `JsonTypeEntity` SET `JsonContainer` = @p0
+WHERE `Id` = @p1;
+SELECT @@ROWCOUNT;
 """);
     }
 

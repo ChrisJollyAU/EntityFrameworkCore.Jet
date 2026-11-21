@@ -14,9 +14,9 @@ public class TPCInheritanceTableSplittingQueryLibRedTest(TPCInheritanceQueryLibR
 
         AssertSql(
             """
-SELECT [c].[Id], [c].[SortIndex], [c].[CaffeineGrams], [c].[CokeCO2], [c].[Ints], [c].[SugarGrams], [c].[ComplexTypeCollection], [c].[Int], [c].[UniqueInt], [c].[NestedInt], [c].[NestedComplexType_UniqueInt], [c].[ChildComplexType_Int], [c].[ChildComplexType_UniqueInt], [c].[ChildComplexType_Nested_NestedInt], [c].[ChildComplexType_Nested_UniqueInt]
-FROM [Coke] AS [c]
-WHERE [c].[ChildComplexType_Int] = 10
+SELECT `c`.`Id`, `c`.`SortIndex`, `c`.`CaffeineGrams`, `c`.`CokeCO2`, `c`.`Ints`, `c`.`SugarGrams`, `c`.`ComplexTypeCollection`, `c`.`ParentComplexType_Int`, `c`.`ParentComplexType_UniqueInt`, `c`.`ParentComplexType_Nested_NestedInt`, `c`.`ParentComplexType_Nested_UniqueInt`, `c`.`ChildComplexType_Int`, `c`.`ChildComplexType_UniqueInt`, `c`.`ChildComplexType_Nested_NestedInt`, `c`.`ChildComplexType_Nested_UniqueInt`
+FROM `Coke` AS `c`
+WHERE `c`.`ChildComplexType_Int` = 10
 """);
     }
 
@@ -26,21 +26,21 @@ WHERE [c].[ChildComplexType_Int] = 10
 
         AssertSql(
             """
-SELECT [u].[Id], [u].[SortIndex], [u].[CaffeineGrams], [u].[CokeCO2], [u].[Ints], [u].[SugarGrams], [u].[LiltCO2], [u].[SugarGrams1], [u].[CaffeineGrams1], [u].[HasMilk], [u].[ComplexTypeCollection], [u].[ParentComplexType_Int], [u].[ParentComplexType_UniqueInt], [u].[ParentComplexType_Nested_NestedInt], [u].[ParentComplexType_Nested_UniqueInt], [u].[ChildComplexType_Int], [u].[ChildComplexType_UniqueInt], [u].[ChildComplexType_Nested_NestedInt], [u].[ChildComplexType_Nested_UniqueInt], [u].[ChildComplexType_Int1], [u].[ChildComplexType_UniqueInt1], [u].[ChildComplexType_Nested_NestedInt1], [u].[ChildComplexType_Nested_UniqueInt1], [u].[Discriminator]
+SELECT `u`.`Id`, `u`.`SortIndex`, `u`.`CaffeineGrams`, `u`.`CokeCO2`, `u`.`Ints`, `u`.`SugarGrams`, `u`.`LiltCO2`, `u`.`SugarGrams1`, `u`.`CaffeineGrams1`, `u`.`HasMilk`, `u`.`ComplexTypeCollection`, `u`.`ParentComplexType_Int`, `u`.`ParentComplexType_UniqueInt`, `u`.`ParentComplexType_Nested_NestedInt`, `u`.`ParentComplexType_Nested_UniqueInt`, `u`.`ChildComplexType_Int`, `u`.`ChildComplexType_UniqueInt`, `u`.`ChildComplexType_Nested_NestedInt`, `u`.`ChildComplexType_Nested_UniqueInt`, `u`.`ChildComplexType_Int1`, `u`.`ChildComplexType_UniqueInt1`, `u`.`ChildComplexType_Nested_NestedInt1`, `u`.`ChildComplexType_Nested_UniqueInt1`, `u`.`Discriminator`
 FROM (
-    SELECT [d].[Id], [d].[SortIndex], [d].[ComplexTypeCollection], [d].[ParentComplexType_Int], [d].[ParentComplexType_UniqueInt], [d].[ParentComplexType_Nested_NestedInt], [d].[ParentComplexType_Nested_UniqueInt], NULL AS [CaffeineGrams], NULL AS [CokeCO2], NULL AS [Ints], NULL AS [SugarGrams], NULL AS [ChildComplexType_Int], NULL AS [ChildComplexType_UniqueInt], NULL AS [ChildComplexType_Nested_NestedInt], NULL AS [ChildComplexType_Nested_UniqueInt], NULL AS [LiltCO2], NULL AS [SugarGrams1], NULL AS [CaffeineGrams1], NULL AS [HasMilk], NULL AS [ChildComplexType_Int1], NULL AS [ChildComplexType_UniqueInt1], NULL AS [ChildComplexType_Nested_NestedInt1], NULL AS [ChildComplexType_Nested_UniqueInt1], N'Drink' AS [Discriminator]
-    FROM [Drinks] AS [d]
+    SELECT `d`.`Id`, `d`.`SortIndex`, `d`.`ComplexTypeCollection`, `d`.`ParentComplexType_Int`, `d`.`ParentComplexType_UniqueInt`, `d`.`ParentComplexType_Nested_NestedInt`, `d`.`ParentComplexType_Nested_UniqueInt`, CVar(NULL) AS `CaffeineGrams`, CVar(NULL) AS `CokeCO2`, NULL AS `Ints`, CVar(NULL) AS `SugarGrams`, CVar(NULL) AS `ChildComplexType_Int`, CVar(NULL) AS `ChildComplexType_UniqueInt`, CVar(NULL) AS `ChildComplexType_Nested_NestedInt`, CVar(NULL) AS `ChildComplexType_Nested_UniqueInt`, CVar(NULL) AS `LiltCO2`, CVar(NULL) AS `SugarGrams1`, CVar(NULL) AS `CaffeineGrams1`, CVar(NULL) AS `HasMilk`, CVar(NULL) AS `ChildComplexType_Int1`, CVar(NULL) AS `ChildComplexType_UniqueInt1`, CVar(NULL) AS `ChildComplexType_Nested_NestedInt1`, CVar(NULL) AS `ChildComplexType_Nested_UniqueInt1`, 'Drink' AS `Discriminator`
+    FROM `Drinks` AS `d`
     UNION ALL
-    SELECT [c].[Id], [c].[SortIndex], [c].[ComplexTypeCollection], [c].[Int] AS [ParentComplexType_Int], [c].[UniqueInt] AS [ParentComplexType_UniqueInt], [c].[NestedInt] AS [ParentComplexType_Nested_NestedInt], [c].[NestedComplexType_UniqueInt] AS [ParentComplexType_Nested_UniqueInt], [c].[CaffeineGrams], [c].[CokeCO2], [c].[Ints], [c].[SugarGrams], [c].[ChildComplexType_Int], [c].[ChildComplexType_UniqueInt], [c].[ChildComplexType_Nested_NestedInt], [c].[ChildComplexType_Nested_UniqueInt], NULL AS [LiltCO2], NULL AS [SugarGrams1], NULL AS [CaffeineGrams1], NULL AS [HasMilk], NULL AS [ChildComplexType_Int1], NULL AS [ChildComplexType_UniqueInt1], NULL AS [ChildComplexType_Nested_NestedInt1], NULL AS [ChildComplexType_Nested_UniqueInt1], N'Coke' AS [Discriminator]
-    FROM [Coke] AS [c]
+    SELECT `c`.`Id`, `c`.`SortIndex`, `c`.`ComplexTypeCollection`, `c`.`ParentComplexType_Int`, `c`.`ParentComplexType_UniqueInt`, `c`.`ParentComplexType_Nested_NestedInt`, `c`.`ParentComplexType_Nested_UniqueInt`, `c`.`CaffeineGrams`, `c`.`CokeCO2`, `c`.`Ints`, `c`.`SugarGrams`, `c`.`ChildComplexType_Int`, `c`.`ChildComplexType_UniqueInt`, `c`.`ChildComplexType_Nested_NestedInt`, `c`.`ChildComplexType_Nested_UniqueInt`, CVar(NULL) AS `LiltCO2`, CVar(NULL) AS `SugarGrams1`, CVar(NULL) AS `CaffeineGrams1`, CVar(NULL) AS `HasMilk`, CVar(NULL) AS `ChildComplexType_Int1`, CVar(NULL) AS `ChildComplexType_UniqueInt1`, CVar(NULL) AS `ChildComplexType_Nested_NestedInt1`, CVar(NULL) AS `ChildComplexType_Nested_UniqueInt1`, 'Coke' AS `Discriminator`
+    FROM `Coke` AS `c`
     UNION ALL
-    SELECT [l].[Id], [l].[SortIndex], [l].[ComplexTypeCollection], [l].[Int] AS [ParentComplexType_Int], [l].[UniqueInt] AS [ParentComplexType_UniqueInt], [l].[NestedInt] AS [ParentComplexType_Nested_NestedInt], [l].[NestedComplexType_UniqueInt] AS [ParentComplexType_Nested_UniqueInt], NULL AS [CaffeineGrams], NULL AS [CokeCO2], NULL AS [Ints], NULL AS [SugarGrams], NULL AS [ChildComplexType_Int], NULL AS [ChildComplexType_UniqueInt], NULL AS [ChildComplexType_Nested_NestedInt], NULL AS [ChildComplexType_Nested_UniqueInt], [l].[LiltCO2], [l].[SugarGrams] AS [SugarGrams1], NULL AS [CaffeineGrams1], NULL AS [HasMilk], NULL AS [ChildComplexType_Int1], NULL AS [ChildComplexType_UniqueInt1], NULL AS [ChildComplexType_Nested_NestedInt1], NULL AS [ChildComplexType_Nested_UniqueInt1], N'Lilt' AS [Discriminator]
-    FROM [Lilt] AS [l]
+    SELECT `l`.`Id`, `l`.`SortIndex`, `l`.`ComplexTypeCollection`, `l`.`ParentComplexType_Int`, `l`.`ParentComplexType_UniqueInt`, `l`.`ParentComplexType_Nested_NestedInt`, `l`.`ParentComplexType_Nested_UniqueInt`, CVar(NULL) AS `CaffeineGrams`, CVar(NULL) AS `CokeCO2`, NULL AS `Ints`, CVar(NULL) AS `SugarGrams`, CVar(NULL) AS `ChildComplexType_Int`, CVar(NULL) AS `ChildComplexType_UniqueInt`, CVar(NULL) AS `ChildComplexType_Nested_NestedInt`, CVar(NULL) AS `ChildComplexType_Nested_UniqueInt`, `l`.`LiltCO2`, `l`.`SugarGrams` AS `SugarGrams1`, CVar(NULL) AS `CaffeineGrams1`, CVar(NULL) AS `HasMilk`, CVar(NULL) AS `ChildComplexType_Int1`, CVar(NULL) AS `ChildComplexType_UniqueInt1`, CVar(NULL) AS `ChildComplexType_Nested_NestedInt1`, CVar(NULL) AS `ChildComplexType_Nested_UniqueInt1`, 'Lilt' AS `Discriminator`
+    FROM `Lilt` AS `l`
     UNION ALL
-    SELECT [t].[Id], [t].[SortIndex], [t].[ComplexTypeCollection], [t].[Int] AS [ParentComplexType_Int], [t].[UniqueInt] AS [ParentComplexType_UniqueInt], [t].[NestedInt] AS [ParentComplexType_Nested_NestedInt], [t].[NestedComplexType_UniqueInt] AS [ParentComplexType_Nested_UniqueInt], NULL AS [CaffeineGrams], NULL AS [CokeCO2], NULL AS [Ints], NULL AS [SugarGrams], NULL AS [ChildComplexType_Int], NULL AS [ChildComplexType_UniqueInt], NULL AS [ChildComplexType_Nested_NestedInt], NULL AS [ChildComplexType_Nested_UniqueInt], NULL AS [LiltCO2], NULL AS [SugarGrams1], [t].[CaffeineGrams] AS [CaffeineGrams1], [t].[HasMilk], [t].[ChildComplexType_Int] AS [ChildComplexType_Int1], [t].[ChildComplexType_UniqueInt] AS [ChildComplexType_UniqueInt1], [t].[ChildComplexType_Nested_NestedInt] AS [ChildComplexType_Nested_NestedInt1], [t].[ChildComplexType_Nested_UniqueInt] AS [ChildComplexType_Nested_UniqueInt1], N'Tea' AS [Discriminator]
-    FROM [Tea] AS [t]
-) AS [u]
-WHERE [u].[ParentComplexType_Int] = 8
+    SELECT `t`.`Id`, `t`.`SortIndex`, `t`.`ComplexTypeCollection`, `t`.`ParentComplexType_Int`, `t`.`ParentComplexType_UniqueInt`, `t`.`ParentComplexType_Nested_NestedInt`, `t`.`ParentComplexType_Nested_UniqueInt`, CVar(NULL) AS `CaffeineGrams`, CVar(NULL) AS `CokeCO2`, NULL AS `Ints`, CVar(NULL) AS `SugarGrams`, CVar(NULL) AS `ChildComplexType_Int`, CVar(NULL) AS `ChildComplexType_UniqueInt`, CVar(NULL) AS `ChildComplexType_Nested_NestedInt`, CVar(NULL) AS `ChildComplexType_Nested_UniqueInt`, CVar(NULL) AS `LiltCO2`, CVar(NULL) AS `SugarGrams1`, `t`.`CaffeineGrams` AS `CaffeineGrams1`, `t`.`HasMilk`, `t`.`ChildComplexType_Int` AS `ChildComplexType_Int1`, `t`.`ChildComplexType_UniqueInt` AS `ChildComplexType_UniqueInt1`, `t`.`ChildComplexType_Nested_NestedInt` AS `ChildComplexType_Nested_NestedInt1`, `t`.`ChildComplexType_Nested_UniqueInt` AS `ChildComplexType_Nested_UniqueInt1`, 'Tea' AS `Discriminator`
+    FROM `Tea` AS `t`
+) AS `u`
+WHERE `u`.`ParentComplexType_Int` = 8
 """);
     }
 
@@ -50,9 +50,9 @@ WHERE [u].[ParentComplexType_Int] = 8
 
         AssertSql(
             """
-SELECT [c].[Id], [c].[SortIndex], [c].[CaffeineGrams], [c].[CokeCO2], [c].[Ints], [c].[SugarGrams], [c].[ComplexTypeCollection], [c].[Int], [c].[UniqueInt], [c].[NestedInt], [c].[NestedComplexType_UniqueInt], [c].[ChildComplexType_Int], [c].[ChildComplexType_UniqueInt], [c].[ChildComplexType_Nested_NestedInt], [c].[ChildComplexType_Nested_UniqueInt]
-FROM [Coke] AS [c]
-WHERE [c].[ChildComplexType_Nested_NestedInt] = 58
+SELECT `c`.`Id`, `c`.`SortIndex`, `c`.`CaffeineGrams`, `c`.`CokeCO2`, `c`.`Ints`, `c`.`SugarGrams`, `c`.`ComplexTypeCollection`, `c`.`ParentComplexType_Int`, `c`.`ParentComplexType_UniqueInt`, `c`.`ParentComplexType_Nested_NestedInt`, `c`.`ParentComplexType_Nested_UniqueInt`, `c`.`ChildComplexType_Int`, `c`.`ChildComplexType_UniqueInt`, `c`.`ChildComplexType_Nested_NestedInt`, `c`.`ChildComplexType_Nested_UniqueInt`
+FROM `Coke` AS `c`
+WHERE `c`.`ChildComplexType_Nested_NestedInt` = 58
 """);
     }
 
@@ -62,21 +62,21 @@ WHERE [c].[ChildComplexType_Nested_NestedInt] = 58
 
         AssertSql(
             """
-SELECT [u].[Id], [u].[SortIndex], [u].[CaffeineGrams], [u].[CokeCO2], [u].[Ints], [u].[SugarGrams], [u].[LiltCO2], [u].[SugarGrams1], [u].[CaffeineGrams1], [u].[HasMilk], [u].[ComplexTypeCollection], [u].[ParentComplexType_Int], [u].[ParentComplexType_UniqueInt], [u].[ParentComplexType_Nested_NestedInt], [u].[ParentComplexType_Nested_UniqueInt], [u].[ChildComplexType_Int], [u].[ChildComplexType_UniqueInt], [u].[ChildComplexType_Nested_NestedInt], [u].[ChildComplexType_Nested_UniqueInt], [u].[ChildComplexType_Int1], [u].[ChildComplexType_UniqueInt1], [u].[ChildComplexType_Nested_NestedInt1], [u].[ChildComplexType_Nested_UniqueInt1], [u].[Discriminator]
+SELECT `u`.`Id`, `u`.`SortIndex`, `u`.`CaffeineGrams`, `u`.`CokeCO2`, `u`.`Ints`, `u`.`SugarGrams`, `u`.`LiltCO2`, `u`.`SugarGrams1`, `u`.`CaffeineGrams1`, `u`.`HasMilk`, `u`.`ComplexTypeCollection`, `u`.`ParentComplexType_Int`, `u`.`ParentComplexType_UniqueInt`, `u`.`ParentComplexType_Nested_NestedInt`, `u`.`ParentComplexType_Nested_UniqueInt`, `u`.`ChildComplexType_Int`, `u`.`ChildComplexType_UniqueInt`, `u`.`ChildComplexType_Nested_NestedInt`, `u`.`ChildComplexType_Nested_UniqueInt`, `u`.`ChildComplexType_Int1`, `u`.`ChildComplexType_UniqueInt1`, `u`.`ChildComplexType_Nested_NestedInt1`, `u`.`ChildComplexType_Nested_UniqueInt1`, `u`.`Discriminator`
 FROM (
-    SELECT [d].[Id], [d].[SortIndex], [d].[ComplexTypeCollection], [d].[ParentComplexType_Int], [d].[ParentComplexType_UniqueInt], [d].[ParentComplexType_Nested_NestedInt], [d].[ParentComplexType_Nested_UniqueInt], NULL AS [CaffeineGrams], NULL AS [CokeCO2], NULL AS [Ints], NULL AS [SugarGrams], NULL AS [ChildComplexType_Int], NULL AS [ChildComplexType_UniqueInt], NULL AS [ChildComplexType_Nested_NestedInt], NULL AS [ChildComplexType_Nested_UniqueInt], NULL AS [LiltCO2], NULL AS [SugarGrams1], NULL AS [CaffeineGrams1], NULL AS [HasMilk], NULL AS [ChildComplexType_Int1], NULL AS [ChildComplexType_UniqueInt1], NULL AS [ChildComplexType_Nested_NestedInt1], NULL AS [ChildComplexType_Nested_UniqueInt1], N'Drink' AS [Discriminator]
-    FROM [Drinks] AS [d]
+    SELECT `d`.`Id`, `d`.`SortIndex`, `d`.`ComplexTypeCollection`, `d`.`ParentComplexType_Int`, `d`.`ParentComplexType_UniqueInt`, `d`.`ParentComplexType_Nested_NestedInt`, `d`.`ParentComplexType_Nested_UniqueInt`, CVar(NULL) AS `CaffeineGrams`, CVar(NULL) AS `CokeCO2`, NULL AS `Ints`, CVar(NULL) AS `SugarGrams`, CVar(NULL) AS `ChildComplexType_Int`, CVar(NULL) AS `ChildComplexType_UniqueInt`, CVar(NULL) AS `ChildComplexType_Nested_NestedInt`, CVar(NULL) AS `ChildComplexType_Nested_UniqueInt`, CVar(NULL) AS `LiltCO2`, CVar(NULL) AS `SugarGrams1`, CVar(NULL) AS `CaffeineGrams1`, CVar(NULL) AS `HasMilk`, CVar(NULL) AS `ChildComplexType_Int1`, CVar(NULL) AS `ChildComplexType_UniqueInt1`, CVar(NULL) AS `ChildComplexType_Nested_NestedInt1`, CVar(NULL) AS `ChildComplexType_Nested_UniqueInt1`, 'Drink' AS `Discriminator`
+    FROM `Drinks` AS `d`
     UNION ALL
-    SELECT [c].[Id], [c].[SortIndex], [c].[ComplexTypeCollection], [c].[Int] AS [ParentComplexType_Int], [c].[UniqueInt] AS [ParentComplexType_UniqueInt], [c].[NestedInt] AS [ParentComplexType_Nested_NestedInt], [c].[NestedComplexType_UniqueInt] AS [ParentComplexType_Nested_UniqueInt], [c].[CaffeineGrams], [c].[CokeCO2], [c].[Ints], [c].[SugarGrams], [c].[ChildComplexType_Int], [c].[ChildComplexType_UniqueInt], [c].[ChildComplexType_Nested_NestedInt], [c].[ChildComplexType_Nested_UniqueInt], NULL AS [LiltCO2], NULL AS [SugarGrams1], NULL AS [CaffeineGrams1], NULL AS [HasMilk], NULL AS [ChildComplexType_Int1], NULL AS [ChildComplexType_UniqueInt1], NULL AS [ChildComplexType_Nested_NestedInt1], NULL AS [ChildComplexType_Nested_UniqueInt1], N'Coke' AS [Discriminator]
-    FROM [Coke] AS [c]
+    SELECT `c`.`Id`, `c`.`SortIndex`, `c`.`ComplexTypeCollection`, `c`.`ParentComplexType_Int`, `c`.`ParentComplexType_UniqueInt`, `c`.`ParentComplexType_Nested_NestedInt`, `c`.`ParentComplexType_Nested_UniqueInt`, `c`.`CaffeineGrams`, `c`.`CokeCO2`, `c`.`Ints`, `c`.`SugarGrams`, `c`.`ChildComplexType_Int`, `c`.`ChildComplexType_UniqueInt`, `c`.`ChildComplexType_Nested_NestedInt`, `c`.`ChildComplexType_Nested_UniqueInt`, CVar(NULL) AS `LiltCO2`, CVar(NULL) AS `SugarGrams1`, CVar(NULL) AS `CaffeineGrams1`, CVar(NULL) AS `HasMilk`, CVar(NULL) AS `ChildComplexType_Int1`, CVar(NULL) AS `ChildComplexType_UniqueInt1`, CVar(NULL) AS `ChildComplexType_Nested_NestedInt1`, CVar(NULL) AS `ChildComplexType_Nested_UniqueInt1`, 'Coke' AS `Discriminator`
+    FROM `Coke` AS `c`
     UNION ALL
-    SELECT [l].[Id], [l].[SortIndex], [l].[ComplexTypeCollection], [l].[Int] AS [ParentComplexType_Int], [l].[UniqueInt] AS [ParentComplexType_UniqueInt], [l].[NestedInt] AS [ParentComplexType_Nested_NestedInt], [l].[NestedComplexType_UniqueInt] AS [ParentComplexType_Nested_UniqueInt], NULL AS [CaffeineGrams], NULL AS [CokeCO2], NULL AS [Ints], NULL AS [SugarGrams], NULL AS [ChildComplexType_Int], NULL AS [ChildComplexType_UniqueInt], NULL AS [ChildComplexType_Nested_NestedInt], NULL AS [ChildComplexType_Nested_UniqueInt], [l].[LiltCO2], [l].[SugarGrams] AS [SugarGrams1], NULL AS [CaffeineGrams1], NULL AS [HasMilk], NULL AS [ChildComplexType_Int1], NULL AS [ChildComplexType_UniqueInt1], NULL AS [ChildComplexType_Nested_NestedInt1], NULL AS [ChildComplexType_Nested_UniqueInt1], N'Lilt' AS [Discriminator]
-    FROM [Lilt] AS [l]
+    SELECT `l`.`Id`, `l`.`SortIndex`, `l`.`ComplexTypeCollection`, `l`.`ParentComplexType_Int`, `l`.`ParentComplexType_UniqueInt`, `l`.`ParentComplexType_Nested_NestedInt`, `l`.`ParentComplexType_Nested_UniqueInt`, CVar(NULL) AS `CaffeineGrams`, CVar(NULL) AS `CokeCO2`, NULL AS `Ints`, CVar(NULL) AS `SugarGrams`, CVar(NULL) AS `ChildComplexType_Int`, CVar(NULL) AS `ChildComplexType_UniqueInt`, CVar(NULL) AS `ChildComplexType_Nested_NestedInt`, CVar(NULL) AS `ChildComplexType_Nested_UniqueInt`, `l`.`LiltCO2`, `l`.`SugarGrams` AS `SugarGrams1`, CVar(NULL) AS `CaffeineGrams1`, CVar(NULL) AS `HasMilk`, CVar(NULL) AS `ChildComplexType_Int1`, CVar(NULL) AS `ChildComplexType_UniqueInt1`, CVar(NULL) AS `ChildComplexType_Nested_NestedInt1`, CVar(NULL) AS `ChildComplexType_Nested_UniqueInt1`, 'Lilt' AS `Discriminator`
+    FROM `Lilt` AS `l`
     UNION ALL
-    SELECT [t].[Id], [t].[SortIndex], [t].[ComplexTypeCollection], [t].[Int] AS [ParentComplexType_Int], [t].[UniqueInt] AS [ParentComplexType_UniqueInt], [t].[NestedInt] AS [ParentComplexType_Nested_NestedInt], [t].[NestedComplexType_UniqueInt] AS [ParentComplexType_Nested_UniqueInt], NULL AS [CaffeineGrams], NULL AS [CokeCO2], NULL AS [Ints], NULL AS [SugarGrams], NULL AS [ChildComplexType_Int], NULL AS [ChildComplexType_UniqueInt], NULL AS [ChildComplexType_Nested_NestedInt], NULL AS [ChildComplexType_Nested_UniqueInt], NULL AS [LiltCO2], NULL AS [SugarGrams1], [t].[CaffeineGrams] AS [CaffeineGrams1], [t].[HasMilk], [t].[ChildComplexType_Int] AS [ChildComplexType_Int1], [t].[ChildComplexType_UniqueInt] AS [ChildComplexType_UniqueInt1], [t].[ChildComplexType_Nested_NestedInt] AS [ChildComplexType_Nested_NestedInt1], [t].[ChildComplexType_Nested_UniqueInt] AS [ChildComplexType_Nested_UniqueInt1], N'Tea' AS [Discriminator]
-    FROM [Tea] AS [t]
-) AS [u]
-WHERE [u].[ParentComplexType_Nested_NestedInt] = 50
+    SELECT `t`.`Id`, `t`.`SortIndex`, `t`.`ComplexTypeCollection`, `t`.`ParentComplexType_Int`, `t`.`ParentComplexType_UniqueInt`, `t`.`ParentComplexType_Nested_NestedInt`, `t`.`ParentComplexType_Nested_UniqueInt`, CVar(NULL) AS `CaffeineGrams`, CVar(NULL) AS `CokeCO2`, NULL AS `Ints`, CVar(NULL) AS `SugarGrams`, CVar(NULL) AS `ChildComplexType_Int`, CVar(NULL) AS `ChildComplexType_UniqueInt`, CVar(NULL) AS `ChildComplexType_Nested_NestedInt`, CVar(NULL) AS `ChildComplexType_Nested_UniqueInt`, CVar(NULL) AS `LiltCO2`, CVar(NULL) AS `SugarGrams1`, `t`.`CaffeineGrams` AS `CaffeineGrams1`, `t`.`HasMilk`, `t`.`ChildComplexType_Int` AS `ChildComplexType_Int1`, `t`.`ChildComplexType_UniqueInt` AS `ChildComplexType_UniqueInt1`, `t`.`ChildComplexType_Nested_NestedInt` AS `ChildComplexType_Nested_NestedInt1`, `t`.`ChildComplexType_Nested_UniqueInt` AS `ChildComplexType_Nested_UniqueInt1`, 'Tea' AS `Discriminator`
+    FROM `Tea` AS `t`
+) AS `u`
+WHERE `u`.`ParentComplexType_Nested_NestedInt` = 50
 """);
     }
 
@@ -86,8 +86,8 @@ WHERE [u].[ParentComplexType_Nested_NestedInt] = 50
 
         AssertSql(
             """
-SELECT [c].[ChildComplexType_Int], [c].[ChildComplexType_UniqueInt], [c].[ChildComplexType_Nested_NestedInt], [c].[ChildComplexType_Nested_UniqueInt]
-FROM [Coke] AS [c]
+SELECT `c`.`ChildComplexType_Int`, `c`.`ChildComplexType_UniqueInt`, `c`.`ChildComplexType_Nested_NestedInt`, `c`.`ChildComplexType_Nested_UniqueInt`
+FROM `Coke` AS `c`
 """);
     }
 
@@ -97,17 +97,17 @@ FROM [Coke] AS [c]
 
         AssertSql(
             """
-SELECT [d].[ParentComplexType_Int], [d].[ParentComplexType_UniqueInt], [d].[ParentComplexType_Nested_NestedInt], [d].[ParentComplexType_Nested_UniqueInt]
-FROM [Drinks] AS [d]
+SELECT `d`.`ParentComplexType_Int`, `d`.`ParentComplexType_UniqueInt`, `d`.`ParentComplexType_Nested_NestedInt`, `d`.`ParentComplexType_Nested_UniqueInt`
+FROM `Drinks` AS `d`
 UNION ALL
-SELECT [c].[Int] AS [ParentComplexType_Int], [c].[UniqueInt] AS [ParentComplexType_UniqueInt], [c].[NestedInt] AS [ParentComplexType_Nested_NestedInt], [c].[NestedComplexType_UniqueInt] AS [ParentComplexType_Nested_UniqueInt]
-FROM [Coke] AS [c]
+SELECT `c`.`ParentComplexType_Int`, `c`.`ParentComplexType_UniqueInt`, `c`.`ParentComplexType_Nested_NestedInt`, `c`.`ParentComplexType_Nested_UniqueInt`
+FROM `Coke` AS `c`
 UNION ALL
-SELECT [l].[Int] AS [ParentComplexType_Int], [l].[UniqueInt] AS [ParentComplexType_UniqueInt], [l].[NestedInt] AS [ParentComplexType_Nested_NestedInt], [l].[NestedComplexType_UniqueInt] AS [ParentComplexType_Nested_UniqueInt]
-FROM [Lilt] AS [l]
+SELECT `l`.`ParentComplexType_Int`, `l`.`ParentComplexType_UniqueInt`, `l`.`ParentComplexType_Nested_NestedInt`, `l`.`ParentComplexType_Nested_UniqueInt`
+FROM `Lilt` AS `l`
 UNION ALL
-SELECT [t].[Int] AS [ParentComplexType_Int], [t].[UniqueInt] AS [ParentComplexType_UniqueInt], [t].[NestedInt] AS [ParentComplexType_Nested_NestedInt], [t].[NestedComplexType_UniqueInt] AS [ParentComplexType_Nested_UniqueInt]
-FROM [Tea] AS [t]
+SELECT `t`.`ParentComplexType_Int`, `t`.`ParentComplexType_UniqueInt`, `t`.`ParentComplexType_Nested_NestedInt`, `t`.`ParentComplexType_Nested_UniqueInt`
+FROM `Tea` AS `t`
 """);
     }
 
@@ -117,8 +117,8 @@ FROM [Tea] AS [t]
 
         AssertSql(
             """
-SELECT [c].[ChildComplexType_Nested_NestedInt], [c].[ChildComplexType_Nested_UniqueInt]
-FROM [Coke] AS [c]
+SELECT `c`.`ChildComplexType_Nested_NestedInt`, `c`.`ChildComplexType_Nested_UniqueInt`
+FROM `Coke` AS `c`
 """);
     }
 
@@ -128,17 +128,17 @@ FROM [Coke] AS [c]
 
         AssertSql(
             """
-SELECT [d].[ParentComplexType_Nested_NestedInt], [d].[ParentComplexType_Nested_UniqueInt]
-FROM [Drinks] AS [d]
+SELECT `d`.`ParentComplexType_Nested_NestedInt`, `d`.`ParentComplexType_Nested_UniqueInt`
+FROM `Drinks` AS `d`
 UNION ALL
-SELECT [c].[NestedInt] AS [ParentComplexType_Nested_NestedInt], [c].[NestedComplexType_UniqueInt] AS [ParentComplexType_Nested_UniqueInt]
-FROM [Coke] AS [c]
+SELECT `c`.`ParentComplexType_Nested_NestedInt`, `c`.`ParentComplexType_Nested_UniqueInt`
+FROM `Coke` AS `c`
 UNION ALL
-SELECT [l].[NestedInt] AS [ParentComplexType_Nested_NestedInt], [l].[NestedComplexType_UniqueInt] AS [ParentComplexType_Nested_UniqueInt]
-FROM [Lilt] AS [l]
+SELECT `l`.`ParentComplexType_Nested_NestedInt`, `l`.`ParentComplexType_Nested_UniqueInt`
+FROM `Lilt` AS `l`
 UNION ALL
-SELECT [t].[NestedInt] AS [ParentComplexType_Nested_NestedInt], [t].[NestedComplexType_UniqueInt] AS [ParentComplexType_Nested_UniqueInt]
-FROM [Tea] AS [t]
+SELECT `t`.`ParentComplexType_Nested_NestedInt`, `t`.`ParentComplexType_Nested_UniqueInt`
+FROM `Tea` AS `t`
 """);
     }
 

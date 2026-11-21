@@ -619,7 +619,7 @@ SELECT NOT EXISTS (
     SELECT 1
     FROM `Blogs` AS `b`
     WHERE `b`.`Id` <= 7)
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """,
             //
             """
@@ -627,7 +627,7 @@ SELECT NOT EXISTS (
     SELECT 1
     FROM `Blogs` AS `b`
     WHERE `b`.`Id` <= 8)
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """);
     }
 
@@ -641,7 +641,7 @@ SELECT NOT EXISTS (
     SELECT 1
     FROM `Blogs` AS `b`
     WHERE `b`.`Id` <= 7)
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """,
             //
             """
@@ -649,7 +649,7 @@ SELECT NOT EXISTS (
     SELECT 1
     FROM `Blogs` AS `b`
     WHERE `b`.`Id` <= 8)
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """);
     }
 
@@ -663,7 +663,7 @@ SELECT EXISTS (
     SELECT 1
     FROM `Blogs` AS `b`
     WHERE `b`.`Id` > 7)
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """,
             //
             """
@@ -671,7 +671,7 @@ SELECT EXISTS (
     SELECT 1
     FROM `Blogs` AS `b`
     WHERE `b`.`Id` < 7)
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """,
             //
             """
@@ -679,7 +679,7 @@ SELECT EXISTS (
     SELECT 1
     FROM `Blogs` AS `b`
     WHERE `b`.`Id` > 7)
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """,
             //
             """
@@ -687,7 +687,7 @@ SELECT EXISTS (
     SELECT 1
     FROM `Blogs` AS `b`
     WHERE `b`.`Id` < 7)
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """);
     }
 
@@ -701,7 +701,7 @@ SELECT EXISTS (
     SELECT 1
     FROM `Blogs` AS `b`
     WHERE `b`.`Id` > 7)
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """,
             //
             """
@@ -709,7 +709,7 @@ SELECT EXISTS (
     SELECT 1
     FROM `Blogs` AS `b`
     WHERE `b`.`Id` < 7)
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """,
             //
             """
@@ -717,7 +717,7 @@ SELECT EXISTS (
     SELECT 1
     FROM `Blogs` AS `b`
     WHERE `b`.`Id` > 7)
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """,
             //
             """
@@ -725,7 +725,7 @@ SELECT EXISTS (
     SELECT 1
     FROM `Blogs` AS `b`
     WHERE `b`.`Id` < 7)
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """);
     }
 
@@ -773,7 +773,7 @@ SELECT @p IN (
     SELECT `b`.`Id`
     FROM `Blogs` AS `b`
 )
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """,
             //
             """
@@ -783,7 +783,7 @@ SELECT @p IN (
     SELECT `b`.`Id`
     FROM `Blogs` AS `b`
 )
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """);
     }
 
@@ -799,7 +799,7 @@ SELECT @p IN (
     SELECT `b`.`Id`
     FROM `Blogs` AS `b`
 )
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """,
             //
             """
@@ -809,7 +809,7 @@ SELECT @p IN (
     SELECT `b`.`Id`
     FROM `Blogs` AS `b`
 )
-FROM (SELECT COUNT(*) FROM `#Dual`)
+FROM (SELECT COUNT(*) FROM `Blogs`)
 """);
     }
 

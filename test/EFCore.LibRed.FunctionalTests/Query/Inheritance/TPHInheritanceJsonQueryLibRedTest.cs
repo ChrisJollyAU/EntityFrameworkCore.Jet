@@ -62,9 +62,9 @@ WHERE CAST(JSON_VALUE([d].[ParentComplexType], '$.Nested.NestedInt') AS int) = 5
 
         AssertSql(
             """
-SELECT [d].[ChildComplexType]
-FROM [Drinks] AS [d]
-WHERE [d].[Discriminator] = 1
+SELECT `d`.`ChildComplexType`
+FROM `Drinks` AS `d`
+WHERE `d`.`Discriminator` = 1
 """);
     }
 
@@ -74,8 +74,8 @@ WHERE [d].[Discriminator] = 1
 
         AssertSql(
             """
-SELECT [d].[ParentComplexType]
-FROM [Drinks] AS [d]
+SELECT `d`.`ParentComplexType`
+FROM `Drinks` AS `d`
 """);
     }
 
