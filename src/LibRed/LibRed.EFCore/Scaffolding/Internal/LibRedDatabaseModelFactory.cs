@@ -35,8 +35,9 @@ public class LibRedDatabaseModelFactory(IDiagnosticsLogger<DbLoggerCategory.Scaf
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(options);
 
-        string path = connection is LibRedConnection libred ? libred.DataSource : new LibRedConnection(connection.ConnectionString).DataSource;
-        using var database = JetDatabase.Open(path);
+        var builder = LibRedConnectionStringBuilder.Parse(connection.ConnectionString);
+        string path = builder.DataSource ?? string.Empty;
+        using var database = JetDatabase.Open(path, password: builder.Password);
 
         var databaseModel = new DatabaseModel { DatabaseName = Path.GetFileNameWithoutExtension(path) };
 

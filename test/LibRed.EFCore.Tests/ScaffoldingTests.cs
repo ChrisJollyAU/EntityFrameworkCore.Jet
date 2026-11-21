@@ -1,5 +1,6 @@
 using EntityFrameworkCore.LibRed.Design.Internal;
 using EntityFrameworkCore.LibRed.Scaffolding.Internal;
+using LibRed.Crypto;
 using LibRed.Data;
 using Microsoft.EntityFrameworkCore.Scaffolding;
 using Microsoft.Extensions.DependencyInjection;
@@ -80,6 +81,29 @@ public class ScaffoldingTests
         Assert.Equal("1", od.Columns.Single(c => c.Name == "Quantity").DefaultValueSql);
         Assert.Equal("0", od.Columns.Single(c => c.Name == "UnitPrice").DefaultValueSql);
         Assert.Null(customers.Columns.Single(c => c.Name == "ContactName").DefaultValueSql);
+    }
+
+    [Fact]
+    public void A_bare_path_connection_string_scaffolds()
+    {
+        var model = Factory().Create(Northwind, new DatabaseModelFactoryOptions());
+        Assert.Contains("Customers", model.Tables.Select(t => t.Name));
+    }
+
+    [Fact]
+    public void A_password_protected_database_scaffolds_with_the_connection_strings_password()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"scaffold-pwd-{Guid.NewGuid():N}.accdb");
+        File.Copy(Northwind, path);
+        try
+        {
+            using (JetDatabase db = JetDatabase.Open(path, readOnly: false, exclusive: true))
+                DatabaseEncryption.SetPassword(db, "abc", AccessEncryption.Agile);
+
+            var model = Factory().Create($"Data Source={path};Password=abc", new DatabaseModelFactoryOptions());
+            Assert.Contains("Customers", model.Tables.Select(t => t.Name));
+        }
+        finally { try { File.Delete(path); } catch (IOException) { } }
     }
 
     // A default stored with a leading = (as ACE stores DEFAULT =7) is the value without it; the text stays verbatim.

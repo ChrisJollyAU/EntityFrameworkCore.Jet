@@ -87,7 +87,7 @@ public sealed class LibRedConnection : DbConnection
 
     public override string Database => DataSource;
 
-    public override string DataSource => ParseDataSource(_connectionString);
+    public override string DataSource => LibRedConnectionStringBuilder.Parse(_connectionString).DataSource ?? string.Empty;
 
     public override string ServerVersion => _database?.Format.Version.ToString() ?? string.Empty;
 
@@ -96,24 +96,17 @@ public sealed class LibRedConnection : DbConnection
     /// <summary>True if the database file named by <paramref name="connectionString"/> exists.</summary>
     public static bool DatabaseExists(string? connectionString)
     {
-        string path = ParseDataSource(connectionString ?? string.Empty);
+        string? path = LibRedConnectionStringBuilder.Parse(connectionString ?? string.Empty).DataSource;
         return !string.IsNullOrEmpty(path) && File.Exists(path);
     }
 
     /// <summary>
-    /// Builds a canonical <c>Data Source=...</c> connection string from a bare file name. If
-    /// <paramref name="fileNameOrConnectionString"/> already looks like a connection string
-    /// (contains a <c>key=value</c> pair), it is returned unchanged.
+    /// Builds the normalized connection string (see <see cref="LibRedConnectionStringBuilder.Parse"/>) for a bare
+    /// file name or a connection string: canonical <c>Data Source=...</c> with the full, expanded path, and
+    /// <c>Password</c> where one was given. Empty input gives an empty string.
     /// </summary>
     public static string GetConnectionString(string fileNameOrConnectionString)
-    {
-        if (string.IsNullOrWhiteSpace(fileNameOrConnectionString))
-            return string.Empty;
-
-        return fileNameOrConnectionString.Contains('=')
-            ? fileNameOrConnectionString
-            : $"Data Source={fileNameOrConnectionString}";
-    }
+        => LibRedConnectionStringBuilder.Parse(fileNameOrConnectionString).ConnectionString;
 
     /// <summary>
     /// Creates a new, empty Jet/ACE database file at the location named by
@@ -140,7 +133,7 @@ public sealed class LibRedConnection : DbConnection
         Catalog.Collation? collation = null,
         Formats.JetVersion version = Formats.JetVersion.Version12_2007)
     {
-        string path = ParseDataSource(connectionString);
+        string? path = LibRedConnectionStringBuilder.Parse(connectionString).DataSource;
         if (string.IsNullOrEmpty(path))
             throw new ArgumentException("The connection string is missing a Data Source.", nameof(connectionString));
 
@@ -180,7 +173,7 @@ public sealed class LibRedConnection : DbConnection
     /// <summary>Deletes the database file named by <paramref name="connectionString"/>, if it exists.</summary>
     public static void DropDatabase(string connectionString)
     {
-        string path = ParseDataSource(connectionString);
+        string? path = LibRedConnectionStringBuilder.Parse(connectionString).DataSource;
         if (!string.IsNullOrEmpty(path) && File.Exists(path))
             File.Delete(path);
     }
@@ -208,11 +201,12 @@ public sealed class LibRedConnection : DbConnection
     {
         if (_state == ConnectionState.Open) return;
 
-        string path = DataSource;
+        var builder = LibRedConnectionStringBuilder.Parse(_connectionString);
+        string? path = builder.DataSource;
         if (string.IsNullOrEmpty(path))
             throw new InvalidOperationException("Connection string is missing a Data Source.");
 
-        _database = JetDatabase.Open(path, readOnly: false);
+        _database = JetDatabase.Open(path, readOnly: false, password: builder.Password);
         Engine = new QueryEngine(_database);
         _state = ConnectionState.Open;
         OnStateChange(new StateChangeEventArgs(ConnectionState.Closed, ConnectionState.Open));
@@ -308,42 +302,4 @@ public sealed class LibRedConnection : DbConnection
         base.Dispose(disposing);
     }
 
-    private static string ParseDataSource(string connectionString)
-    {
-        if (string.IsNullOrWhiteSpace(connectionString)) return string.Empty;
-
-        // Allow a bare path as the whole connection string.
-        if (!connectionString.Contains('='))
-            return ExpandPath(connectionString.Trim());
-
-        // Let the framework parser handle quoted/escaped values. In particular, splitting on
-        // semicolons selects the wrong file for a valid value such as Data Source="a;b.accdb".
-        // When aliases are mixed, prefer the canonical spelling, then DataSource, then DBQ.
-        var builder = new DbConnectionStringBuilder { ConnectionString = connectionString };
-        string? raw = TryGetString(builder, "Data Source")
-            ?? TryGetString(builder, "DataSource")
-            ?? TryGetString(builder, "DBQ");
-
-        return string.IsNullOrEmpty(raw) ? string.Empty : ExpandPath(raw);
-    }
-
-    private static string? TryGetString(DbConnectionStringBuilder builder, string key) =>
-        builder.TryGetValue(key, out object? value)
-            ? Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture)
-            : null;
-
-    /// <summary>
-    /// Resolves to a full path and defaults to a ".accdb" extension - matches EFCore.Jet.Data's
-    /// internal <c>JetStoreDatabaseHandling.ExpandFileName</c>/<c>EnsureFileExtension</c>, so
-    /// LibRedConnection agrees with <see cref="JetConnection" />'s bootstrap (see
-    /// <see cref="CreateDatabase" />) about which file e.g. <c>Data Source=Foo</c> actually names.
-    /// Without this, a bare name like "Foo" would resolve here to a different path than the
-    /// "Foo.accdb" that DAO/ADOX actually creates, and DatabaseExists/DropDatabase/Open would all
-    /// silently look in the wrong place.
-    /// </summary>
-    private static string ExpandPath(string path)
-    {
-        var fullPath = Path.GetFullPath(path);
-        return string.IsNullOrEmpty(Path.GetExtension(fullPath)) ? fullPath + ".accdb" : fullPath;
-    }
 }
