@@ -1,5 +1,7 @@
 using LibRed;
 using LibRed.Engine;
+using LibRed.IO;
+using LibRed.Storage;
 using Xunit;
 
 namespace LibRed.Engine.Tests;
@@ -90,6 +92,86 @@ public class CreateIndexTests
                 Assert.True(ix.IgnoreNulls);
                 // All rows are still in the table (the null one is just absent from the index).
                 Assert.Equal(3, new QueryEngine(db).ExecuteQuery("SELECT `Id` FROM `T`").Rows.Count());
+            }
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // A multi-column WITH IGNORE NULL index leaves out only a key whose every column is Null. Rows (1, Null),
+    // (Null, Null), (1, 2) by Id 1-3, filled by inserts or built over the rows, then one statement; the index holds
+    // the listed rows in key order, with the unique-entry count beside it. Values measured against ACE in
+    // IndexUniqueEntryCountAccessTests.An_ignore_null_index_leaves_out_only_an_all_null_key.
+    [Theory]
+    [InlineData(true, "", "1,3", 2)]
+    [InlineData(false, "", "1,3", 2)]
+    [InlineData(true, "DELETE FROM T WHERE Id = 1", "3", 2)]
+    [InlineData(false, "DELETE FROM T WHERE Id = 1", "3", 1)]
+    [InlineData(true, "UPDATE T SET A = NULL WHERE Id = 1", "3", 2)]                // held row becomes all-Null, leaves
+    [InlineData(false, "UPDATE T SET A = NULL WHERE Id = 1", "3", 1)]
+    [InlineData(true, "UPDATE T SET A = 1 WHERE Id = 2", "1,2,3", 2)]               // all-Null row enters
+    [InlineData(false, "UPDATE T SET A = 1 WHERE Id = 2", "1,2,3", 2)]
+    [InlineData(true, "UPDATE T SET A = NULL, B = 2 WHERE Id = 1", "1,3", 2)]        // partly-Null to partly-Null
+    [InlineData(false, "UPDATE T SET A = NULL, B = 2 WHERE Id = 1", "1,3", 1)]
+    public void With_ignore_null_multi_column_leaves_out_only_all_null_keys(bool indexFirst, string sql, string ids, int unique)
+    {
+        string path = Fresh();
+        try
+        {
+            using (var db = JetDatabase.Open(path, readOnly: false))
+            {
+                var e = new QueryEngine(db);
+                string[] rows = ["INSERT INTO T VALUES (1, 1, NULL)", "INSERT INTO T VALUES (2, NULL, NULL)", "INSERT INTO T VALUES (3, 1, 2)"];
+                const string index = "CREATE INDEX ixAB ON T (A, B) WITH IGNORE NULL";
+                foreach (string statement in (string[])
+                    ["CREATE TABLE T (Id LONG CONSTRAINT pkT PRIMARY KEY, A LONG, B LONG)",
+                     .. indexFirst ? [index, .. rows] : (string[])[.. rows, index],
+                     .. sql.Length > 0 ? [sql] : (string[])[]])
+                    e.ExecuteNonQuery(statement);
+            }
+            using (var db = JetDatabase.Open(path))
+            {
+                var table = db.Catalog.FindTable("T")!;
+                var ix = table.Indexes.Single(x => x.Name == "ixAB");
+                int idColumn = table.FindColumn("Id")!.Index;
+                var idByRow = db.OpenTable("T").Rows().WithIds().ToDictionary(r => r.Id.Packed, r => r.Values[idColumn]);
+                using var channel = PageChannel.Open(path, readOnly: true);
+                Assert.Equal(ids, string.Join(",", new IndexCursor(channel, ix.RootPage).RawEntries().Select(x => idByRow[x.Row.Packed])));
+                Assert.Equal(unique, ix.UniqueEntryCount);
+            }
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // A UNIQUE WITH IGNORE NULL index accepts the partly-Null key (1, Null) twice and holds both rows, built over
+    // the rows or filled by inserts. Measured against ACE in
+    // IndexUniqueEntryCountAccessTests.A_unique_ignore_null_index_given_a_partly_null_key_twice.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_unique_ignore_null_index_accepts_a_partly_null_key_twice(bool indexFirst)
+    {
+        string path = Fresh();
+        try
+        {
+            using (var db = JetDatabase.Open(path, readOnly: false))
+            {
+                var e = new QueryEngine(db);
+                string[] rows = ["INSERT INTO T VALUES (1, 1, NULL)", "INSERT INTO T VALUES (2, 1, NULL)"];
+                const string index = "CREATE UNIQUE INDEX ixAB ON T (A, B) WITH IGNORE NULL";
+                foreach (string statement in (string[])
+                    ["CREATE TABLE T (Id LONG CONSTRAINT pkT PRIMARY KEY, A LONG, B LONG)",
+                     .. indexFirst ? [index, .. rows] : (string[])[.. rows, index]])
+                    e.ExecuteNonQuery(statement);
+            }
+            using (var db = JetDatabase.Open(path))
+            {
+                var table = db.Catalog.FindTable("T")!;
+                var ix = table.Indexes.Single(x => x.Name == "ixAB");
+                int idColumn = table.FindColumn("Id")!.Index;
+                var idByRow = db.OpenTable("T").Rows().WithIds().ToDictionary(r => r.Id.Packed, r => r.Values[idColumn]);
+                using var channel = PageChannel.Open(path, readOnly: true);
+                Assert.Equal("1,2", string.Join(",", new IndexCursor(channel, ix.RootPage).RawEntries().Select(x => idByRow[x.Row.Packed])));
+                Assert.Equal(1, ix.UniqueEntryCount);
             }
         }
         finally { TemporaryDatabase.Delete(path); }

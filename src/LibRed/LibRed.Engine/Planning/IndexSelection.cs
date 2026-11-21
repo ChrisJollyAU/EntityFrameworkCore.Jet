@@ -620,7 +620,7 @@ internal static class IndexSelection
     /// collation involved, so index order and <see cref="ExpressionEvaluator.CompareForSort"/> cannot disagree.
     /// Text keys are NLS sort keys and lossy; whether they order identically to the evaluator is a separate
     /// question that wants checking against ACE before being relied on here.</description></item>
-    /// <item><description><b>Not a WITH IGNORE NULL index</b>, which omits null-keyed rows from the B-tree
+    /// <item><description><b>Not a WITH IGNORE NULL index</b>, which omits all-null-keyed rows from the B-tree
     /// altogether — reading it in order would silently drop rows. An ordinary index stores nulls, sorted first
     /// ascending (<c>AscNull</c> 0x00 &lt; <c>AscStart</c> 0x7F), exactly as CompareForSort puts them.</description></item>
     /// </list>

@@ -19,7 +19,7 @@ public sealed record IndexDef
     public bool IsUnique { get; init; }
     public bool IsPrimaryKey { get; init; }
 
-    /// <summary>WITH IGNORE NULL: rows with a null in any indexed column are excluded from the index
+    /// <summary>WITH IGNORE NULL: rows whose key is null in every indexed column are excluded from the index
     /// (index flag <c>0x02</c>). Such rows are not added to the B-tree on insert.</summary>
     public bool IgnoreNulls { get; init; }
 

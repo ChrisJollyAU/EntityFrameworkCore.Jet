@@ -242,7 +242,7 @@ public sealed class Table
     {
         new IndexTree(Channel, Definition).MoveEntry(index, oldValues, newValues, id);
         // An IGNORE NULL index the row was absent from never counted it, so has nothing to count out.
-        if (!(index.IgnoreNulls && IndexTree.HasNullKey(index, oldValues)))
+        if (!IndexTree.LeavesOut(index, oldValues))
             new RowInserter(Channel, Definition).CountKeyMoved(index);
     }
 

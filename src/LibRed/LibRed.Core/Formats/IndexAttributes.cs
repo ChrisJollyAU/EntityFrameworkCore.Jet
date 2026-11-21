@@ -12,7 +12,7 @@ public enum IndexAttributes : ushort
     /// <summary>The index is unique (WITH PRIMARY / a unique index or constraint).</summary>
     Unique = 0x0001,
 
-    /// <summary>WITH IGNORE NULL: rows with a null in any indexed column are excluded from the index.</summary>
+    /// <summary>WITH IGNORE NULL: rows whose key is null in every indexed column are excluded from the index.</summary>
     IgnoreNulls = 0x0002,
 
     /// <summary>WITH DISALLOW NULL (Required): the index rejects a null key. Set for primary keys and for

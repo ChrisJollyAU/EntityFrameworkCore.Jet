@@ -142,19 +142,19 @@ internal sealed class IndexTree(PageChannel channel, TableDefinition table)
     /// <summary>
     /// Moves a row's entry when its key changes: removes the old-key entry and inserts the new-key one (the
     /// row id is unchanged — Access rewrites rows in place). Honours WITH IGNORE NULL on each side (a row with
-    /// a null key is simply absent from the index). Used by UPDATE of an indexed column.
+    /// an all-null key is simply absent from the index). Used by UPDATE of an indexed column.
     /// </summary>
     public void MoveEntry(IndexDef index, object?[] oldValues, object?[] newValues, RowId rowId)
     {
-        if (!(index.IgnoreNulls && HasNullKey(index, oldValues))) RemoveEntry(index, oldValues, rowId);
-        if (!(index.IgnoreNulls && HasNullKey(index, newValues))) AddEntry(index, newValues, rowId);
+        if (!LeavesOut(index, oldValues)) RemoveEntry(index, oldValues, rowId);
+        if (!LeavesOut(index, newValues)) AddEntry(index, newValues, rowId);
     }
 
     /// <summary>Removes a row's entry when the row is deleted — a no-op for a WITH IGNORE NULL index whose
-    /// key the row was absent from (null key), otherwise <see cref="RemoveEntry"/>.</summary>
+    /// key the row was absent from (all-null key), otherwise <see cref="RemoveEntry"/>.</summary>
     public void DeleteEntry(IndexDef index, object?[] values, RowId rowId)
     {
-        if (index.IgnoreNulls && HasNullKey(index, values)) return;
+        if (LeavesOut(index, values)) return;
         RemoveEntry(index, values, rowId);
     }
 
@@ -286,6 +286,12 @@ internal sealed class IndexTree(PageChannel channel, TableDefinition table)
 
     internal static bool HasNullKey(IndexDef index, object?[] values) =>
         index.Columns.Any(c => values[c.Column.Index] is null or DBNull);
+
+    /// <summary>Whether <paramref name="index"/> leaves the row out: a WITH IGNORE NULL index does not hold a key
+    /// whose every column is Null. A key with only some columns Null is held and counted like any other (verified
+    /// vs ACE). Uniqueness exempts a key with a Null in any column instead — that is <see cref="HasNullKey"/>.</summary>
+    internal static bool LeavesOut(IndexDef index, object?[] values) =>
+        index.IgnoreNulls && index.Columns.All(c => values[c.Column.Index] is null or DBNull);
 
     /// <summary>Descends to the leaf that should hold the key, recording the path from the root.</summary>
     private List<int> Descend(int rootPage, byte[] fullKey)

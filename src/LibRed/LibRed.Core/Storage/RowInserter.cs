@@ -526,8 +526,8 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
 
     /// <summary>
     /// The real-index ordinals for which the row at <paramref name="id"/> holds the only copy of its key, so
-    /// removing the row also removes a distinct key. An index the row is excluded from (IgnoreNulls with a
-    /// null key) never counted it, so it is never counted down either — the mirror of the insert side.
+    /// removing the row also removes a distinct key. An index the row is excluded from (IgnoreNulls with an
+    /// all-null key) never counted it, so it is never counted down either — the mirror of the insert side.
     /// </summary>
     private HashSet<int> IndexesLosingTheirLastKey(JetFormatBase format, byte[] rowBytes, RowId id)
     {
@@ -544,7 +544,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         foreach (IndexDef index in _table.Indexes.GroupBy(i => i.RealIndexOrdinal).Select(g => g.First()))
         {
             if (index.RootPage <= 0) continue;
-            if (index.IgnoreNulls && HasNullKey(index, values)) continue;
+            if (IndexTree.LeavesOut(index, values)) continue;
             if (!writer.KeyExists(index, values, id.Packed))
                 lost.Add(index.RealIndexOrdinal);
         }
@@ -843,7 +843,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         foreach (IndexDef index in _table.RealIndexes.Where(i => i.IsUnique))
         {
             if (changedColumns is not null && !index.Columns.Any(c => changedColumns.Contains(c.Column.Index))) continue;
-            if (HasNullKey(index, values)) continue; // nulls are distinct — multiple allowed
+            if (IndexTree.HasNullKey(index, values)) continue; // nulls are distinct — multiple allowed
             writer ??= new IndexTree(_channel, _table);
             if (!writer.KeyExists(index, values, excludePointer)) continue;
             if (excludePointer is null) CountKeysBeforeRefusal(index, values);
@@ -862,8 +862,8 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         var writer = new IndexTree(_channel, _table);
         foreach (IndexDef index in _table.RealIndexes)
         {
-            // WITH IGNORE NULL: a row with a null in any indexed column is not added to this index.
-            if (index.IgnoreNulls && HasNullKey(index, values)) continue;
+            // WITH IGNORE NULL: a row whose every indexed column is null is not added to this index.
+            if (IndexTree.LeavesOut(index, values)) continue;
             writer.AddEntry(index, values, rowId);
         }
     }
@@ -872,8 +872,8 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
     /// The root pages of the indexes the row brings a key they do not hold yet — the ones whose unique-entry count
     /// advances (verified vs ACE: a key equal to one already in the index, collation included, adds nothing; a key
     /// whose last row was deleted counts again; a Null key counts like any other, except in an IGNORE NULL index,
-    /// which does not hold it). A unique index is no exception: it may hold a key with a Null in it more than
-    /// once, and a repeat adds nothing (measured, whole-file diff — WholeFileParityProbeTest: two more rows with a
+    /// which does not hold a key whose every column is Null). A unique index is no exception: it may hold a key
+    /// with a Null in it more than once, and a repeat adds nothing (measured, whole-file diff — WholeFileParityProbeTest: two more rows with a
     /// Null in a unique index's column left its count at 1). A unique key without a Null cannot be there already,
     /// so only one with a Null is looked up — unless the row is <paramref name="refusedAt"/> an index: then only the
     /// indexes ACE gives the key before refusing it count, the real indexes taken in order up to that one, or to an
@@ -887,11 +887,11 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         IndexTree? writer = null;
         foreach (IndexDef index in refusedAt is null ? _table.RealIndexes : _table.RealIndexes.OrderBy(i => i.RealIndexOrdinal))
         {
-            bool nullKey = HasNullKey(index, values);
+            bool nullKey = IndexTree.HasNullKey(index, values);
             if (refusedAt is not null
                 && (index.RealIndexOrdinal >= refusedAt.RealIndexOrdinal || nullKey && (index.IsPrimaryKey || index.Required)))
                 break;
-            if (index.IgnoreNulls && nullKey) continue;
+            if (IndexTree.LeavesOut(index, values)) continue;
             if (index.IsUnique && !nullKey && refusedAt is null)
             {
                 gaining.Add(index.RootPage);
@@ -903,9 +903,6 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         }
         return gaining;
     }
-
-    private static bool HasNullKey(IndexDef index, object?[] values) =>
-        index.Columns.Any(c => values[c.Column.Index] is null or DBNull);
 
     /// <summary>Finds a data page with room for a row of the needed size, growing the table if none has.</summary>
     /// <remarks>

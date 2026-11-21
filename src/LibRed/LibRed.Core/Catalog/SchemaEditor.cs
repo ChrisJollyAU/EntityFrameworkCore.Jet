@@ -853,7 +853,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
 
         // Back-fill the new (empty) index B-tree with an entry per existing row, so the index is complete.
         if (existingRowCount != 0)
-            BackfillIndex(table, indexName, ignoreNulls, validateUnique: false);
+            BackfillIndex(table, indexName, validateUnique: false);
         return newNum;
     }
 
@@ -864,8 +864,8 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// already holds rows is the usual way to get there). Purely a read, touching nothing on disk, so it is safe
     /// to call before the index exists. For uniqueness, rows with a null in any key column are exempt — Jet's
     /// uniqueness is over the non-null keys only, so several rows may be null (verified vs ACE; see the
-    /// constraints page); a WITH IGNORE NULL index leaves them out of the B-tree altogether, so either way they
-    /// cannot collide.
+    /// constraints page). A WITH IGNORE NULL index leaves out of the B-tree only a key that is Null in every
+    /// column; a partly-Null key is held there but is still exempt from uniqueness.
     /// </summary>
     /// <remarks>
     /// Comparison is on the encoded key, not the raw values, which is deliberate: the encoding is what the
@@ -899,7 +899,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
 
     /// <summary>Populates a freshly added index over a table's existing rows: encodes every live row's key,
     /// then hands the lot to <see cref="IndexTree.BulkBuild"/>, which sorts them and writes each B-tree page
-    /// once. Rows with a null in an IGNORE NULL index's key are skipped, matching the per-insert path.</summary>
+    /// once. Rows whose key is null in every column of an IGNORE NULL index are skipped, matching the per-insert path.</summary>
     /// <remarks>
     /// This used to insert the rows one at a time, which re-read, re-parsed and rebuilt a whole leaf page per
     /// row: an index over 10,000 rows cost ~440 ms and allocated over a gigabyte, nearly all of it leaves
@@ -911,21 +911,22 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// backing index and an index an ALTER COLUMN rebuilds): the total entry count to the entries it now holds and the
     /// unique entry count to its distinct keys — both from the rows present, not from any earlier history.</para>
     /// </remarks>
-    private void BackfillIndex(TableDefinition definition, string indexName, bool ignoreNulls, bool validateUnique)
+    private void BackfillIndex(TableDefinition definition, string indexName, bool validateUnique)
     {
         // The catalog's first index cannot resolve its own table until it has been back-filled.
         TableDefinition table = _catalog.ReadTableDefinition(definition.DefinitionPage, definition.Name, definition.IsSystem, out _);
         IndexDef index = table.FindIndex(indexName)
             ?? throw new InvalidOperationException($"Index '{indexName}' was not found on '{table.Name}'.");
-        List<(byte[] Key, int Pointer, bool NullKey)> entries = IndexEntries(table, index, ignoreNulls);
+        List<(byte[] Key, int Pointer, bool NullKey)> entries = IndexEntries(table, index);
 
         new IndexTree(_channel, table).BulkBuild(index, entries, validateUnique && index.IsUnique);
         SetBuiltStatistics(table, index, entries);
     }
 
     /// <summary>The entries an index over the table's current rows holds: every live row's encoded key and row
-    /// pointer, less the rows an IGNORE NULL index leaves out.</summary>
-    private List<(byte[] Key, int Pointer, bool NullKey)> IndexEntries(TableDefinition table, IndexDef index, bool ignoreNulls)
+    /// pointer, less the rows an IGNORE NULL index leaves out. Each entry's <c>NullKey</c> says whether any key
+    /// column is Null — the uniqueness exemption, wider than what IGNORE NULL leaves out.</summary>
+    private List<(byte[] Key, int Pointer, bool NullKey)> IndexEntries(TableDefinition table, IndexDef index)
     {
         var keyColumnIds = index.Columns.Select(c => c.Column.Index).ToArray();
         var entries = new List<(byte[] Key, int Pointer, bool NullKey)>();
@@ -934,9 +935,8 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         var rows = new Table(_channel, table, _catalog);
         foreach ((RowId id, object?[] values) in rows.Rows(rows.DecodeOnly(keyColumnIds)).WithIds())
         {
-            bool hasNullKey = keyColumnIds.Any(i => values[i] is null);
-            if (ignoreNulls && hasNullKey) continue;
-            entries.Add((IndexKeyCodec.Encode(index.Columns, values), id.Packed, hasNullKey));
+            if (IndexTree.LeavesOut(index, values)) continue;
+            entries.Add((IndexKeyCodec.Encode(index.Columns, values), id.Packed, IndexTree.HasNullKey(index, values)));
         }
         return entries;
     }
@@ -2585,12 +2585,12 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             List<int> rebuildOrder = parts.Logical
                 .Select(b => TableDefinition.ReadInfoBlock(b.Info, format, NameOf(b.Name)).DataOrdinal)
                 .Distinct().Where(affectedIndexes.ContainsKey).ToList();
-            var pending = new List<(string Name, int OldRoot, int NewRoot, bool IgnoreNulls)>();
+            var pending = new List<(string Name, int OldRoot, int NewRoot)>();
             foreach (int ordinal in rebuildOrder)
             {
                 IndexDef index = affectedIndexes[ordinal];
                 int newRoot = PrepareIndexRebuild(parts, oldDef, index, oldTargetId, newTargetId);
-                pending.Add((index.Name, index.RootPage, newRoot, index.IgnoreNulls));
+                pending.Add((index.Name, index.RootPage, newRoot));
             }
             ReassignRebuiltIndexSlots(parts, rebuildOrder);
 
@@ -2650,7 +2650,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             //    (last, so the new root got the appended page rather than reusing this one) — as ACE does.
             foreach (var p in pending)
             {
-                BackfillIndex(newDef, p.Name, p.IgnoreNulls, validateUnique: true);
+                BackfillIndex(newDef, p.Name, validateUnique: true);
                 _allocator.Release(p.OldRoot);
             }
 

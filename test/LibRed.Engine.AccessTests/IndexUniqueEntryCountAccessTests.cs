@@ -236,6 +236,118 @@ public class IndexUniqueEntryCountAccessTests(ITestOutputHelper output)
         }
     }
 
+    // A multi-column IGNORE NULL index leaves out only a key whose every column is Null: (1, Null) is held and
+    // counted beside (1, 2), (Null, Null) is not. Filled by inserts and built over the rows; then the held row
+    // deleted, updated to all-Null so it leaves the index, or moved to another partly-Null key; and the all-Null row
+    // updated to a partly-Null key so it enters the index.
+    [Theory]
+    [InlineData(true, "")]
+    [InlineData(false, "")]
+    [InlineData(true, "DELETE FROM T WHERE Id = 1")]
+    [InlineData(false, "DELETE FROM T WHERE Id = 1")]
+    [InlineData(true, "UPDATE T SET A = NULL WHERE Id = 1")]
+    [InlineData(false, "UPDATE T SET A = NULL WHERE Id = 1")]
+    [InlineData(true, "UPDATE T SET A = 1 WHERE Id = 2")]
+    [InlineData(false, "UPDATE T SET A = 1 WHERE Id = 2")]
+    [InlineData(true, "UPDATE T SET A = NULL, B = 2 WHERE Id = 1")]
+    [InlineData(false, "UPDATE T SET A = NULL, B = 2 WHERE Id = 1")]
+    public void An_ignore_null_index_leaves_out_only_an_all_null_key(bool indexFirst, string sql)
+    {
+        string northwind = Path.Combine(AppContext.BaseDirectory, "Data", "Northwind.accdb");
+        string ace = TemporaryDatabase.CopyPath(northwind, "uniqcount-ign-ace-");
+        string libred = TemporaryDatabase.CopyPath(northwind, "uniqcount-ign-lib-");
+        string[] rows = ["INSERT INTO T VALUES (1, 1, NULL)", "INSERT INTO T VALUES (2, NULL, NULL)", "INSERT INTO T VALUES (3, 1, 2)"];
+        const string index = "CREATE INDEX ixAB ON T (A, B) WITH IGNORE NULL";
+        try
+        {
+            foreach (string statement in (string[])
+                ["CREATE TABLE T (Id LONG CONSTRAINT pkT PRIMARY KEY, A LONG, B LONG)",
+                 .. indexFirst ? [index, .. rows] : (string[])[.. rows, index],
+                 .. sql.Length > 0 ? [sql] : (string[])[]])
+            {
+                Ace(ace, statement);
+                LibRed(libred, statement);
+            }
+            string aceLeaf = Leaf(ace), libredLeaf = Leaf(libred);
+            string aceStats = Statistics(ace, "T"), libredStats = Statistics(libred, "T");
+            output.WriteLine($"{(indexFirst ? "index, then rows" : "rows, then index")}; {(sql.Length > 0 ? sql : "-")}"
+                + $"\n  ACE    {aceLeaf}   {aceStats}\n  LibRed {libredLeaf}   {libredStats}");
+            Assert.Equal(aceLeaf, libredLeaf);
+            Assert.Equal(aceStats, libredStats);
+            Assert.Equal(Counts(ace, "T"), Counts(libred, "T"));
+        }
+        finally
+        {
+            TemporaryDatabase.Delete(ace);
+            TemporaryDatabase.Delete(libred);
+        }
+    }
+
+    // A UNIQUE IGNORE NULL index given (1, Null) twice: the second row inserted into the index, or the index built
+    // over both rows. Whether each engine accepts or refuses, and what the leaf then holds.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_unique_ignore_null_index_given_a_partly_null_key_twice(bool indexFirst)
+    {
+        string northwind = Path.Combine(AppContext.BaseDirectory, "Data", "Northwind.accdb");
+        string ace = TemporaryDatabase.CopyPath(northwind, "uniqcount-uign-ace-");
+        string libred = TemporaryDatabase.CopyPath(northwind, "uniqcount-uign-lib-");
+        string[] rows = ["INSERT INTO T VALUES (1, 1, NULL)", "INSERT INTO T VALUES (2, 1, NULL)"];
+        const string index = "CREATE UNIQUE INDEX ixAB ON T (A, B) WITH IGNORE NULL";
+        try
+        {
+            var outcomes = new List<string>();
+            var aceAccepted = new List<bool>();
+            var libredAccepted = new List<bool>();
+            foreach (string statement in (string[])
+                ["CREATE TABLE T (Id LONG CONSTRAINT pkT PRIMARY KEY, A LONG, B LONG)",
+                 .. indexFirst ? [index, .. rows] : (string[])[.. rows, index]])
+            {
+                string aceOutcome = Outcome(() => Ace(ace, statement)), libredOutcome = Outcome(() => LibRed(libred, statement));
+                outcomes.Add($"{statement}\n    ACE    {aceOutcome}\n    LibRed {libredOutcome}");
+                aceAccepted.Add(aceOutcome == "accepted");
+                libredAccepted.Add(libredOutcome == "accepted");
+            }
+            string aceLeaf = Indexed(ace) ? Leaf(ace) : "-", libredLeaf = Indexed(libred) ? Leaf(libred) : "-";
+            output.WriteLine($"{(indexFirst ? "index, then rows" : "rows, then index")}\n  {string.Join("\n  ", outcomes)}"
+                + $"\n  ACE    {aceLeaf}   {Statistics(ace, "T")}\n  LibRed {libredLeaf}   {Statistics(libred, "T")}");
+            Assert.Equal(aceAccepted, libredAccepted);
+            Assert.Equal(aceLeaf, libredLeaf);
+            Assert.Equal(Statistics(ace, "T"), Statistics(libred, "T"));
+        }
+        finally
+        {
+            TemporaryDatabase.Delete(ace);
+            TemporaryDatabase.Delete(libred);
+        }
+
+        static bool Indexed(string path)
+        {
+            using var db = JetDatabase.Open(path);
+            return db.Catalog.FindTable("T")!.Indexes.Any(i => i.Name == "ixAB");
+        }
+
+        static string Outcome(Action run)
+        {
+            try { run(); return "accepted"; }
+            catch (Exception ex) { return $"refused: {ex.GetType().Name}: {ex.Message}"; }
+        }
+    }
+
+    // ixAB's leaf entries (its root is its only leaf here), each as its key and the Id of the row it points at.
+    private static string Leaf(string path)
+    {
+        using var db = JetDatabase.Open(path);
+        TableDefinition table = db.Catalog.FindTable("T")!;
+        IndexDef ix = table.Indexes.Single(i => i.Name == "ixAB");
+        var rowsById = db.OpenTable("T").Rows().WithIds()
+            .ToDictionary(r => r.Id.Packed, r => r.Values[table.FindColumn("Id")!.Index]);
+        Storage.IndexTree.CheckedPage root = Storage.IndexTree.Read(db.Channel, ix.RootPage, table.DefinitionPage);
+        return "[" + string.Join(", ", Storage.IndexTree.DecodeEntries(root)
+            .Select(e => $"{Convert.ToHexString(e.Key)}->Id {rowsById[e.Trailer]}")) + "]";
+    }
+
     /// <summary>Each of the tables' real indexes as table.name=total/unique, read from its statistics block.</summary>
     private static string Statistics(string path, params string[] tables)
     {

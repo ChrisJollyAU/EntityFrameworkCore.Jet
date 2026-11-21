@@ -33,7 +33,9 @@ statistics:
     Null more than once, and a repeat adds nothing (verified).
   - Keys are compared as index keys, so
     collation-equal text (`'a'`, `'A'`) is one key; a **Null is a key** like any other (a second Null adds
-    nothing), except in an **IGNORE NULL** index, which does not hold it and so never counts it. A key whose
+    nothing), except in an **IGNORE NULL** index, which does not hold a key whose **every** column is Null and
+    so never counts it — a multi-column key with only **some** columns Null is held and counted (verified,
+    below). A key whose
     last row was deleted **counts again** when it returns. A multi-column index compares the whole tuple.
   - An **UPDATE never advances it**, even one that gives a row a key no other row has (it can lower it — see
     "On update").
@@ -78,7 +80,7 @@ differently from a delete:
   matter, and the new key advances nothing. So an index at 6/4 reads 5/4 after one row's key changes (to a key
   it already held or to one it did not), one at 11/11 reads 6/6 after five rows' keys change, and changing
   every key of a 6/4 index takes it to 0/0.
-- An index the row is absent from before the update — a Null key in an IGNORE NULL index — is not touched,
+- An index the row is absent from before the update — an all-Null key in an IGNORE NULL index — is not touched,
   even when the update brings the row in.
 
 > An index built empty does not show the update rule: its zero total leaves the pair alone whatever the update
@@ -99,7 +101,7 @@ differently from a delete:
 | `0x23` | 3 | Usage-map page |
 | `0x26` | 4 | **B-tree root page** |
 | `0x2A` | 4 | Unknown / reserved (zero). Not read by ACE, and zeroed when it rewrites the TDEF (verified) |
-| `0x2E` | 2 | Flags: `0x01` unique, `0x02` ignore-nulls (`WITH IGNORE NULL` — null-keyed rows excluded from the index), `0x08` required (`WITH DISALLOW NULL` / part of a primary key), `0x80` always-set (Access 2000+), `0x0200` an index over a **complex** (multi-value / attachment) column. Verified vs ACE: a plain index is `0x0080`, `IGNORE NULL` `0x0082`, `DISALLOW NULL` `0x0088`, a PK `0x0089`. Every index Access writes over a complex column is `0x0289` — unique, required, always-set and `0x0200` — and no other index carries `0x0200` (verified). A foreign key's child block (§3.6) carries `0x01` exactly when the relationship is one-to-one
+| `0x2E` | 2 | Flags: `0x01` unique, `0x02` ignore-nulls (`WITH IGNORE NULL` — rows whose key is Null in every column excluded from the index), `0x08` required (`WITH DISALLOW NULL` / part of a primary key), `0x80` always-set (Access 2000+), `0x0200` an index over a **complex** (multi-value / attachment) column. Verified vs ACE: a plain index is `0x0080`, `IGNORE NULL` `0x0082`, `DISALLOW NULL` `0x0088`, a PK `0x0089`. Every index Access writes over a complex column is `0x0289` — unique, required, always-set and `0x0200` — and no other index carries `0x0200` (verified). A foreign key's child block (§3.6) carries `0x01` exactly when the relationship is one-to-one
 (`MSysRelationships.grbit` `0x01`), and **this bit, not `grbit`, is what ACE enforces**: made to disagree, a
 child index with the bit refuses a second child row with the same key although `grbit` says one-to-many, and
 one without it accepts the duplicate although `grbit` says one-to-one (verified vs ACE). There is **no clustered flag**: `CLUSTERED`/`NONCLUSTERED` after `PRIMARY KEY` or `UNIQUE` in a constraint is accepted and stores nothing (the file is byte-identical without it), and DAO's `Index.Clustered` reads `False` even on an index created with it set. |
@@ -116,14 +118,21 @@ one without it accepts the duplicate although `grbit` says one-to-one (verified 
 > reads happily, holding an index over different columns from the ones requested.
 
 > **Unique (`0x01`) enforcement treats NULLs as distinct (verified vs ACE).** A `UNIQUE` index (that is
-> **not** `WITH IGNORE NULL`) rejects a duplicate **non-null** key but permits **multiple NULL** keys — two
+> `WITH IGNORE NULL` or not) rejects a duplicate **non-null** key but permits **multiple NULL** keys — two
 > rows may both be null in the indexed column(s). So uniqueness is enforced only over the non-null keys; a
 > row with a null in any indexed column is exempt (matching SQL's "nulls are distinct"). LibRed enforces
 > this on insert/update (`IndexTree.KeyExists`, skipping null-keyed rows), and rejects
 > `CREATE UNIQUE INDEX` when the rows that already exist are not unique — scanned up front, before the
 > TDEF is written, so a rejected statement leaves the file untouched. A `WITH IGNORE NULL` index
-> (`0x02`) additionally leaves null-keyed rows out of the B-tree entirely; a PK (`0x08` required) forbids
-> nulls, so the question doesn't arise.
+> (`0x02`) additionally leaves out of the B-tree entirely a row whose key is Null in **every** column; a row
+> whose key has only **some** columns Null is held and counted like any other (verified vs ACE: a two-column
+> `WITH IGNORE NULL` index over rows `(1, Null)`, `(Null, Null)`, `(1, 2)` holds the first and third rows in
+> its leaf, unique entry count 2). The two rules differ on a multi-column key: uniqueness exempts a Null in
+> **any** column, IGNORE NULL leaves out only Null in **all**; over one column they coincide. A
+> `UNIQUE ... WITH IGNORE NULL` index follows both rules at once (verified vs ACE: over `(A, B)`, the key `(1, Null)`
+> is accepted twice and both rows are held in the leaf; statistics are 2 entries / 1 unique when the index is built over
+> the two rows and 0 / 1 when filled by the inserts). A PK (`0x08`
+> required) forbids nulls, so the question doesn't arise.
 
 > **Required (`0x08`) and the primary key over existing rows (verified vs ACE).** A table has **one** primary
 > key: adding a second — by `ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY` or `ADD COLUMN … PRIMARY KEY` — is
