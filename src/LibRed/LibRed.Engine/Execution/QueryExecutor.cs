@@ -1742,7 +1742,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
             "CINT" => typeof(short),
             "CLNG" => typeof(int),
             "CLNGLNG" => typeof(long),
-            "CSNG" => typeof(float),
+            "CSNG" or "TIMER" => typeof(float),
             "CDBL" => typeof(double),
             "CDEC" or "CCUR" => typeof(decimal),
             // Round, Abs, Int and Fix keep their operand's type — ExpressionEvaluator.Round and Numeric1. Undeclared,

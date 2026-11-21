@@ -272,6 +272,14 @@ public class DateFunctionTests(DateFunctionTests.Database database)
     public void DateDiff_Big_counts_the_same_span(string expression) =>
         Assert.IsType<long>(Scalar(expression));
 
+    // Timer is a Single in ACE (TypeName(Timer()) is "Single"), the seconds since midnight.
+    [Fact]
+    public void Timer_is_a_single()
+    {
+        Assert.IsType<float>(Scalar("TIMER()"));
+        Assert.Equal([typeof(float)], database.Query("SELECT TIMER() FROM T", EnAu).ColumnTypes);
+    }
+
     [Theory]
     [InlineData("DATEVALUE(43832.5)")]
     [InlineData("TIMEVALUE(43832.5)")]

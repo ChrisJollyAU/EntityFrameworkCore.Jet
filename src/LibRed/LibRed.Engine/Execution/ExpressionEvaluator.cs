@@ -482,7 +482,7 @@ internal sealed partial class ExpressionEvaluator(
             // silently wrong value, and the arity check that would have caught a stray argument is what let
             // it through. WeekdayName next to it always honoured its own.
             "MONTHNAME" => MonthNameOf(f),
-            "TIMER" => (DateTime.Now - DateTime.Today).TotalSeconds,
+            "TIMER" => (float)(DateTime.Now - DateTime.Today).TotalSeconds,
             "RND" => Rnd(f),
             // Predicates / type inspection. IsError is always false — LibRed has no error-value type — but its argument
             // is still evaluated, so an error in it is raised (verified vs ACE: IsError(1/0) fails). IsEmpty, IsMissing
@@ -2790,7 +2790,9 @@ internal sealed partial class ExpressionEvaluator(
 
     /// <summary><c>+ - *</c> with C# widest-operand type promotion, so the result CLR type matches what EF
     /// expects (int+int→int, …): decimal &gt; double &gt; single &gt; long &gt; int. (Contract: like
-    /// <c>Enumerable</c> arithmetic — LibRed emits the operand type, not an ACE-widened one.)</summary>
+    /// <c>Enumerable</c> arithmetic — LibRed emits the operand type, not an ACE-widened one.) A result past its type's range is an Overflow
+    /// error, Double and Single alike — a Single result is not widened to a Double as ACE widens it, because the result
+    /// keeps its operand type.</summary>
     private static object Arithmetic(object left, object right, char op)
     {
         // Date/time arithmetic operates on the OLE Automation serial (days since 1899-12-30; the fractional
@@ -2815,8 +2817,8 @@ internal sealed partial class ExpressionEvaluator(
         // A result past its type is an error, not a wrapped or infinite value (verified vs ACE: 2147483647 + 1,
         // 2147483647 * 2, -2147483647 - 2 and 1E300 * 1E300 all fail).
         if (left is decimal || right is decimal) { decimal a = ArithmeticDecimal(left), b = ArithmeticDecimal(right); return op == '+' ? a + b : op == '-' ? a - b : a * b; }
-        if (left is double || right is double) { double a = Dbl(left), b = Dbl(right); return op == '+' ? a + b : Finite(op == '-' ? a - b : a * b); }
-        if (left is float || right is float) { float a = (float)Dbl(left), b = (float)Dbl(right); return op == '+' ? a + b : Finite(op == '-' ? a - b : a * b); }
+        if (left is double || right is double) { double a = Dbl(left), b = Dbl(right); return Finite(op == '+' ? a + b : op == '-' ? a - b : a * b); }
+        if (left is float || right is float) { float a = (float)Dbl(left), b = (float)Dbl(right); return Finite(op == '+' ? a + b : op == '-' ? a - b : a * b); }
         if (left is long or ulong || right is long or ulong) { long a = Lng(left), b = Lng(right); return checked(op == '+' ? a + b : op == '-' ? a - b : a * b); }
         int x = Int(left), y = Int(right); return checked(op == '+' ? x + y : op == '-' ? x - y : x * y);
     }

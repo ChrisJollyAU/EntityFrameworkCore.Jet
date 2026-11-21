@@ -134,6 +134,11 @@ public class ArithmeticOperatorTests(ArithmeticOperatorTests.Database database)
     [InlineData("-2147483647 - 2")]
     [InlineData("N - -2147483647")]
     [InlineData("1E300 * 1E300")]
+    [InlineData("1.7E308 + 1.7E308")]
+    // A deliberate divergence: ACE returns a Double here, LibRed keeps the Single type and overflows.
+    [InlineData("CSNG(3E38) + CSNG(3E38)")]
+    [InlineData("CSNG(3E38) - CSNG(-3E38)")]
+    [InlineData("CSNG(3E38) * CSNG(2)")]
     [InlineData("10 ^ 400")]
     [InlineData("2 ^ 1024")]
     [InlineData("'1e400' * 1")]
@@ -180,6 +185,14 @@ public class ArithmeticOperatorTests(ArithmeticOperatorTests.Database database)
     [InlineData("CSNG(1) / CSNG(10)", 0.1f)]
     public void A_single_divided_with_integers_or_booleans_stays_a_single(string expression, float expected) =>
         Assert.Equal(expected, Assert.IsType<float>(Scalar(expression)));
+
+    [Fact]
+    public void A_single_sum_within_its_range_stays_a_single() =>
+        Assert.Equal(2E38f, Assert.IsType<float>(Scalar("CSNG(1E38) + CSNG(1E38)")));
+
+    [Fact]
+    public void A_single_column_sum_keeps_its_declared_type() =>
+        Assert.Equal(3f, Assert.IsType<float>(Scalar("SG + SG")));
 
     // Verified vs ACE on this table (AceDecimalPrecisionProbeTest.Arithmetic_operator_tests_type_probe): a number
     // written with a decimal point is a Decimal, and a Decimal result keeps exactly its places.
