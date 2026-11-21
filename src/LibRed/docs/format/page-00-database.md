@@ -245,7 +245,7 @@ no-password files and an empty password that unmasks to the creation-date-derive
   key and its data pages are encrypted. **Page 0's header itself is never page-encrypted — only
   base-masked — so the creation date, code page, LCID, etc. stay readable even on an encrypted file**
   (they must, to bootstrap decryption).
-- **Password (`0x42`, 40 bytes)** — *not* decoded to a value, and the two families differ:
+- **Password (`0x42`, 40 bytes)** — the two families differ:
   - **Jet 4 `.mdb`**: light access-control obfuscation only — the field is the password XOR the base
     mask XOR an **additional 4-byte mask = `(int)creationDate`** (repeated). An empty password
     therefore unmasks to that creation-date pattern, not zeroes — the per-file variation is this mask,
@@ -258,6 +258,13 @@ no-password files and an empty password that unmasks to the creation-date-derive
     base header mask — the exact inverse of the read. **Verified byte-identical to Access's own output** in
     the `0x42` field. This is password-only obfuscation — the data pages stay plaintext (`0x3E` key = 0);
     it is a *different* feature from Jet RC4 page encryption (§2.4), which the "Encode/Encrypt" menu applies.
+    **Opening:** the field decodes (base mask, then date mask) to `UTF-16LE(password)` plus zero padding,
+    and the password guards the open alone. Verified against ACE (OLE DB, `Jet OLEDB:Database Password`): a
+    file whose field decodes non-empty opens only with a password equal to it exactly — the comparison is
+    case-sensitive and spaces count (`abc` refuses `ABC`, `ab`, `abc ` and ` abc`; a file set to `abc `
+    opens with `abc ` and refuses `abc`) — and a missing, empty or wrong password is refused with
+    *"Not a valid password."*. A file whose field decodes empty opens with any password, `abc` and the
+    empty one included.
   - **ACE `.accdb`**: the password is not here — it lives in the EncryptionInfo descriptor at `0x299`
     (§2.5). Under the same date and base masks the field decodes to **40 copies of the low byte of the
     database key at `0x3E`**, and to zeroes while the file is unencrypted (verified vs Access). The field

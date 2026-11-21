@@ -29,10 +29,10 @@ internal static class SidKeystream
         // stored.
         int passwordSize = format.PasswordSize;
         Span<byte> region = stackalloc byte[2 * passwordSize];
-        DatabaseDefinitionPage.ReadMasked(page0, format.PasswordOffset, region, format);
+        DatabaseDefinitionPage.ReadPassword(page0, format).CopyTo(region);
+        DatabaseDefinitionPage.ReadMasked(page0, format.PasswordOffset + passwordSize, region[passwordSize..], format);
         Span<byte> creationDate = stackalloc byte[sizeof(double)];
         DatabaseDefinitionPage.ReadMasked(page0, format.CreationDateOffset, creationDate, format);
-        DatabaseDefinitionPage.XorPasswordDateMask(region[..passwordSize], creationDate);
 
         // 4-5. Seeded with the creation date's low four raw bytes, folding every even byte of the region.
         uint key = BinaryPrimitives.ReadUInt32LittleEndian(creationDate);

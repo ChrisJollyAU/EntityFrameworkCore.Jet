@@ -274,6 +274,20 @@ public sealed class PageChannel : IDisposable
             if (databaseKey != 0 && codec is null)
                 throw new NotSupportedException("The database is encrypted with an unsupported scheme.");
 
+            // An .mdb's database password guards the open alone — its pages stay plaintext — so it is checked here,
+            // where the .accdb codecs check theirs. As ACE: the supplied password must equal the stored one exactly
+            // (case and spaces count), none or an empty one is refused like a wrong one, and a file with no password
+            // opens whatever password is given.
+            if (!format.IsAccdb)
+            {
+                string stored = System.Text.Encoding.Unicode
+                    .GetString(DatabaseDefinitionPage.ReadPassword(page0, format)).TrimEnd('\0');
+                if (stored.Length != 0 && !string.Equals(stored, password, StringComparison.Ordinal))
+                    throw string.IsNullOrEmpty(password)
+                        ? new InvalidOperationException("Not a valid password.")
+                        : new UnauthorizedAccessException("Not a valid password.");
+            }
+
             return new PageChannel(stream, format, readOnly, path, codec, locks) { IsExclusive = exclusive };
         }
         catch

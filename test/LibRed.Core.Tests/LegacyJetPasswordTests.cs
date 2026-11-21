@@ -24,8 +24,8 @@ public class LegacyJetPasswordTests
     }
 
     /// <summary>Opens the database the way every operation here requires — writable and exclusive.</summary>
-    private static JetDatabase OpenExclusive(string path) =>
-        JetDatabase.Open(path, readOnly: false, exclusive: true);
+    private static JetDatabase OpenExclusive(string path, string? password = null) =>
+        JetDatabase.Open(path, readOnly: false, password: password, exclusive: true);
 
     /// <summary>The Access-output fixtures: <c>2002plain.mdb</c> plus copies of it with each password set by
     /// Access itself. They are deliberately not committed, so this is located by convention (or the
@@ -83,10 +83,33 @@ public class LegacyJetPasswordTests
                 DatabaseEncryption.SetJetPassword(db, "Test1");
             Assert.NotEqual(original, StoredPasswordField(tmp));
 
-            using (JetDatabase db = OpenExclusive(tmp))
+            using (JetDatabase db = OpenExclusive(tmp, "Test1"))
                 DatabaseEncryption.RemoveJetPassword(db);
 
             Assert.Equal(original, StoredPasswordField(tmp)); // back to the unpassworded field
+        }
+        finally { TemporaryDatabase.Delete(tmp); }
+    }
+
+    // As ACE (measured over OLE DB): the stored password must be matched exactly — case and spaces count — none or an
+    // empty one is refused like a wrong one, and a file without a password opens whatever password is given.
+    [Fact]
+    public void A_jet_password_refuses_an_open_without_it()
+    {
+        string tmp = CreateJet4();
+        try
+        {
+            using (JetDatabase db = JetDatabase.Open(tmp, password: "abc")) { }
+            using (JetDatabase db = OpenExclusive(tmp))
+                DatabaseEncryption.SetJetPassword(db, "abc");
+
+            using (JetDatabase db = JetDatabase.Open(tmp, password: "abc")) { }
+            foreach (string wrong in new[] { "ABC", "ab", "abc ", " abc" })
+                Assert.Equal("Not a valid password.",
+                    Assert.Throws<UnauthorizedAccessException>(() => JetDatabase.Open(tmp, password: wrong)).Message);
+            foreach (string? none in new[] { "", null })
+                Assert.Equal("Not a valid password.",
+                    Assert.Throws<InvalidOperationException>(() => JetDatabase.Open(tmp, password: none)).Message);
         }
         finally { TemporaryDatabase.Delete(tmp); }
     }
@@ -175,9 +198,6 @@ public class LegacyJetPasswordTests
         return File.ReadAllBytes(path)[format.PasswordOffset..(format.PasswordOffset + format.PasswordSize)];
     }
 
-    private static JetDatabase OpenExclusive(string path, string password) =>
-        JetDatabase.Open(path, readOnly: false, password: password, exclusive: true);
-
     /// <summary>Every MSysObjects.Owner and MSysACEs.SID, in stored order.</summary>
     private static List<byte[]> StoredSids(string path, string? password)
     {
@@ -235,14 +255,14 @@ public class LegacyJetPasswordTests
                 DatabaseEncryption.SetJetPassword(db, "Test1");
             byte[] passwordField = StoredPasswordField(tmp);
 
-            using (JetDatabase db = OpenExclusive(tmp))
+            using (JetDatabase db = OpenExclusive(tmp, "Test1"))
                 DatabaseEncryption.SetJetEncoding(db);
 
             // The password field is on page 0, which page encoding must never transform.
             Assert.Equal(passwordField, StoredPasswordField(tmp));
 
             // Removing the encoding leaves the password field intact.
-            using (JetDatabase db = OpenExclusive(tmp))
+            using (JetDatabase db = OpenExclusive(tmp, "Test1"))
                 DatabaseEncryption.RemoveJetEncoding(db);
             Assert.Equal(passwordField, StoredPasswordField(tmp));
         }
@@ -271,14 +291,14 @@ public class LegacyJetPasswordTests
                 DatabaseEncryption.SetJetPassword(db, new string('x', 20));
             byte[] withMaximumPassword = File.ReadAllBytes(tmp);
 
-            using (JetDatabase db = OpenExclusive(tmp))
+            using (JetDatabase db = OpenExclusive(tmp, new string('x', 20)))
             {
                 Assert.Throws<ArgumentException>(() => DatabaseEncryption.SetJetPassword(db, new string('y', 21)));
                 Assert.Throws<ArgumentException>(() => DatabaseEncryption.SetJetPassword(db, ""));
             }
             Assert.Equal(withMaximumPassword, File.ReadAllBytes(tmp));
 
-            using (JetDatabase db = OpenExclusive(tmp))
+            using (JetDatabase db = OpenExclusive(tmp, new string('x', 20)))
                 DatabaseEncryption.RemoveJetPassword(db);
             Formats.JetFormatBase format = TestDatabases.FormatOf(tmp);
             Assert.NotEqual(withMaximumPassword[format.PasswordOffset..(format.PasswordOffset + format.PasswordSize)],

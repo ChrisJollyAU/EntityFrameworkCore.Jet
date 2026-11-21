@@ -183,6 +183,19 @@ public sealed class DatabaseDefinitionPage : Page
         WriteMasked(page0, format.PasswordOffset, field, format);
     }
 
+    /// <summary>Reads the password field — the exact inverse of <see cref="WritePassword"/>: the field out from under
+    /// the header mask, then its creation-date mask removed. Returns the whole field, zero padding included.</summary>
+    internal static byte[] ReadPassword(ReadOnlySpan<byte> page0, Formats.JetFormatBase format)
+    {
+        Span<byte> creationDate = stackalloc byte[sizeof(double)];
+        ReadMasked(page0, format.CreationDateOffset, creationDate, format);
+
+        var field = new byte[format.PasswordSize];
+        ReadMasked(page0, format.PasswordOffset, field, format);
+        XorPasswordDateMask(field, creationDate);
+        return field;
+    }
+
     /// <summary>XORs the password field's own mask over <paramref name="field"/>, in either direction: the
     /// integer part of the creation date (<paramref name="creationDate"/>, the clear 8-byte double), as a
     /// 4-byte little-endian value, cycled across the field. It lies under the header mask as well.</summary>

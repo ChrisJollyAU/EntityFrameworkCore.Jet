@@ -47,6 +47,58 @@ public class JetPasswordSidAccessTests
         finally { TemporaryDatabase.Delete(source); }
     }
 
+    // The password guards the open: LibRed must let in exactly the passwords ACE lets in, on a file with one and on
+    // a file without. Each password reaches ACE quoted, so its spaces survive the connection string.
+    [Fact]
+    public void A_jet_password_admits_the_passwords_access_admits()
+    {
+        string plain = TemporaryDatabase.CreatePath("jetpw_open_", ".mdb");
+        string set = TemporaryDatabase.CreatePath("jetpw_open_set_", ".mdb");
+        string setBare = TemporaryDatabase.CreatePath("jetpw_open_bare_", ".mdb");
+        try
+        {
+            JetDatabase.Create(plain, version: (byte)Formats.JetVersion.Version4);
+            File.Copy(plain, set, overwrite: true);
+            File.Copy(plain, setBare, overwrite: true);
+            using (var db = JetDatabase.Open(set, readOnly: false, exclusive: true))
+                DatabaseEncryption.SetJetPassword(db, "abc ");
+            using (var db = JetDatabase.Open(setBare, readOnly: false, exclusive: true))
+                DatabaseEncryption.SetJetPassword(db, "abc");
+
+            foreach ((string path, string? password) in new[]
+            {
+                (set, "abc "), (set, "abc"), (set, "ABC "), (set, " abc "), (set, ""), (set, null),
+                (setBare, "abc"), (setBare, "ABC"), (setBare, "ab"), (setBare, "abc "), (setBare, " abc"),
+                (plain, "abc"), (plain, ""), (plain, null),
+            })
+            {
+                string? aceRefusal = null;
+                try
+                {
+                    using var connection = AceTestDatabase.Open(path, password is null ? null : $"\"{password}\"", attempts: 1);
+                }
+                catch (InvalidOperationException ex) { aceRefusal = ex.InnerException?.Message; }
+
+                string? ourRefusal = null;
+                try
+                {
+                    using var db = JetDatabase.Open(path, password: password);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException) { ourRefusal = ex.Message; }
+
+                Assert.True(aceRefusal == ourRefusal,
+                    $"{Path.GetFileName(path)} opened with {(password is null ? "none" : $"'{password}'")}: ACE "
+                    + $"{aceRefusal ?? "opened"}, LibRed {ourRefusal ?? "opened"}");
+            }
+        }
+        finally
+        {
+            TemporaryDatabase.Delete(plain);
+            TemporaryDatabase.Delete(set);
+            TemporaryDatabase.Delete(setBare);
+        }
+    }
+
     private static void Compare(object engine, string source)
     {
         string byAccess = TemporaryDatabase.CopyPath(source, "jetpw_access_");
