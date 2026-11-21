@@ -245,13 +245,26 @@ physical (data-block) index, prefer a real index's name over a foreign-key relat
 > hidden `.r` names first (verified vs ACE under General v0 and v1, Spanish, Swedish/Finnish,
 > Norwegian/Danish, Czech, Turkish and French). Names equal in that collation are one name: ACE refuses an
 > index `ss` beside `ß`, and `ae` beside `æ` except in Norwegian/Danish, where `æ` is a letter. `index_num` is
-> assigned in creation order (a table's own indexes first, then relationships as added), and a new block —
+> assigned in creation order: within one `CREATE TABLE` the blocks are numbered in the order declared — keys,
+> unique constraints and foreign keys alike — a self-reference's incoming block taking the number straight after
+> its outgoing one (verified vs ACE: a primary key, a self-referencing FK, a `UNIQUE` and a second self-referencing
+> FK are numbered 0; 1 and 2; 3; 4 and 5, so the incoming blocks are `.rC` and `.rF`). A new block —
 > an index, an outgoing or an incoming relationship block — takes the **lowest number no block holds**
 > (verified vs ACE: with 1 and 2 free below a live 3, a new index takes 1; a parent's incoming block likewise
 > takes its lowest free number). Dropping an index or a relationship removes a block *without* renumbering the
 > survivors' `index_num` (only their data ordinals shift), so the free numbers are gaps: neither the logical
 > block count (which collides with a live block, leaving two blocks claiming the number each end's `0x0D`
 > cross-link names) nor `max(index_num) + 1` is the number ACE uses.
+>
+> **The incoming blocks' stored order — sorted by their `.r` names — is the order ACE applies a deleted or
+> re-keyed row's relationships in** (verified vs ACE): a self-referencing table with a NO ACTION and an ON DELETE
+> CASCADE relationship, its child row held by both, is deleted when the cascade's incoming block comes first and
+> refused when the NO ACTION's does. It is the stored order, not `index_num` order: with the NO ACTION's block
+> numbered 2 (`.rC`) and the cascade's 17 (`.rBB`, stored first), the row is deleted. Nor `MSysRelationships` row
+> order, nor the child's data-block order: a relationship dropped and added again takes back its freed lowest
+> number, so its `.r` name and its place among the incoming blocks, and ACE applies it first again although its
+> `MSysRelationships` row and its data block now come last. A key `UPDATE` refused by two NO ACTION children
+> names the same first one.
 >
 > **One data block, several logical indexes.** A new index over exactly the columns, directions and flags
 > (§3.5 `0x2E`) of a data block the table already has takes no block of its own: its logical block names that
@@ -294,9 +307,9 @@ physical (data-block) index, prefer a real index's name over a foreign-key relat
 >
 > **Self-reference** (a table whose FK targets itself): both ends live in the **one** TDEF, each with
 > `0x11` = the table's own page — an outgoing `0x02` block (`index_num2` → the FK-column index) and an
-> incoming `0x01` block (`index_num2` → the referenced-key index), cross-referenced by `index_num`. The
-> incoming block is numbered after the data-block logical indexes (`index_num` = data-block count).
-> Verified byte-for-byte vs ACE. Added to an existing table, the outgoing
+> incoming `0x01` block (`index_num2` → the referenced-key index), cross-referenced by `index_num`. In a
+> `CREATE TABLE` the incoming block takes the number straight after its outgoing one (verified byte-for-byte vs
+> ACE; see the numbering rule above). Added to an existing table, the outgoing
 > block takes the lowest free number and the incoming block the next free one above it (verified: with 1 free
 > below a live 2, outgoing 1 and incoming 3, named `.rD`).
 

@@ -210,8 +210,10 @@ public sealed record UniqueConstraint(string? Name, IReadOnlyList<string> Column
 /// <summary>A CHECK constraint: an optional name and the raw expression text.
 /// <para><b>ColumnsBefore</b> is, in CREATE TABLE, how many of the statement's columns it declares before this
 /// constraint — the ones it may name, as ACE resolves it where it is written. ALTER TABLE ADD CONSTRAINT leaves it
-/// unused: the table's columns all exist by then.</para></summary>
-public sealed record CheckConstraint(string? Name, string Expression, int ColumnsBefore = 0)
+/// unused: the table's columns all exist by then.</para>
+/// <para><b>DeclaredAfter</b> is its place among the key constraints, counted as theirs is (see
+/// <see cref="UniqueConstraint"/>): ACE writes the statement's constraint objects in the order declared.</para></summary>
+public sealed record CheckConstraint(string? Name, string Expression, int ColumnsBefore = 0, int DeclaredAfter = 0)
 {
     /// <summary>The qualifier a stored CHECK names the row it is checking by: U+FFFE, which ACE writes where the
     /// statement qualified a column with the table's own name inside a subquery (verified).</summary>

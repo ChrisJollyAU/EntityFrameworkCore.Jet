@@ -181,6 +181,7 @@ internal static class AstBuilder
         // the elements declared before each one (DeclaredAfter).
         var foreignKeyTokens = new List<int>();
         var uniqueTokens = new List<int>();
+        var checkTokens = new List<int>();
         int primaryKeyToken = int.MaxValue;
 
         // A table constraint may be written anywhere among the columns, but ACE resolves each one as it reaches it,
@@ -239,6 +240,7 @@ internal static class AstBuilder
                     string? checkName = OptionalIdentifier(ck.name);
                     checks.Add(new CheckConstraint(checkName, CheckText(ck.checkBody(), table, checkName),
                         ctx.columnDefinition().Count(c => c.Start.TokenIndex < ck.Start.TokenIndex)));
+                    checkTokens.Add(ck.Start.TokenIndex);
                     break;
             }
         }
@@ -278,6 +280,8 @@ internal static class AstBuilder
             uniques[i] = uniques[i] with { DeclaredAfter = DeclaredAfter(uniqueTokens[i]) };
         for (int i = 0; i < foreignKeys.Count; i++)
             foreignKeys[i] = foreignKeys[i] with { DeclaredAfter = DeclaredAfter(foreignKeyTokens[i]) };
+        for (int i = 0; i < checks.Count; i++)
+            checks[i] = checks[i] with { DeclaredAfter = DeclaredAfter(checkTokens[i]) };
 
         return new CreateTableStatement(table, columns, primaryKey, foreignKeys, uniques, checks, primaryKeyName,
             primaryKeyToken == int.MaxValue ? 0 : DeclaredAfter(primaryKeyToken));

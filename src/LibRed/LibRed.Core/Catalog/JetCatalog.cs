@@ -606,8 +606,27 @@ public sealed class JetCatalog
     /// <summary>Relationships for which <paramref name="table"/> is the referencing (child) table.</summary>
     public IEnumerable<ForeignKey> ForeignKeysOf(string table) => LoadRelationships("szObject", table);
 
-    /// <summary>Relationships for which <paramref name="table"/> is the referenced (parent) table.</summary>
-    public IEnumerable<ForeignKey> ReferencesTo(string table) => LoadRelationships("szReferencedObject", table);
+    /// <summary>Relationships for which <paramref name="table"/> is the referenced (parent) table, in the order the
+    /// parent's incoming relationship blocks are stored (§3.6), sorted by their <c>.r</c> names — the order ACE applies
+    /// a deleted or re-keyed row's relationships in (measured: a relationship dropped and added again keeps its place
+    /// there, and ACE its turn; with blocks numbered 2 and 17, <c>.rBB</c> before <c>.rC</c>, the 17 goes first). Each
+    /// block names its relationship's block on the child, by number and the child's TDEF page.</summary>
+    public IEnumerable<ForeignKey> ReferencesTo(string table)
+    {
+        IReadOnlyList<ForeignKey> relationships = LoadRelationships("szReferencedObject", table);
+        if (relationships.Count < 2 || FindTable(table) is not { } parent) return relationships;
+        var incoming = parent.LogicalIndexes.Where(l => l.IsIncomingRelationship).Select(l => l.Block).ToList();
+        int Place(ForeignKey relationship) =>
+            FindTable(relationship.Table) is { } child
+            && OutgoingBlock(child.LogicalIndexes, relationship.Name) is { } outgoing
+            && incoming.FindIndex(b => b.IsIncomingFor(outgoing.Block.Number, child.DefinitionPage)) is var at and >= 0
+                ? at : int.MaxValue;
+        return relationships.OrderBy(Place);
+    }
+
+    /// <summary>A relationship's block on its child table.</summary>
+    private static LogicalIndexDef? OutgoingBlock(IEnumerable<LogicalIndexDef>? blocks, string relationship) =>
+        blocks?.FirstOrDefault(l => l.Block.IsOutgoing(relationship));
 
     /// <summary>The relationships called <paramref name="name"/> — one, unless the catalog is damaged.</summary>
     public IEnumerable<ForeignKey> RelationshipsNamed(string name) => LoadRelationships("szRelationship", name);
@@ -1031,9 +1050,7 @@ public sealed class JetCatalog
                 // relationship with no block — an unenforced one, which has nothing to cascade.
                 if (!dependencies.TryGetValue(kvp.Value.Child, out TableDefinition.DdlMetadata? child))
                     dependencies[kvp.Value.Child] = child = FindTable(kvp.Value.Child)?.Metadata;
-                LogicalIndexDef? block = child?.LogicalIndexes.FirstOrDefault(l =>
-                    l.IsRelationship && !l.IsIncomingRelationship &&
-                    string.Equals(l.Name, kvp.Key, StringComparison.OrdinalIgnoreCase));
+                LogicalIndexDef? block = OutgoingBlock(child?.LogicalIndexes, kvp.Key);
                 RelationshipFlags flags = kvp.Value.Flags;
                 return new ForeignKey(
                     kvp.Key,

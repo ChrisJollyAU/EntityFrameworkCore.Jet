@@ -309,6 +309,348 @@ public class ReferentialActionTests
         finally { TemporaryDatabase.Delete(path); }
     }
 
+    // A DELETE whose rows refer to each other, on schemas and data ACE was run on. Each row is what ACE returned:
+    // the rows deleted, or the error, and then what is left. ACE deletes row by row in the order it reads the rows
+    // (by Id when the whole WHERE is ranges on the primary key, else in file order; through a join, in the order the
+    // join reaches the target), each row's relationships in the stored order of the parent's incoming blocks, and a
+    // NO ACTION child holds its parent only while the statement has not yet deleted it.
+    private const string SelfRef = "CREATE TABLE T (Id long PRIMARY KEY, P long, CONSTRAINT FK_P FOREIGN KEY (P) REFERENCES T (Id))";
+    private const string TwoSelfRefs = "CREATE TABLE T (Id long PRIMARY KEY, P long, Q long, "
+        + "CONSTRAINT FK_P FOREIGN KEY (P) REFERENCES T (Id), CONSTRAINT FK_Q FOREIGN KEY (Q) REFERENCES T (Id) ON DELETE CASCADE)";
+    private const string Related = "The record cannot be deleted or changed because table 'T' includes related records.";
+    private const string Cascading = "Cannot perform cascading operation. Since related records exist in table 'T', "
+        + "referential integrity rules would be violated.";
+    private static readonly string[] Pf = [SelfRef, "INSERT INTO T VALUES (1, NULL)", "INSERT INTO T VALUES (2, 1)"];
+    private static readonly string[] PfRev = [SelfRef, "INSERT INTO T VALUES (2, NULL)", "INSERT INTO T VALUES (1, 2)"];
+    private static readonly string[] Cf = [SelfRef, "INSERT INTO T VALUES (1, NULL)", "INSERT INTO T VALUES (2, NULL)", "UPDATE T SET P = 2 WHERE Id = 1"];
+    private static readonly string[] CfRev = [SelfRef, "INSERT INTO T VALUES (2, NULL)", "INSERT INTO T VALUES (1, NULL)", "UPDATE T SET P = 1 WHERE Id = 2"];
+    private static readonly string[] WithX = ["CREATE TABLE X (Id long PRIMARY KEY)", "INSERT INTO X VALUES (1)", "INSERT INTO X VALUES (2)"];
+    private static readonly string[] Third = ["INSERT INTO T VALUES (3, NULL)"];
+
+    public static TheoryData<string, string[], string, int?, string?, string> AceDeletes => new()
+    {
+        { "pf", Pf, "DELETE FROM T", 2, null, "" },
+        { "pfRev", PfRev, "DELETE FROM T", 2, null, "" },
+        { "cf", Cf, "DELETE FROM T", 2, null, "" },
+        { "cfRev", CfRev, "DELETE FROM T", 2, null, "" },
+        { "pf", Pf, "DELETE FROM T WHERE 1 = 1", null, Related, "1,2" },
+        { "pfRev", PfRev, "DELETE FROM T WHERE 1 = 1", null, Related, "1,2" },
+        { "cf", Cf, "DELETE FROM T WHERE 1 = 1", 2, null, "" },
+        { "cfRev", CfRev, "DELETE FROM T WHERE 1 = 1", 2, null, "" },
+        { "pf", Pf, "DELETE FROM T WHERE Id > 0", null, Related, "1,2" },
+        { "pfRev", PfRev, "DELETE FROM T WHERE Id > 0", 2, null, "" },
+        { "cf", Cf, "DELETE FROM T WHERE Id > 0", 2, null, "" },
+        { "cfRev", CfRev, "DELETE FROM T WHERE Id > 0", null, Related, "1,2" },
+        { "pf", Pf, "DELETE FROM T WHERE Id + 0 > 0", null, Related, "1,2" },
+        { "pfRev", PfRev, "DELETE FROM T WHERE Id + 0 > 0", null, Related, "1,2" },
+        { "cf", Cf, "DELETE FROM T WHERE Id + 0 > 0", 2, null, "" },
+        { "cfRev", CfRev, "DELETE FROM T WHERE Id + 0 > 0", 2, null, "" },
+        { "pf", Pf, "DELETE FROM T WHERE Id IN (1, 2)", null, Related, "1,2" },
+        { "pfRev", PfRev, "DELETE FROM T WHERE Id IN (1, 2)", null, Related, "1,2" },
+        { "cf", Cf, "DELETE FROM T WHERE Id IN (1, 2)", 2, null, "" },
+        { "cfRev", CfRev, "DELETE FROM T WHERE Id IN (1, 2)", 2, null, "" },
+        { "pf", Pf, "DELETE * FROM T WHERE P IS NULL OR P IS NOT NULL", null, Related, "1,2" },
+        { "pfRev", PfRev, "DELETE * FROM T WHERE P IS NULL OR P IS NOT NULL", null, Related, "1,2" },
+        { "cf", Cf, "DELETE * FROM T WHERE P IS NULL OR P IS NOT NULL", 2, null, "" },
+        { "cfRev", CfRev, "DELETE * FROM T WHERE P IS NULL OR P IS NOT NULL", 2, null, "" },
+        { "pf", Pf, "DELETE FROM T WHERE P > 0 OR P IS NULL", null, Related, "1,2" },
+        { "pfRev", PfRev, "DELETE FROM T WHERE P > 0 OR P IS NULL", null, Related, "1,2" },
+        { "pf", Pf, "DELETE FROM T WHERE Id BETWEEN 1 AND 2", null, Related, "1,2" },
+        { "pfRev", PfRev, "DELETE FROM T WHERE Id BETWEEN 1 AND 2", 2, null, "" },
+        { "pf+X", [.. Pf, .. WithX], "DELETE T.* FROM T INNER JOIN X ON T.Id = X.Id", null, Related, "1,2" },
+        { "pf+X", [.. Pf, .. WithX], "DELETE T.* FROM X INNER JOIN T ON T.Id = X.Id", null, Related, "1,2" },
+        { "pf+3", [.. Pf, .. Third], "DELETE FROM T WHERE Id IN (1, 2)", null, Related, "1,2,3" },
+        { "pf+3", [.. Pf, .. Third], "DELETE FROM T WHERE Id < 3", null, Related, "1,2,3" },
+        { "pfRev+3", [.. PfRev, .. Third], "DELETE FROM T WHERE Id < 3", 2, null, "3" },
+        { "pf+3", [.. Pf, .. Third], "DELETE FROM T WHERE Id > 0 AND (P > 0 OR P IS NULL)", null, Related, "1,2,3" },
+        { "self-loop", [SelfRef, "INSERT INTO T VALUES (1, NULL)", "UPDATE T SET P = 1"], "DELETE FROM T", 1, null, "" },
+        { "self-loop", [SelfRef, "INSERT INTO T VALUES (1, NULL)", "UPDATE T SET P = 1"], "DELETE FROM T WHERE Id = 1", 1, null, "" },
+        { "self-loop", [SelfRef, "INSERT INTO T VALUES (1, NULL)", "UPDATE T SET P = 1"], "DELETE FROM T WHERE Id + 0 = 1", 1, null, "" },
+        { "pf, child in C", [.. Pf, "CREATE TABLE C (Id long PRIMARY KEY, T long, CONSTRAINT FK_C FOREIGN KEY (T) REFERENCES T (Id))",
+            "INSERT INTO C VALUES (10, 2)"], "DELETE FROM T", null, Related, "1,2" },
+        { "two self-refs", [TwoSelfRefs, "INSERT INTO T VALUES (1, NULL, NULL)", "INSERT INTO T VALUES (2, 1, NULL)",
+            "INSERT INTO T VALUES (3, NULL, 1)"], "DELETE FROM T", 3, null, "" },
+        { "cascade-reached self-loop", [TwoSelfRefs, "INSERT INTO T VALUES (1, NULL, NULL)", "INSERT INTO T VALUES (2, NULL, 1)",
+            "UPDATE T SET P = 2 WHERE Id = 2"], "DELETE FROM T WHERE Id = 1", 1, null, "" },
+        { "cascade-reached self-loop", [TwoSelfRefs, "INSERT INTO T VALUES (1, NULL, NULL)", "INSERT INTO T VALUES (2, NULL, 1)",
+            "UPDATE T SET P = 2 WHERE Id = 2"], "DELETE FROM T", 2, null, "" },
+        { "cascade reaches a later root", [TwoSelfRefs, "INSERT INTO T VALUES (1, NULL, NULL)", "INSERT INTO T VALUES (2, NULL, NULL)",
+            "INSERT INTO T VALUES (3, 2, 1)"], "DELETE FROM T WHERE 1 = 1", null, "Record is deleted.", "1,2,3" },
+        { "cascade-reached row held", [TwoSelfRefs, "INSERT INTO T VALUES (1, NULL, NULL)", "INSERT INTO T VALUES (4, NULL, NULL)",
+            "INSERT INTO T VALUES (3, NULL, 1)", "UPDATE T SET P = 3 WHERE Id = 4"], "DELETE FROM T WHERE 1 = 1", null, Cascading, "1,3,4" },
+        { "held through C", ["CREATE TABLE T (Id long PRIMARY KEY, X long)",
+            "CREATE TABLE C (Id long PRIMARY KEY, T long, CONSTRAINT FK_CT FOREIGN KEY (T) REFERENCES T (Id) ON DELETE CASCADE)",
+            "ALTER TABLE T ADD CONSTRAINT FK_TX FOREIGN KEY (X) REFERENCES C (Id)",
+            "INSERT INTO T VALUES (1, NULL)", "INSERT INTO C VALUES (10, 1)", "INSERT INTO T VALUES (2, 10)"],
+            "DELETE FROM T", null, Cascading, "1,2" },
+        { "held through C", ["CREATE TABLE T (Id long PRIMARY KEY, X long)",
+            "CREATE TABLE C (Id long PRIMARY KEY, T long, CONSTRAINT FK_CT FOREIGN KEY (T) REFERENCES T (Id) ON DELETE CASCADE)",
+            "ALTER TABLE T ADD CONSTRAINT FK_TX FOREIGN KEY (X) REFERENCES C (Id)",
+            "INSERT INTO T VALUES (1, NULL)", "INSERT INTO C VALUES (10, 1)", "INSERT INTO T VALUES (2, 10)"],
+            "DELETE FROM T WHERE 1 = 1", null, Cascading, "1,2" },
+        // Two CASCADE self-relationships and a NO ACTION one, declared A, B, H: 1's cascade deletes 2, and 2's
+        // deletes 3, before H is looked at, whichever of 2 and 3 holds the other through H.
+        { "A, B cascade, H no action", [CascadesThenHold, "INSERT INTO T VALUES (1, NULL, NULL, NULL)",
+            "INSERT INTO T VALUES (2, 1, NULL, NULL)", "INSERT INTO T VALUES (3, 2, 1, NULL)"], "DELETE FROM T WHERE Id = 1", 1, null, "" },
+        { "A, B cascade, H no action; 2 held by 3", [CascadesThenHold, "INSERT INTO T VALUES (1, NULL, NULL, NULL)",
+            "INSERT INTO T VALUES (2, 1, NULL, NULL)", "INSERT INTO T VALUES (3, 2, 1, NULL)", "UPDATE T SET H = 3 WHERE Id = 2"],
+            "DELETE FROM T WHERE Id = 1", 1, null, "" },
+        { "A, B cascade, H no action; 3 held by 2", [CascadesThenHold, "INSERT INTO T VALUES (1, NULL, NULL, NULL)",
+            "INSERT INTO T VALUES (2, 1, NULL, NULL)", "INSERT INTO T VALUES (3, 2, 1, NULL)", "UPDATE T SET H = 2 WHERE Id = 3"],
+            "DELETE FROM T WHERE Id = 1", 1, null, "" },
+        // A row held through NO ACTION P and deleted through CASCADE Q: which relationship was declared first decides.
+        { "P declared before Q", [TwoSelfRefs, "INSERT INTO T VALUES (1, NULL, NULL)", "INSERT INTO T VALUES (2, 1, 1)"],
+            "DELETE FROM T WHERE Id = 1", null, Related, "1,2" },
+        { "Q declared before P", ["CREATE TABLE T (Id long PRIMARY KEY, P long, Q long, "
+            + "CONSTRAINT FK_Q FOREIGN KEY (Q) REFERENCES T (Id) ON DELETE CASCADE, CONSTRAINT FK_P FOREIGN KEY (P) REFERENCES T (Id))",
+            "INSERT INTO T VALUES (1, NULL, NULL)", "INSERT INTO T VALUES (2, 1, 1)"], "DELETE FROM T WHERE Id = 1", 1, null, "" },
+        // Dropped and added again, a relationship takes back its place among the parent's incoming blocks, and that
+        // place, not MSysRelationships' row order, is the order ACE applies them in.
+        { "P dropped and added again", [TwoSelfRefs, "ALTER TABLE T DROP CONSTRAINT FK_P",
+            "ALTER TABLE T ADD CONSTRAINT FK_P FOREIGN KEY (P) REFERENCES T (Id)",
+            "INSERT INTO T VALUES (1, NULL, NULL)", "INSERT INTO T VALUES (2, 1, 1)"], "DELETE FROM T WHERE Id = 1", null, Related, "1,2" },
+        { "Q dropped and added again", [TwoSelfRefs, "ALTER TABLE T DROP CONSTRAINT FK_Q",
+            "ALTER TABLE T ADD CONSTRAINT FK_Q FOREIGN KEY (Q) REFERENCES T (Id) ON DELETE CASCADE",
+            "INSERT INTO T VALUES (1, NULL, NULL)", "INSERT INTO T VALUES (2, 1, 1)"], "DELETE FROM T WHERE Id = 1", null, Related, "1,2" },
+        // The NO ACTION's incoming block numbered 2 (.rC), the cascade's 17 (.rBB): stored first, the cascade goes first.
+        { "incoming blocks 2 and 17", IncomingTwoAndSeventeen, "DELETE FROM T WHERE Id = 1", 1, null, "" },
+        { "names reversed", ["CREATE TABLE T (Id long PRIMARY KEY, P long, Q long, CONSTRAINT Z_P FOREIGN KEY (P) REFERENCES T (Id), "
+            + "CONSTRAINT A_Q FOREIGN KEY (Q) REFERENCES T (Id) ON DELETE CASCADE)",
+            "INSERT INTO T VALUES (1, NULL, NULL)", "INSERT INTO T VALUES (2, 1, 1)"], "DELETE FROM T WHERE Id = 1", null, Related, "1,2" },
+        { "cascade-reached row held by a row that stays", [TwoSelfRefs, "INSERT INTO T VALUES (1, NULL, NULL)",
+            "INSERT INTO T VALUES (2, 1, NULL)", "INSERT INTO T VALUES (3, NULL, 1)", "UPDATE T SET P = 3 WHERE Id = 2"],
+            "DELETE FROM T WHERE Id = 1", null, Cascading, "1,2,3" },
+        // T 1 cascades to C 10, which cascades to T 2: the scan then reaches T 2 deleted, with a WHERE or without,
+        // as another table references T.
+        { "T and C cascading round", CascadeRound, "DELETE FROM T", null, "Record is deleted.", "1,2" },
+        { "T and C cascading round", CascadeRound, "DELETE FROM T WHERE 1 = 1", null, "Record is deleted.", "1,2" },
+        // SET NULL onto a required column of a row the statement deletes later: nulled first, so refused — unless
+        // the DELETE has no WHERE and empties the table.
+        { "SET NULL onto a required root", RequiredSetNull, "DELETE FROM T WHERE Id IN (1, 2)", null, RequiredNull, "1,2" },
+        { "SET NULL onto a required root", RequiredSetNull, "DELETE FROM T WHERE 1 = 1", null, RequiredNull, "1,2" },
+        { "SET NULL onto a required root", RequiredSetNull, "DELETE FROM T", 2, null, "" },
+        { "SET NULL down a chain", ["CREATE TABLE T (Id long PRIMARY KEY, P long, CONSTRAINT f FOREIGN KEY (P) REFERENCES T (Id) ON DELETE SET NULL)",
+            "INSERT INTO T VALUES (1, NULL)", "INSERT INTO T VALUES (2, 1)", "INSERT INTO T VALUES (3, 2)"],
+            "DELETE FROM T WHERE Id IN (1, 2)", 2, null, "3" },
+    };
+
+    private static readonly string[] IncomingTwoAndSeventeen =
+    [
+        "CREATE TABLE T (Id long PRIMARY KEY, P long, Q long, CONSTRAINT FK_P FOREIGN KEY (P) REFERENCES T (Id))",
+        .. Enumerable.Range(0, 13).SelectMany(i => new[] { $"ALTER TABLE T ADD COLUMN C{i} long", $"CREATE INDEX IX{i:00} ON T (C{i})" }),
+        "ALTER TABLE T ADD CONSTRAINT FK_Q FOREIGN KEY (Q) REFERENCES T (Id) ON DELETE CASCADE",
+        "INSERT INTO T (Id, P, Q) VALUES (1, NULL, NULL)", "INSERT INTO T (Id, P, Q) VALUES (2, 1, 1)",
+    ];
+
+    // ACE: ON UPDATE CASCADE of a unique key set to Null, into a required child column, is refused in its words for a
+    // cascade.
+    [Fact]
+    public void An_update_cascade_writing_null_into_a_required_column_is_refused_as_a_cascade()
+    {
+        string path = Fresh();
+        try
+        {
+            using var db = JetDatabase.Open(path, readOnly: false);
+            var e = new QueryEngine(db);
+            e.ExecuteNonQuery("CREATE TABLE P (Id long PRIMARY KEY, U long UNIQUE)");
+            e.ExecuteNonQuery("CREATE TABLE C (Id long PRIMARY KEY, u long NOT NULL, CONSTRAINT fc FOREIGN KEY (u) REFERENCES P (U) ON UPDATE CASCADE)");
+            e.ExecuteNonQuery("INSERT INTO P VALUES (1, 5)");
+            e.ExecuteNonQuery("INSERT INTO C VALUES (10, 5)");
+            Assert.Equal("Cannot perform cascading operation. It would cause field 'C.u' to become Null, which is not allowed.",
+                Assert.Throws<InvalidOperationException>(() => e.ExecuteNonQuery("UPDATE P SET U = NULL")).Message);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // ACE: P held by C1 and C2, both NO ACTION; a key UPDATE and a DELETE of P both name C1 — also once C1's
+    // relationship is dropped and added again, as it takes back its place among P's incoming blocks.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void A_refused_parent_names_the_first_relationship_in_its_incoming_blocks(bool addedAgain)
+    {
+        string path = Fresh();
+        try
+        {
+            using var db = JetDatabase.Open(path, readOnly: false);
+            var e = new QueryEngine(db);
+            e.ExecuteNonQuery("CREATE TABLE P (Id long PRIMARY KEY)");
+            e.ExecuteNonQuery("CREATE TABLE C1 (Id long PRIMARY KEY, p long, CONSTRAINT f1 FOREIGN KEY (p) REFERENCES P (Id))");
+            e.ExecuteNonQuery("CREATE TABLE C2 (Id long PRIMARY KEY, p long, CONSTRAINT f2 FOREIGN KEY (p) REFERENCES P (Id))");
+            if (addedAgain)
+            {
+                e.ExecuteNonQuery("ALTER TABLE C1 DROP CONSTRAINT f1");
+                e.ExecuteNonQuery("ALTER TABLE C1 ADD CONSTRAINT f1 FOREIGN KEY (p) REFERENCES P (Id)");
+            }
+            e.ExecuteNonQuery("INSERT INTO P VALUES (1)");
+            e.ExecuteNonQuery("INSERT INTO C1 VALUES (10, 1)");
+            e.ExecuteNonQuery("INSERT INTO C2 VALUES (20, 1)");
+            const string error = "The record cannot be deleted or changed because table 'C1' includes related records.";
+            Assert.Equal(error, Assert.Throws<InvalidOperationException>(() => e.ExecuteNonQuery("UPDATE P SET Id = 9")).Message);
+            Assert.Equal(error, Assert.Throws<InvalidOperationException>(() => e.ExecuteNonQuery("DELETE FROM P WHERE Id = 1")).Message);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    private static readonly string[] RequiredSetNull = [
+        "CREATE TABLE T (Id long PRIMARY KEY, P long NOT NULL, CONSTRAINT f FOREIGN KEY (P) REFERENCES T (Id) ON DELETE SET NULL)",
+        "INSERT INTO T VALUES (1, 1)", "INSERT INTO T VALUES (2, 1)"];
+    private const string RequiredNull = "Cannot perform cascading operation. It would cause field 'T.P' to become Null, which is not allowed.";
+
+    // ACE: A(1); C(5) and C(6) cascade from A 1; D(1) cascades from C 5; C.x also references D with SET NULL. Deleting
+    // A 1 deletes C 5, then D 1, whose SET NULL clears C 6's x — so C 6 no longer holds A 1 and stays, with x Null.
+    [Fact]
+    public void A_cascade_child_detached_by_an_earlier_rule_is_left()
+    {
+        string path = Fresh();
+        try
+        {
+            using var db = JetDatabase.Open(path, readOnly: false);
+            var e = new QueryEngine(db);
+            e.ExecuteNonQuery("CREATE TABLE A (Id long PRIMARY KEY)");
+            e.ExecuteNonQuery("CREATE TABLE C (Id long PRIMARY KEY, x long, CONSTRAINT fca FOREIGN KEY (x) REFERENCES A (Id) ON DELETE CASCADE)");
+            e.ExecuteNonQuery("CREATE TABLE D (Id long PRIMARY KEY, c long, CONSTRAINT fdc FOREIGN KEY (c) REFERENCES C (Id) ON DELETE CASCADE)");
+            e.ExecuteNonQuery("INSERT INTO A VALUES (1)");
+            e.ExecuteNonQuery("INSERT INTO C VALUES (5, NULL)");
+            e.ExecuteNonQuery("INSERT INTO D VALUES (1, 5)");
+            e.ExecuteNonQuery("UPDATE C SET x = 1 WHERE Id = 5");
+            e.ExecuteNonQuery("ALTER TABLE C ADD CONSTRAINT fcd FOREIGN KEY (x) REFERENCES D (Id) ON DELETE SET NULL");
+            e.ExecuteNonQuery("INSERT INTO C VALUES (6, 1)");
+            Assert.Equal(1, e.ExecuteNonQuery("DELETE FROM A WHERE Id = 1"));
+            var row = e.ExecuteQuery("SELECT Id, x FROM C").Rows.Single();
+            Assert.Equal(6, Convert.ToInt32(row[0]));
+            Assert.Null(row[1]);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // ACE: P(1); S holds it with SET NULL, declared first, and N with NO ACTION. S is nulled, then N refuses — and the
+    // statement leaves S as it was.
+    [Fact]
+    public void A_set_null_already_applied_goes_back_when_a_later_rule_refuses()
+    {
+        string path = Fresh();
+        try
+        {
+            using var db = JetDatabase.Open(path, readOnly: false);
+            var e = new QueryEngine(db);
+            e.ExecuteNonQuery("CREATE TABLE P (Id long PRIMARY KEY)");
+            e.ExecuteNonQuery("CREATE TABLE S (Id long PRIMARY KEY, p long, CONSTRAINT fs FOREIGN KEY (p) REFERENCES P (Id) ON DELETE SET NULL)");
+            e.ExecuteNonQuery("CREATE TABLE N (Id long PRIMARY KEY, p long, CONSTRAINT fn FOREIGN KEY (p) REFERENCES P (Id))");
+            e.ExecuteNonQuery("INSERT INTO P VALUES (1)");
+            e.ExecuteNonQuery("INSERT INTO S VALUES (20, 1)");
+            e.ExecuteNonQuery("INSERT INTO N VALUES (10, 1)");
+            Assert.Equal("The record cannot be deleted or changed because table 'N' includes related records.",
+                Assert.Throws<InvalidOperationException>(() => e.ExecuteNonQuery("DELETE FROM P WHERE Id = 1")).Message);
+            Assert.Equal(1, Convert.ToInt32(e.ExecuteQuery("SELECT p FROM S").Rows.Single()[0]));
+            Assert.Single(e.ExecuteQuery("SELECT Id FROM P").Rows);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    private const string CascadesThenHold = "CREATE TABLE T (Id long PRIMARY KEY, A long, B long, H long, "
+        + "CONSTRAINT FK_A FOREIGN KEY (A) REFERENCES T (Id) ON DELETE CASCADE, "
+        + "CONSTRAINT FK_B FOREIGN KEY (B) REFERENCES T (Id) ON DELETE CASCADE, CONSTRAINT FK_H FOREIGN KEY (H) REFERENCES T (Id))";
+    private static readonly string[] CascadeRound = ["CREATE TABLE T (Id long PRIMARY KEY, X long)",
+        "CREATE TABLE C (Id long PRIMARY KEY, T long, CONSTRAINT FK_CT FOREIGN KEY (T) REFERENCES T (Id) ON DELETE CASCADE)",
+        "ALTER TABLE T ADD CONSTRAINT FK_TX FOREIGN KEY (X) REFERENCES C (Id) ON DELETE CASCADE",
+        "INSERT INTO T VALUES (1, NULL)", "INSERT INTO C VALUES (10, 1)", "INSERT INTO T VALUES (2, 10)"];
+
+    // ACE: P(1), P(2); N holds P 1 (NO ACTION), S holds P 2 (SET NULL onto a required column). The roots go in the
+    // order read and each one's rules run before the next root: P 1 first refuses for N, P 2 first fails S's null.
+    [Theory]
+    [InlineData(1, 2, "The record cannot be deleted or changed because table 'N' includes related records.")]
+    [InlineData(2, 1, "Cannot perform cascading operation. It would cause field 'S.p' to become Null, which is not allowed.")]
+    public void Each_root_has_its_rules_applied_before_the_next_root(int first, int second, string error)
+    {
+        string path = Fresh();
+        try
+        {
+            using var db = JetDatabase.Open(path, readOnly: false);
+            var e = new QueryEngine(db);
+            e.ExecuteNonQuery("CREATE TABLE P (Id long PRIMARY KEY)");
+            e.ExecuteNonQuery("CREATE TABLE N (Id long PRIMARY KEY, p long, CONSTRAINT fn FOREIGN KEY (p) REFERENCES P (Id))");
+            e.ExecuteNonQuery("CREATE TABLE S (Id long PRIMARY KEY, p long NOT NULL, CONSTRAINT fs FOREIGN KEY (p) REFERENCES P (Id) ON DELETE SET NULL)");
+            e.ExecuteNonQuery($"INSERT INTO P VALUES ({first})");
+            e.ExecuteNonQuery($"INSERT INTO P VALUES ({second})");
+            e.ExecuteNonQuery("INSERT INTO N VALUES (10, 1)");
+            e.ExecuteNonQuery("INSERT INTO S VALUES (20, 2)");
+            Assert.Equal(error, Assert.Throws<InvalidOperationException>(() => e.ExecuteNonQuery("DELETE FROM P WHERE 1 = 1")).Message);
+            Assert.Equal(2, e.ExecuteQuery("SELECT Id FROM P").Rows.Count());
+            Assert.Equal(2, Convert.ToInt32(e.ExecuteQuery("SELECT p FROM S").Rows.Single()[0]));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // ACE: A(1); B(1) cascades from A 1; C(5) holds A 1 (NO ACTION) and B 1 (SET NULL) through one column x, B's
+    // relationship to A declared first. Deleting A 1 deletes B 1, which nulls C.x, so nothing holds A 1.
+    [Fact]
+    public void A_set_null_run_earlier_frees_the_no_action_parent()
+    {
+        string path = Fresh();
+        try
+        {
+            using var db = JetDatabase.Open(path, readOnly: false);
+            var e = new QueryEngine(db);
+            e.ExecuteNonQuery("CREATE TABLE A (Id long PRIMARY KEY)");
+            e.ExecuteNonQuery("CREATE TABLE B (Id long PRIMARY KEY, a long, CONSTRAINT fba FOREIGN KEY (a) REFERENCES A (Id) ON DELETE CASCADE)");
+            e.ExecuteNonQuery("CREATE TABLE C (Id long PRIMARY KEY, x long, CONSTRAINT fca FOREIGN KEY (x) REFERENCES A (Id), "
+                + "CONSTRAINT fcb FOREIGN KEY (x) REFERENCES B (Id) ON DELETE SET NULL)");
+            e.ExecuteNonQuery("INSERT INTO A VALUES (1)");
+            e.ExecuteNonQuery("INSERT INTO B VALUES (1, 1)");
+            e.ExecuteNonQuery("INSERT INTO C VALUES (5, 1)");
+            Assert.Equal(1, e.ExecuteNonQuery("DELETE FROM A WHERE Id = 1"));
+            Assert.Null(e.ExecuteQuery("SELECT x FROM C").Rows.Single()[0]);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    [Theory]
+    [MemberData(nameof(AceDeletes))]
+    public void A_delete_of_rows_that_refer_to_each_other_matches_ace(
+        string setup, string[] sql, string delete, int? deleted, string? error, string left)
+    {
+        _ = setup; // names the data in the test explorer
+        string path = Fresh();
+        try
+        {
+            using var db = JetDatabase.Open(path, readOnly: false);
+            var e = new QueryEngine(db);
+            foreach (string s in sql) e.ExecuteNonQuery(s);
+            if (error is null)
+                Assert.Equal(deleted, e.ExecuteNonQuery(delete));
+            else
+                Assert.Equal(error, Assert.Throws<InvalidOperationException>(() => e.ExecuteNonQuery(delete)).Message);
+            Assert.Equal(left, string.Join(",", e.ExecuteQuery("SELECT Id FROM T ORDER BY Id").Rows.Select(r => r[0])));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // ACE: P(1); B(20) and A(10) both cascade from P, B's relationship made first; B holds A through a NO ACTION key.
+    // `DELETE FROM P WHERE Id = 1` deletes P and, by the cascades, B then A: B is gone before A, so nothing holds A.
+    [Fact]
+    public void A_cascade_deleting_the_no_action_child_first_lets_its_parent_go()
+    {
+        string path = Fresh();
+        try
+        {
+            using var db = JetDatabase.Open(path, readOnly: false);
+            var e = new QueryEngine(db);
+            e.ExecuteNonQuery("CREATE TABLE P (Id long PRIMARY KEY)");
+            e.ExecuteNonQuery("CREATE TABLE B (Id long PRIMARY KEY, P long, CONSTRAINT fbp FOREIGN KEY (P) REFERENCES P (Id) ON DELETE CASCADE)");
+            e.ExecuteNonQuery("CREATE TABLE A (Id long PRIMARY KEY, P long, CONSTRAINT fap FOREIGN KEY (P) REFERENCES P (Id) ON DELETE CASCADE)");
+            e.ExecuteNonQuery("ALTER TABLE B ADD COLUMN A long");
+            e.ExecuteNonQuery("ALTER TABLE B ADD CONSTRAINT fba FOREIGN KEY (A) REFERENCES A (Id)");
+            e.ExecuteNonQuery("INSERT INTO P VALUES (1)");
+            e.ExecuteNonQuery("INSERT INTO A (Id, P) VALUES (10, 1)");
+            e.ExecuteNonQuery("INSERT INTO B (Id, P, A) VALUES (20, 1, 10)");
+            Assert.Equal(1, e.ExecuteNonQuery("DELETE FROM P WHERE Id = 1"));
+            Assert.Empty(e.ExecuteQuery("SELECT Id FROM A").Rows);
+            Assert.Empty(e.ExecuteQuery("SELECT Id FROM B").Rows);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
     // A(Id) <- B(Aid, unique) <- C(Baid), one row each, all holding key 1.
     private static QueryEngine ChainOf(JetDatabase db, string bRule, string cRule)
     {

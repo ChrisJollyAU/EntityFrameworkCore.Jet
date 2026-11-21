@@ -53,7 +53,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         var columns = statement.Columns.Select(AccessTypeMapper.ToColumnSpec).ToList();
         IReadOnlyList<string>? primaryKey = statement.PrimaryKey.Count > 0 ? statement.PrimaryKey : null;
 
-        var relationships = statement.ForeignKeys.Select(fk => ToRelationshipSpec(statement.Table, fk)).ToList();
+        var relationships = statement.ForeignKeys.Select(ToRelationshipSpec).ToList();
 
         // An unnamed constraint's generated name has to fit the 64 characters a name may have, however long the
         // table's own name is.
@@ -80,7 +80,8 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         var checks = statement.CheckConstraints
             .Select((ck, i) => (Name: ck.Name ?? Generated("CK", i), ck.Expression,
                 Reads: (IReadOnlyList<(string Table, IReadOnlyList<string> Columns)>)CheckReads(
-                    statement.Table, [.. statement.Columns.Take(ck.ColumnsBefore).Select(col => col.Name)], ck.Expression)))
+                    statement.Table, [.. statement.Columns.Take(ck.ColumnsBefore).Select(col => col.Name)], ck.Expression),
+                ck.DeclaredAfter))
             .ToList();
 
         _database.CreateTable(statement.Table, columns, primaryKey, relationships, uniques, defaults, checks,
@@ -242,13 +243,17 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     /// <summary>Rejects an insert that leaves a NOT NULL (Required) column null after defaults are applied —
     /// matching Access, which raises "You must enter a value in the 'Table.Column' field." AutoNumber columns
     /// are exempt: they are assigned during the write, not supplied here. And one that gives a column whose
-    /// AllowZeroLength is cleared a zero-length string, in ACE's words for it (measured).</summary>
-    private static void EnforceRequired(string table, IReadOnlyList<ColumnDef> columns, object?[] values)
+    /// AllowZeroLength is cleared a zero-length string, in ACE's words for it (measured). A Null in a row a cascade
+    /// writes (<paramref name="cascaded"/>: ON DELETE SET NULL, or ON UPDATE CASCADE of a unique key set to Null) is
+    /// refused in ACE's words for a cascade (both measured).</summary>
+    private static void EnforceRequired(string table, IReadOnlyList<ColumnDef> columns, object?[] values, bool cascaded)
     {
         foreach (ColumnDef column in columns)
         {
             if (!column.IsNullable && !column.IsAutoNumber && values[column.Index] is null)
-                throw new InvalidOperationException($"You must enter a value in the '{table}.{column.Name}' field.");
+                throw new InvalidOperationException(cascaded
+                    ? $"Cannot perform cascading operation. It would cause field '{table}.{column.Name}' to become Null, which is not allowed."
+                    : $"You must enter a value in the '{table}.{column.Name}' field.");
             if (!column.AllowZeroLength && values[column.Index] is string { Length: 0 })
                 throw new InvalidOperationException($"Field '{table}.{column.Name}' cannot be a zero-length string.");
         }
@@ -297,11 +302,11 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         return parsed;
     }
 
-    /// <summary>The relationship a parsed foreign key creates on <paramref name="childTable"/>, for CREATE TABLE and
-    /// ALTER TABLE alike. A <c>REFERENCES table</c> with no column list names only its child columns; the table
-    /// creator resolves it to the parent's primary key.</summary>
-    private static RelationshipSpec ToRelationshipSpec(string childTable, ForeignKeyConstraint fk) => new(
-        Name: fk.Name ?? DefaultRelationshipName(childTable, fk),
+    /// <summary>The relationship a parsed foreign key creates, for CREATE TABLE and ALTER TABLE alike. A
+    /// <c>REFERENCES table</c> with no column list names only its child columns; the table creator resolves it to the
+    /// parent's primary key.</summary>
+    private static RelationshipSpec ToRelationshipSpec(ForeignKeyConstraint fk) => new(
+        Name: fk.Name ?? DefaultRelationshipName(),
         ReferencedTable: fk.ReferencedTable,
         Columns: fk.ReferencedColumns.Count == 0
             ? RelationshipSpec.ChildColumnsOnly(fk.Columns)
@@ -315,9 +320,10 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         ReferencesPrimaryKey: fk.ReferencedColumns.Count == 0,
         DeclaredAfter: fk.DeclaredAfter);
 
-    /// <summary>Access-style fallback name when the constraint is unnamed: "childparent".</summary>
-    private static string DefaultRelationshipName(string childTable, ForeignKeyConstraint fk) =>
-        $"{fk.ReferencedTable}{childTable}";
+    /// <summary>The name ACE gives an unnamed foreign key (measured): "Rel_" and the first three groups of a fresh GUID,
+    /// upper-case, underscores for the dashes, e.g. <c>Rel_6CF170F8_F50A_4F5C</c>.</summary>
+    private static string DefaultRelationshipName() =>
+        "Rel_" + Guid.NewGuid().ToString("D").ToUpperInvariant()[..18].Replace('-', '_');
 
     /// <summary>
     /// Rejects an insert whose foreign-key columns reference a non-existent parent row. NULL handling follows
@@ -541,6 +547,11 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     private static InvalidOperationException RelatedRecords(ForeignKey fk) =>
         new($"The record cannot be deleted or changed because table '{fk.Table}' includes related records.");
 
+    /// <summary>ACE's refusal when that parent row was reached by a cascade rather than named by the statement.</summary>
+    private static InvalidOperationException CascadingRelatedRecords(ForeignKey fk) =>
+        new($"Cannot perform cascading operation. Since related records exist in table '{fk.Table}', "
+            + "referential integrity rules would be violated.");
+
     /// <summary>Child rows whose FK columns equal <paramref name="key"/>. Both callers skip a key with a null
     /// in it — nothing references one — so a null FK column simply fails the comparison.</summary>
     private List<(RowId Id, object?[] Values)> FindChildRows(RelationshipEnds ends, object?[] key) =>
@@ -550,53 +561,62 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
 
     /// <summary>
     /// Deletes the given root rows and everything ON DELETE CASCADE reaches from them, applying SET NULL and
-    /// NO ACTION as it goes. An explicit worklist replaces the former recursion: each row is scheduled at most
-    /// once (a <see cref="RowId"/> set makes cyclic and diamond-shaped FK graphs terminate and delete a shared
-    /// child exactly once), and rows are deleted in post-order — every cascade child before its parent — so no
-    /// row is removed while another still references it. Bounded by the number of rows in the database, so a
-    /// deep or cyclic chain can no longer overflow the call stack.
+    /// NO ACTION as it goes, in the sequence ACE does (measured): the roots in the order found, and for each row its
+    /// relationships in order — a CASCADE deleting the children then and there, depth first, a SET NULL nulling
+    /// them, a NO ACTION refusing while a child not yet deleted holds the row. So a row never holds itself, a child a
+    /// rule earlier in the statement detached is not cascaded to, and a root a cascade deleted earlier makes the scan
+    /// fail with "Record is deleted." when it reaches it — a DELETE with no WHERE included, unless it empties the
+    /// table in one go instead (see <see cref="Delete"/>). The walk is an explicit worklist, so a deep chain cannot
+    /// overflow the call stack, and each row is visited once, so a cycle ends. Every referential check runs before
+    /// the first row goes, so one refused deletes nothing; SET NULL's writes go back with the statement, as ACE's do.
     /// </summary>
     private void CascadeDelete(Table rootTable, IEnumerable<(RowId Id, object?[] Values)> roots)
     {
-        var scheduled = new HashSet<(string Table, RowId Id)>();
-        var order = new List<(Table Table, RowId Id, object?[] Values)>();
-        var stack = new Stack<(Table Table, RowId Id, object?[] Values, bool ChildrenExpanded)>();
+        var deleted = new HashSet<(string Table, RowId Id)>();
+        var order = new List<(Table Table, RowId Id, bool Cascaded)>();
+        var stack = new Stack<((Table Table, RowId Id) Row, bool Cascaded, IEnumerator<(Table, RowId, object?[])> Children)>();
 
-        // Pushed last first, so the roots come off the stack — and are deleted — in the order they were found, as
-        // ACE deletes them. The order shows in the file: a delete slides the rows below it up and leaves the old
-        // bytes in the space it frees, so deleting the same rows the other way round leaves different bytes.
-        foreach (var (id, values) in roots.Reverse())
-            if (scheduled.Add((rootTable.Name, id)))
-                stack.Push((rootTable, id, values, false));
-        var rootRows = new HashSet<(string Table, RowId Id)>(scheduled);
-
-        while (stack.Count > 0)
+        foreach (var (id, values) in roots)
         {
-            var (table, id, values, expanded) = stack.Pop();
-            if (expanded)
+            if (deleted.Contains((rootTable.Name, id))) throw new InvalidOperationException("Record is deleted.");
+            Begin(rootTable, id, values, cascaded: false);
+            while (stack.Count > 0)
             {
-                order.Add((table, id, values)); // its children are all below it on the stack / already emitted
-                continue;
+                var (row, cascaded, children) = stack.Peek();
+                if (children.MoveNext())
+                {
+                    var (table, cid, cvals) = children.Current;
+                    Begin(table, cid, cvals, cascaded: true);
+                }
+                else
+                {
+                    stack.Pop();
+                    order.Add((row.Table, row.Id, cascaded)); // its cascade children are all in the order already
+                }
             }
-            stack.Push((table, id, values, true)); // revisit to emit after its children
-            EnqueueCascadeChildren(table.Name, values, scheduled, stack);
         }
 
-        foreach (var (table, id, _) in order)
+        foreach (var (table, id, cascaded) in order)
         {
             table.Delete(id);
-            EnforceCheckConstraints(table.Definition, new object?[table.Definition.Columns.Count],
-                cascaded: !rootRows.Contains((table.Name, id)));
+            EnforceCheckConstraints(table.Definition, new object?[table.Definition.Columns.Count], cascaded);
+        }
+
+        void Begin(Table table, RowId id, object?[] values, bool cascaded)
+        {
+            deleted.Add((table.Name, id));
+            stack.Push(((table, id), cascaded,
+                ApplyDeleteRules(table.Name, values, deleted, cascaded).GetEnumerator()));
         }
     }
 
-    /// <summary>Applies each enforced relationship's ON DELETE action to a parent row about to be deleted:
-    /// CASCADE schedules its children for deletion (unless already scheduled), SET NULL nulls their FK columns
-    /// now, and NO ACTION rejects the delete if any child exists (matching Access's "record cannot be deleted…
-    /// includes related records").</summary>
-    private void EnqueueCascadeChildren(string parentTable, object?[] parentValues,
-        HashSet<(string Table, RowId Id)> scheduled,
-        Stack<(Table Table, RowId Id, object?[] Values, bool ChildrenExpanded)> stack)
+    /// <summary>Applies each enforced relationship's ON DELETE action to a parent row being deleted, relationship by
+    /// relationship: CASCADE yields its children not yet deleted that still hold the row, one at a time, for
+    /// <see cref="CascadeDelete"/> to delete (cascade and all) before this goes on; SET NULL nulls the children's FK
+    /// columns; NO ACTION refuses if a child not yet deleted holds the row — in ACE's words for a cascade when a
+    /// cascade reached the row (<paramref name="cascaded"/>).</summary>
+    private IEnumerable<(Table, RowId, object?[])> ApplyDeleteRules(string parentTable, object?[] parentValues,
+        HashSet<(string Table, RowId Id)> deleted, bool cascaded)
     {
         foreach (ForeignKey fk in ChildRelationshipsOf(parentTable))
         {
@@ -611,27 +631,25 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
 
             if (fk.CascadeDelete)
             {
-                // Pushed last first, as the roots are, so the children come off the stack in the order they were
-                // found — the order ACE deletes them in (measured, whole-file diff: a parent's two children left
-                // the leaf and the data page holding the second one's bytes, where the reverse leaves the first's).
-                foreach (var (cid, cvals) in Enumerable.Reverse(children))
-                    if (scheduled.Add((ends.Child.Name, cid)))
-                        stack.Push((ends.Child, cid, cvals, false));
+                // In the order found — the order ACE deletes them in (measured, whole-file diff: a parent's two
+                // children left the leaf and the data page holding the second one's bytes, where the reverse leaves
+                // the first's). Each is read again when its turn comes: the cascade under an earlier one may have
+                // nulled its key, and then ACE leaves it (measured).
+                foreach (var (cid, _) in children)
+                    if (!deleted.Contains((ends.Child.Name, cid))
+                        && ends.Child.GetRow(cid) is { } current && KeyEquals(current, ends.ChildColumns, key))
+                        yield return (ends.Child, cid, current);
             }
             else if (fk.DeleteSetNull)
+            {
+                // A child the statement has already deleted is left alone; one it is still to reach is nulled, as ACE
+                // nulls it (measured: a required column refuses the statement).
                 foreach (var (cid, cvals) in children)
-                {
-                    // A child this same statement is already deleting is left alone. Nulling it would rewrite a
-                    // row whose values the delete is still holding — captured when it was scheduled — so the
-                    // delete would then look its index entries up under a key the index no longer has
-                    // ("entry not found"). Reachable on a self-referencing table, where the parent and the
-                    // child are rows of one table and one DELETE can name both. Skipping costs nothing: the row
-                    // and its entries go in a moment either way, and nobody can observe the intermediate null.
-                    if (scheduled.Contains((ends.Child.Name, cid))) continue;
-                    SetChildKey(ends, cid, cvals, newKey: null);
-                }
-            else
-                throw RelatedRecords(fk);
+                    if (!deleted.Contains((ends.Child.Name, cid)))
+                        SetChildKey(ends, cid, cvals, newKey: null);
+            }
+            else if (children.Any(c => !deleted.Contains((ends.Child.Name, c.Id))))
+                throw cascaded ? CascadingRelatedRecords(fk) : RelatedRecords(fk);
         }
     }
 
@@ -704,7 +722,8 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     /// reaches — after checking it against every rule an updated row is held to, then applies the ON UPDATE rules
     /// of any relationship whose key it changed. The one place a row is rewritten: a cascaded row is checked
     /// exactly as a directly updated one, and a cascade that changes a key others reference carries on down.
-    /// <paramref name="cascaded"/> says a cascade is writing it, which ACE words a refused CHECK differently for.
+    /// <paramref name="cascaded"/> says a cascade is writing it, which ACE words a refused CHECK or Required column
+    /// differently for.
     /// </summary>
     private void UpdateRow(Table table, RowId id, object?[] original, object?[] values,
         Dictionary<(int Tdef, RowId Id), object?[]>? stillToWrite, bool cascaded)
@@ -724,7 +743,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
 
         // UPDATE must preserve the same Required/NOT NULL invariant as INSERT. Check the complete
         // post-assignment row before any referential action, row rewrite, or index mutation occurs.
-        EnforceRequired(table.Name, table.Definition.Columns, values);
+        EnforceRequired(table.Name, table.Definition.Columns, values, cascaded);
 
         // A changed primary-key or WITH DISALLOW NULL column must not become Null, the insert rule.
         foreach (IndexDef index in table.Definition.Indexes
@@ -1018,7 +1037,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
 
     private int AddForeignKey(string table, ForeignKeyConstraint fk)
     {
-        RelationshipSpec relationship = ToRelationshipSpec(table, fk);
+        RelationshipSpec relationship = ToRelationshipSpec(fk);
         _database.AddForeignKey(table, relationship);
 
         ForeignKey added = _database.Catalog.Relationships.Single(
@@ -1346,7 +1365,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         // AutoNumber; a reference once the row is written. Insert fills values[autoNumber.Index] with the generated
         // id (array mutated in place).
         table.Insert(values, defaultRecord, provided,
-            validate: row => EnforceRequired(tableName, table.Definition.Columns, row),
+            validate: row => EnforceRequired(tableName, table.Definition.Columns, row, cascaded: false),
             reference: row => EnforceReferentialIntegrity(tableName, table, row));
         EnforceCheckConstraints(table.Definition, values, cascaded: false);
         _database.AcceptCounters();   // the row stands: a later failure of the statement keeps its counting, as ACE's does
@@ -2298,15 +2317,16 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         _database.RefuseIfReadOnly(ReadOnlyWrite.RowDelete);
 
         // With no WHERE over one table, ACE empties the table in one go rather than row by row — unless an enforced
-        // relationship names it as the parent, when it deletes row by row as below (measured, whole-file diff:
-        // WholeFileParityProbeTest). The test is the WHERE's absence, not every row matching: WHERE 1 = 1 deletes
-        // row by row. So does a table with a CHECK constraint, pages and all, its checks evaluated as each row goes
-        // (verified: whole-file diff, and a check that fails only once some rows are gone). A table holding a complex
-        // column takes this path too, and its values' flat rows stay where they are, owned by no row (verified through
-        // DAO and ACE's OLE DB alike). No row is read but to be counted.
-        if (statement.Where is null && statement.From is NamedTable
-            && ChildRelationshipsOf(target.Name).Length == 0
-            && target.Definition.CheckConstraints.Count == 0)
+        // relationship from another table names it as the parent, when it deletes row by row as below; its own
+        // relationships alone leave it emptied in one go (both measured, whole-file diff: WholeFileParityProbeTest).
+        // The test is the WHERE's absence, not every row matching: WHERE 1 = 1 deletes row by row. So does a table
+        // with a CHECK constraint, pages and all, its checks evaluated as each row goes (verified: whole-file diff,
+        // and a check that fails only once some rows are gone). A table holding a complex column takes this path
+        // too, and its values' flat rows stay where they are, owned by no row (verified through DAO and ACE's OLE DB
+        // alike). No row is read but to be counted.
+        bool wholeTable = statement.Where is null && statement.From is NamedTable
+            && ChildRelationshipsOf(target.Name).All(r => string.Equals(r.Table, target.Name, StringComparison.OrdinalIgnoreCase));
+        if (wholeTable && target.Definition.CheckConstraints.Count == 0)
         {
             int rows = target.Rows(target.DecodeOnly([])).Count();
             target.Truncate();

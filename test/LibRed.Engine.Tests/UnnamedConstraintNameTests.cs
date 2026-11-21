@@ -59,4 +59,32 @@ public class UnnamedConstraintNameTests : TempDatabaseTest
         e.ExecuteNonQuery($"INSERT INTO [{table}] (Id, V) VALUES (1, 5)");
         Assert.ThrowsAny<Exception>(() => e.ExecuteNonQuery($"INSERT INTO [{table}] (Id, V) VALUES (2, -1)"));
     }
+
+    // ACE names every unnamed foreign key — inline REFERENCES, table-level FOREIGN KEY, ALTER TABLE ADD FOREIGN KEY
+    // and ADD COLUMN ... REFERENCES alike — Rel_ and the first three groups of a fresh GUID (e.g.
+    // Rel_6CF170F8_F50A_4F5C), whatever the tables are called, and gives the child's index the same name; so any
+    // number of them between one pair of tables are created (measured).
+    [Theory]
+    [InlineData(1)]
+    [InlineData(60)]
+    public void An_unnamed_foreign_key_is_named_rel_and_a_guid(int tableNameLength)
+    {
+        var (e, db) = Fresh();
+        string parent = new('P', tableNameLength), child = new('C', tableNameLength);
+
+        e.ExecuteNonQuery($"CREATE TABLE [{parent}] (Id LONG PRIMARY KEY)");
+        e.ExecuteNonQuery($"CREATE TABLE [{child}] (Id LONG PRIMARY KEY, A LONG REFERENCES [{parent}] (Id), "
+            + $"B LONG, D LONG, FOREIGN KEY (B) REFERENCES [{parent}] (Id))");
+        e.ExecuteNonQuery($"ALTER TABLE [{child}] ADD FOREIGN KEY (D) REFERENCES [{parent}] (Id)");
+        e.ExecuteNonQuery($"ALTER TABLE [{child}] ADD COLUMN E LONG REFERENCES [{parent}]");
+
+        var names = db.Catalog.Relationships.Where(r => r.Table == child).Select(r => r.Name).ToList();
+        Assert.Equal(4, names.Distinct().Count());
+        var table = db.Catalog.FindTable(child)!;
+        foreach (string name in names)
+        {
+            Assert.Matches("^Rel_[0-9A-F]{8}_[0-9A-F]{4}_[0-9A-F]{4}$", name);
+            Assert.Contains(table.Indexes, ix => ix.Name == name);
+        }
+    }
 }

@@ -460,7 +460,7 @@ public sealed class JetDatabase : IDisposable
         IReadOnlyList<RelationshipSpec>? relationships = null,
         IReadOnlyList<UniqueIndexSpec>? uniqueConstraints = null,
         IReadOnlyList<(string Column, string DefaultSql)>? columnDefaults = null,
-        IReadOnlyList<(string Name, string Expression, IReadOnlyList<(string Table, IReadOnlyList<string> Columns)> Reads)>? checkConstraints = null,
+        IReadOnlyList<(string Name, string Expression, IReadOnlyList<(string Table, IReadOnlyList<string> Columns)> Reads, int DeclaredAfter)>? checkConstraints = null,
         string? primaryKeyName = null,
         int primaryKeyDeclaredAfter = 0,
         TableType tableType = TableType.User)

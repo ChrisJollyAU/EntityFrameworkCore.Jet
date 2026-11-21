@@ -391,7 +391,10 @@
   - `Name` the check's name, `ParentId 0x0F000003` (the Relationships container), `Flags 0x10000000`,
     **`Owner` null**, **no `MSysACEs` rows**, `Id` the next negative synthetic id from the sequence queries and
     relationships draw on. Its name must differ from every relationship's and every other check's, on whichever
-    table (measured) — the unique `(ParentId, Name)` index — but may equal a table's (measured).
+    table (measured) — the unique `(ParentId, Name)` index — but may equal a table's (measured). In a `CREATE
+    TABLE` the checks' and the relationships' rows are written in the order the statement declares them
+    (measured, whole-file diff: two foreign keys then a CHECK give the relationships the lower ids; a CHECK then two
+    foreign keys, the check).
   - **`Connect`** — the expression as the `CheckConstraints` property stores it, `U+FFFE` row qualifier and
     re-formed text included (verified). **`ForeignName`** — the table's name followed by a NUL
     character (`Setting\0`).

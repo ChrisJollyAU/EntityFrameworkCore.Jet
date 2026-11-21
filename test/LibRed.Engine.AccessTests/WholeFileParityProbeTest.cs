@@ -1378,6 +1378,35 @@ public class WholeFileParityProbeTest(ITestOutputHelper output)
             s.Add(row);
         }
 
+        // A table only its own relationships reference, emptied with no WHERE: row 3 is a cascade child of row 1, so
+        // the rows go in the order read only if the relationships are not walked.
+        s.AddRange(
+        [
+            "CREATE TABLE SelfRef (Id LONG CONSTRAINT pkSelfRef PRIMARY KEY, P LONG, Q LONG, Body TEXT(200), "
+                + "CONSTRAINT fkSelfP FOREIGN KEY (P) REFERENCES SelfRef (Id), "
+                + "CONSTRAINT fkSelfQ FOREIGN KEY (Q) REFERENCES SelfRef (Id) ON DELETE CASCADE)",
+            "INSERT INTO SelfRef VALUES (1, NULL, NULL, String(200, 'a'))",
+            "INSERT INTO SelfRef VALUES (2, 1, NULL, String(150, 'b'))",
+            "INSERT INTO SelfRef VALUES (3, NULL, 1, String(100, 'c'))",
+            "INSERT INTO SelfRef VALUES (4, 3, 2, String(50, 'd'))",
+            "DELETE FROM SelfRef",
+            // The same with a CHECK, which makes ACE delete the rows one by one.
+            "CREATE TABLE SelfChecked (Id LONG CONSTRAINT pkSelfChecked PRIMARY KEY, P LONG, Q LONG, Body TEXT(200), "
+                + "CONSTRAINT fkSelfCheckedP FOREIGN KEY (P) REFERENCES SelfChecked (Id), "
+                + "CONSTRAINT fkSelfCheckedQ FOREIGN KEY (Q) REFERENCES SelfChecked (Id) ON DELETE CASCADE, "
+                + "CONSTRAINT ckSelfChecked CHECK (Id > 0))",
+            "INSERT INTO SelfChecked VALUES (1, NULL, NULL, String(200, 'a'))",
+            "INSERT INTO SelfChecked VALUES (2, 1, NULL, String(150, 'b'))",
+            "INSERT INTO SelfChecked VALUES (3, NULL, 1, String(100, 'c'))",
+            "INSERT INTO SelfChecked VALUES (4, 3, 2, String(50, 'd'))",
+            "DELETE FROM SelfChecked",
+            // A CHECK declared before the foreign keys.
+            "CREATE TABLE CheckFirst (Id LONG CONSTRAINT pkCheckFirst PRIMARY KEY, P LONG, "
+                + "CONSTRAINT ckCheckFirst CHECK (Id > 0), "
+                + "CONSTRAINT fkCheckFirstP FOREIGN KEY (P) REFERENCES CheckFirst (Id), "
+                + "CONSTRAINT fkCheckFirstO FOREIGN KEY (P) REFERENCES SelfRef (Id))",
+        ]);
+
         return [.. s];
     }
 

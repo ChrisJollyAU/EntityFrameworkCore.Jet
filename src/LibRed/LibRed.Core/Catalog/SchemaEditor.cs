@@ -74,7 +74,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         IReadOnlyList<RelationshipSpec>? relationships = null,
         IReadOnlyList<UniqueIndexSpec>? uniqueConstraints = null,
         IReadOnlyList<(string Column, string DefaultSql)>? columnDefaults = null,
-        IReadOnlyList<(string Name, string Expression, IReadOnlyList<(string Table, IReadOnlyList<string> Columns)> Reads)>? checkConstraints = null,
+        IReadOnlyList<(string Name, string Expression, IReadOnlyList<(string Table, IReadOnlyList<string> Columns)> Reads, int DeclaredAfter)>? checkConstraints = null,
         string? primaryKeyName = null,
         int primaryKeyDeclaredAfter = 0,
         TableType tableType = TableType.User,
@@ -97,7 +97,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         if (primaryKeyName is not null) JetName.Validate(primaryKeyName, "primary key name");
         foreach (RelationshipSpec r in relationships) JetName.Validate(r.Name, "foreign key name");
         foreach (UniqueIndexSpec u in uniqueConstraints) JetName.Validate(u.Name, "unique constraint name");
-        foreach ((string checkName, _, _) in checkConstraints) JetName.Validate(checkName, "check constraint name");
+        foreach ((string checkName, _, _, _) in checkConstraints) JetName.Validate(checkName, "check constraint name");
 
         // A legal name is all a read-only database looks at: a taken name, a relationship's target and everything
         // below are refused as read-only (verified vs ACE).
@@ -276,15 +276,16 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         var childLogical = new List<TableDefinition.LogicalIndexSpec>(indexPlans.Count);
         var incoming = new List<IncomingRelationship>();
         var parentAdds = new Dictionary<int, int>();
-        // Incoming blocks that this table hosts for its own self-references are numbered after the
-        // data-block logical indexes (verified vs ACE: a self-ref adds one such block at num = data count).
-        int selfIncomingNum = indexPlans.Count;
+        // The blocks are numbered in the order declared, and a self-reference's incoming block, which this table
+        // hosts, takes the number straight after its outgoing one (verified vs ACE: PK, self FK, UNIQUE, self FK
+        // numbers PK 0, the first FK's ends 1 and 2, the UNIQUE 3, the second FK's ends 4 and 5).
+        int number = 0;
         for (int i = 0; i < indexPlans.Count; i++)
         {
             var plan = indexPlans[i];
             if (plan.Fk is null)
             {
-                childLogical.Add(TableDefinition.LogicalIndexSpec.Plain(i, dataOrdinal[i], plan.IsPk, plan.Name));
+                childLogical.Add(TableDefinition.LogicalIndexSpec.Plain(number++, dataOrdinal[i], plan.IsPk, plan.Name));
                 continue;
             }
 
@@ -299,14 +300,14 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             {
                 // Only a key declared before the reference serves: ACE refuses one declared after it (verified).
                 int refOrdinal = dataOrdinal[SelfReferencedOrdinal(indexPlans.GetRange(0, i), fk)];
-                int inNum = selfIncomingNum++;
+                int outNum = number++, inNum = number++;
                 // Outgoing block (this table's child side) — NO INDEX flags it 0x03 instead of 0x02.
                 childLogical.Add(new TableDefinition.LogicalIndexSpec(
-                    Number: i, DataOrdinal: dataOrdinal[i], FkType: outgoingType, FkNumber: (uint)inNum,
+                    Number: outNum, DataOrdinal: dataOrdinal[i], FkType: outgoingType, FkNumber: (uint)inNum,
                     FkTablePage: tdefPage, UpdateAction: upd, DeleteAction: del,
                     Type: IndexInfoType.Foreign, Name: fk.Name));
                 // Incoming block (this table's parent side), hidden ".r" name unique within the table.
-                childLogical.Add(new IncomingRelationship(tdefPage, inNum, refOrdinal, (uint)i, tdefPage, upd, del)
+                childLogical.Add(new IncomingRelationship(tdefPage, inNum, refOrdinal, (uint)outNum, tdefPage, upd, del)
                     .Spec(HiddenRelationshipName(inNum)));
                 continue;
             }
@@ -319,12 +320,13 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
                 : parentNextNum;
             parentAdds[parentPage] = parentNum;
 
+            int childNum = number++;
             childLogical.Add(new TableDefinition.LogicalIndexSpec(
-                Number: i, DataOrdinal: dataOrdinal[i], FkType: outgoingType,
+                Number: childNum, DataOrdinal: dataOrdinal[i], FkType: outgoingType,
                 FkNumber: (uint)parentNum, FkTablePage: parentPage, UpdateAction: upd, DeleteAction: del,
                 Type: IndexInfoType.Foreign, Name: fk.Name));
             incoming.Add(new IncomingRelationship(parentPage, parentNum, refOrd,
-                ChildBlockNumber: (uint)i, ChildPage: tdefPage, upd, del));
+                ChildBlockNumber: (uint)childNum, ChildPage: tdefPage, upd, del));
         }
 
         // Access stores logical blocks sorted by name in the database's collation (with their names in the same order).
@@ -411,19 +413,28 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         if (checkConstraints.Count > 0)
             Write(new PropertyBlob.Property("", PropertyBlob.CheckConstraintsProperty,
                 PropertyBlob.WriteCheckList([.. checkConstraints.Select(c => (c.Name, c.Expression))])));
-        // Each check's object, after the table's own row, as ACE writes them (measured, whole-file diff).
-        foreach ((string checkName, string expression, var reads) in checkConstraints)
-            _catalog.CreateCheckObject(checkName, name, expression, CheckReadsText(reads));
-
-        // Each foreign key's index is built after its relationship's rows, as ACE builds it (verified: a database's
-        // first relationship takes MSysRelationships' first data page, and the key's index root the page after).
+        // The relationships' and checks' objects, after the table's own row, in the order the statement declares them
+        // (measured, whole-file diff: two foreign keys then a CHECK give the relationships the lower ids, a CHECK then
+        // two foreign keys the check). Each foreign key's index is built after its relationship's rows, as ACE builds
+        // it (verified: a database's first relationship takes MSysRelationships' first data page, and the key's index
+        // root the page after).
+        var constraintObjects = new List<(int DeclaredAfter, int Kind, Action Write)>();
         for (int i = 0; i < indexPlans.Count; i++)
         {
             if (indexPlans[i].Fk is not { } fk) continue;
-            _catalog.CreateRelationshipObject(fk.Name);
-            AddRelationshipRows(name, fk);
-            if (Owns(i)) AllocateRoot(i);
+            int plan = i;
+            constraintObjects.Add((indexPlans[i].DeclaredAfter, 1, () =>
+            {
+                _catalog.CreateRelationshipObject(fk.Name);
+                AddRelationshipRows(name, fk);
+                if (Owns(plan)) AllocateRoot(plan);
+            }));
         }
+        // A CHECK is not one of the elements DeclaredAfter counts, so one written just before a foreign key ties it.
+        foreach ((string checkName, string expression, var reads, int declaredAfter) in checkConstraints)
+            constraintObjects.Add((declaredAfter, 0, () => _catalog.CreateCheckObject(checkName, name, expression, CheckReadsText(reads))));
+        foreach (var (_, _, write) in constraintObjects.OrderBy(c => c.DeclaredAfter).ThenBy(c => c.Kind))
+            write();
         foreach (IncomingRelationship inc in incoming)
             AddIncomingRelationshipBlock(inc);
         foreach (ColumnSpec complex in columns.Where(c => c.ComplexTemplate is not null))
@@ -1071,18 +1082,17 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
 
         TableDefinition child = DesignTable(childTable);
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, child.Name);
-        IndexDef? fkIndex = child.FindIndex(name);
         bool selfRef = string.Equals(rel.ReferencedTable, childTable, StringComparison.OrdinalIgnoreCase);
 
-        int? childBlockNum = null;
         var owned = new HashSet<int>();
         var retire = new List<MapRetirement>();
         var maps = new UsageMap(_channel, child);
-        if (fkIndex is not null)
+        // An unenforced relationship has no block on the child, so nothing there to remove — even where a plain
+        // index happens to share its name.
+        TableDefinition.Parts childParts = TableDefinition.ReadParts(_channel, child.DefinitionPage);
+        int? childBlockNum = OutgoingBlockNumber(childParts, name);
+        if (childBlockNum is int outgoing && child.FindIndex(name) is { } fkIndex)
         {
-            TableDefinition.Parts childParts = TableDefinition.ReadParts(_channel, child.DefinitionPage);
-            int outgoing = OutgoingBlockNumber(childParts, name);
-            childBlockNum = outgoing;
 
             // Remove the FK index (data ordinal) + its outgoing info block from the child, plus — for a
             // self-reference — the incoming block, which also lives here. The FK's backing index is an index like
@@ -1106,13 +1116,11 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     }
 
     /// <summary>The number of the outgoing relationship block named <paramref name="name"/> in a child's
-    /// definition — what the parent's incoming block cross-links to.</summary>
-    private int OutgoingBlockNumber(TableDefinition.Parts childParts, string name)
-    {
-        (byte[] Info, byte[] Name) outgoing =
-            childParts.Logical.First(b => NameOf(b.Name).Equals(name, StringComparison.OrdinalIgnoreCase));
-        return TableDefinition.ReadInfoBlock(outgoing.Info, _channel.Format, name).Number;
-    }
+    /// definition — what the parent's incoming block cross-links to — or null when the relationship has none (it is
+    /// unenforced).</summary>
+    private int? OutgoingBlockNumber(TableDefinition.Parts childParts, string name) =>
+        childParts.Logical.Select(b => TableDefinition.ReadInfoBlock(b.Info, _channel.Format, NameOf(b.Name)))
+            .FirstOrDefault(b => b.IsOutgoing(name))?.Number;
 
     /// <summary>
     /// What removing relationship <paramref name="rel"/> takes from outside the child's own definition, for both a
@@ -1170,9 +1178,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         TableDefinition.Parts ownParts = TableDefinition.ReadParts(_channel, table.DefinitionPage);
         var ownRelationships = _catalog.Relationships
             .Where(r => string.Equals(r.Table, tableName, StringComparison.OrdinalIgnoreCase))
-            .Select(r => (Relationship: r, Block: table.FindIndex(r.Name) is not null
-                ? OutgoingBlockNumber(ownParts, r.Name)
-                : (int?)null))
+            .Select(r => (Relationship: r, Block: OutgoingBlockNumber(ownParts, r.Name)))
             .ToList();
 
         // A table still referenced by a surviving child (as the parent) cannot be dropped. One it references
@@ -3154,11 +3160,8 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
 
     /// <summary>True if <paramref name="block"/> is the incoming relationship block that cross-links to the
     /// child's outgoing block number on the child's TDEF page.</summary>
-    private bool IsIncomingBlockFor((byte[] Info, byte[] Name) block, int childBlockNum, int childPage)
-    {
-        TableDefinition.LogicalIndexSpec info = TableDefinition.ReadInfoBlock(block.Info, _channel.Format, NameOf(block.Name));
-        return info.FkType == ForeignKeyType.Incoming && (int)info.FkNumber == childBlockNum && info.FkTablePage == childPage;
-    }
+    private bool IsIncomingBlockFor((byte[] Info, byte[] Name) block, int childBlockNum, int childPage) =>
+        TableDefinition.ReadInfoBlock(block.Info, _channel.Format, NameOf(block.Name)).IsIncomingFor(childBlockNum, childPage);
 
     /// <summary>Soft-deletes every MSysRelationships row for the named relationship.</summary>
     private void DeleteRelationshipRows(string name)

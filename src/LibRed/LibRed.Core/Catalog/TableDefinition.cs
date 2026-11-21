@@ -547,8 +547,7 @@ public sealed class TableDefinition : Page
                     $"Logical index '{name}' of the table at page {buffer.PageNumber} names index-data block "
                     + $"{dataNumber}, and the table has {_indexes.Count}.");
 
-            _logicalIndexes.Add(new LogicalIndexDef(name, dataNumber, isRelationship,
-                !isRelationship && info.Type == IndexInfoType.Primary, info.FkType, info.UpdateAction, info.DeleteAction));
+            _logicalIndexes.Add(new LogicalIndexDef(info));
 
             if (isRelationship) relationship[dataNumber] ??= name;
             else if (info.Type == IndexInfoType.Primary) named[dataNumber].Insert(0, (name, true));
@@ -771,6 +770,16 @@ public sealed class TableDefinition : Page
             new(number, dataOrdinal, ForeignKeyType.None, JetFormatBase.IndexInfoNoForeignKey, FkTablePage: 0,
                 RelationshipAction.NotRelationship, RelationshipAction.NotRelationship,
                 isPrimary ? IndexInfoType.Primary : IndexInfoType.Secondary, name);
+
+        /// <summary>Whether this is relationship <paramref name="relationship"/>'s block on its child table: the
+        /// outgoing one carrying its name.</summary>
+        public bool IsOutgoing(string relationship) => FkTablePage != 0 && FkType != ForeignKeyType.Incoming
+            && string.Equals(Name, relationship, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Whether this is the incoming block (on the parent) that cross-links to the child block numbered
+        /// <paramref name="childBlockNumber"/> in the table at <paramref name="childPage"/>.</summary>
+        public bool IsIncomingFor(int childBlockNumber, int childPage) =>
+            FkType == ForeignKeyType.Incoming && (int)FkNumber == childBlockNumber && FkTablePage == childPage;
     }
 
     internal sealed record Result(byte[] Page, IReadOnlyList<ColumnDef> Columns);
