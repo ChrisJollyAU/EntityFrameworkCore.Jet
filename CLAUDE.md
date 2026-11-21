@@ -391,6 +391,13 @@ pure wrapper" and "they answer different questions" are not reasons. A duplicate
 same turn or handed to an agent in the same turn; it is never carried forward as a list. A reviewer — an
 orchestrating session included — confirms a claimed difference by reading both sites, not from a report.
 
+**Calculated-column functions stay in sync with the engine — a hard rule.** The VBA-style functions in
+`LibRed.Core/Storage/Calculated/CalculatedEvaluator.cs` are copies of LibRed.Engine's
+`Execution/ExpressionEvaluator.cs` ones (Core cannot reference the Engine). Whenever a VBA-style function is changed
+in either file, the same change is made to the other in the same turn — a 1:1 copy, not a reinterpretation. A
+change to one without the other is a hard failure. The rule applies only when those functions are modified, and
+any change to them or to those files triggers it; a `PostToolUse` hook reminds on every edit to either file.
+
 **Never change a test because a change makes it fail.** A failing test is evidence against the change, not a test
 to update. For every failing test, measure what ACE itself produces for that exact query, on that test's own schema
 and data — not a similar expression, another table, or a function ACE does not have. If ACE agrees with the test,

@@ -138,18 +138,18 @@ internal static class CalculatedEvaluator
                         throw new CalculatedExpressionException(
                             $"{name} takes 3 arguments, not {node.Arguments.Count}.");
                     object? condition = Evaluate(node.Arguments[0], value);
-                    return Evaluate(node.Arguments[condition is not null && ToBoolean(condition) ? 1 : 2], value);
+                    return Evaluate(node.Arguments[condition is not null && IifCondition(condition) ? 1 : 2], value);
                 }
             case "CHOOSE":
                 {
                     if (node.Arguments.Count < 2)
                         throw new CalculatedExpressionException($"{name} needs at least two arguments.");
-                    object? selector = Evaluate(node.Arguments[0], value);
-                    if (selector is null) return null;
-                    int index = (int)Math.Round(ToNumber(selector), MidpointRounding.ToEven);
-                    return index >= 1 && index < node.Arguments.Count
-                        ? Evaluate(node.Arguments[index], value)
-                        : null;
+                    object? indexValue = Evaluate(node.Arguments[0], value);
+                    if (indexValue is null)
+                        throw new InvalidOperationException("Data type mismatch in criteria expression: Choose() index is null.");
+                    double index = Math.Truncate(ToNumber(indexValue));
+                    object?[] choices = node.Arguments.Skip(1).Select(a => Evaluate(a, value)).ToArray();
+                    return index < 1 || index > choices.Length ? null : choices[(int)index - 1];
                 }
         }
 
@@ -187,27 +187,26 @@ internal static class CalculatedEvaluator
             "SGN" => (double)Math.Sign(Num(name, args, 1)),
             "INT" => Math.Floor(Num(name, args, 1)),
             "FIX" => Math.Truncate(Num(name, args, 1)),
-            "SQR" => Math.Sqrt(Num(name, args, 1)),
-            "EXP" => Math.Exp(Num(name, args, 1)),
-            "LOG" => Math.Log(Num(name, args, 1)),
-            "SIN" => Math.Sin(Num(name, args, 1)),
-            "COS" => Math.Cos(Num(name, args, 1)),
-            "TAN" => Math.Tan(Num(name, args, 1)),
-            "ATN" => Math.Atan(Num(name, args, 1)),
+            // Jet VBA math functions (double precision). SQR = sqrt, ATN = atan, LOG = natural log.
+            // ACE's Tan is its Sin over its Cos, which differs from a direct tangent in the last digit.
+            "SIN" => UnaryDouble(name, args, Trigonometric(Math.Sin)),
+            "COS" => UnaryDouble(name, args, Trigonometric(Math.Cos)),
+            "TAN" => UnaryDouble(name, args, Trigonometric(x => Math.Sin(x) / Math.Cos(x))),
+            "ATN" => UnaryDouble(name, args, Math.Atan),
+            "EXP" => UnaryDouble(name, args, Math.Exp),
+            "LOG" => UnaryDouble(name, args, Math.Log),
+            "SQR" => UnaryDouble(name, args, Math.Sqrt),
             "CDBL" => Num(name, args, 1),
             // Round is banker's rounding in VBA, and its second argument is genuinely optional here.
-            "ROUND" => args.Length == 1
-                ? Math.Round(ToNumber(args[0]!), MidpointRounding.ToEven)
-                : Math.Round(ToNumber(args[0]!), (int)ToNumber(args[1]!), MidpointRounding.ToEven),
+            "ROUND" => Round(args, name),
 
             "LEN" => (double)ToText(args[0]).Length,
             "LCASE" => ToText(Single(name, args)).ToLowerInvariant(),
             "UCASE" => ToText(Single(name, args)).ToUpperInvariant(),
-            "TRIM" => ToText(Single(name, args)).Trim(' '),
-            "SPACE" => new string(' ', (int)Num(name, args, 1)),
-            "ASC" => ToText(Single(name, args)) is { Length: > 0 } s ? (double)s[0]
-                     : throw new CalculatedExpressionException("Asc of an empty string."),
-            "STR" => Types.VbaText.Str(Num(name, args, 1)),
+            "TRIM" => ToText(Single(name, args)).Trim(TrimmedSpaces),
+            "SPACE" => new string(' ', Count(Single(name, args))),
+            "ASC" => (int)Ansi.GetBytes(FirstCharacter(Single(name, args)))[0],
+            "STR" => Single(name, args) is DateTime date ? ToText(date) : Types.VbaText.Str(args[0] is string s ? ToNumber(s) : args[0]!),
             "STRING" => Repeat(args),
             "LEFT" => Take(args, name, fromLeft: true),
             "RIGHT" => Take(args, name, fromLeft: false),
@@ -223,7 +222,7 @@ internal static class CalculatedEvaluator
             "HOUR" => (double)ToDate(Single(name, args)).Hour,
             "MINUTE" => (double)ToDate(Single(name, args)).Minute,
             "SECOND" => (double)ToDate(Single(name, args)).Second,
-            "WEEKDAY" => (double)(((int)ToDate(args[0]!).DayOfWeek) + 1),
+            "WEEKDAY" => DaysIntoWeek(ToDate(args[0]!), FirstDayOfWeek(args, 1)) + 1,
             "DATESERIAL" => DateSerial(args, name),
             "TIMESERIAL" => TimeSerial(args, name),
             "MONTHNAME" => MonthName(args, name),
@@ -247,6 +246,10 @@ internal static class CalculatedEvaluator
 
     // ---------------------------------------------------------------- function helpers
 
+    // What Trim, LTrim and RTrim strip (verified vs ACE): the space and the ideographic space U+3000, in any mixture —
+    // not a tab, CR, LF, no-break space, the other Unicode spaces or a zero-width one.
+    private static readonly char[] TrimmedSpaces = [' ', '　'];
+
     private static void Arity(string name, object?[] args, int expected)
     {
         if (args.Length != expected)
@@ -265,6 +268,128 @@ internal static class CalculatedEvaluator
 
     private static object Single(string name, object?[] args) { Arity(name, args, 1); return args[0]!; }
 
+    /// <summary>
+    /// Sqr, Exp, Log, Sin, Cos, Tan and Atn, on a Double read as the conversion functions read it; NULL-propagating.
+    /// A result that is not a number — the square root or log of a number below its domain, or a trigonometric
+    /// function of a number too large to reduce — is an invalid procedure call, and a result past a Double an
+    /// overflow (verified vs ACE).
+    /// </summary>
+    private static double UnaryDouble(string name, object?[] args, Func<double, double> op)
+    {
+        double x = Num(name, args, 1);
+        double result = op(x);
+        return double.IsNaN(result) || double.IsNegativeInfinity(result) && x == 0
+            ? throw new ArgumentException($"Invalid procedure call: the function is not defined at {x}.")
+            : Finite(result);
+    }
+
+    /// <summary>A trigonometric function, which ACE refuses for an argument of 9.223372E18 or more (verified).</summary>
+    private static Func<double, double> Trigonometric(Func<double, double> op) =>
+        x => Math.Abs(x) >= 9.223372E18 ? double.NaN : op(x);
+
+    /// <summary>
+    /// Access <c>Round(number[, places])</c> (verified vs ACE): half to even on the number's decimal form — a Double or
+    /// Single as OLE Automation writes it, so <c>Round(2.675, 2)</c> is 2.68 and <c>Round('2.55', 1)</c> 2.6 — and the
+    /// number unchanged when nothing is cut. The operand's type is kept (the EF contract); text and dates give a
+    /// Double and True is -1. Places are read as a number and
+    /// rounded; Null places give Null, fewer than 0 are an invalid procedure call, and more than a Decimal holds leave
+    /// the number as it is.
+    /// </summary>
+    private static object Round(object?[] args, string name)
+    {
+        Arity(name, args, 1, 2);
+        object value = args[0]!;
+        int places = args.Length > 1 ? Count(args[1]!) : 0;
+        places = Math.Min(places, 28);
+
+        return value switch
+        {
+            decimal m => decimal.Round(m, places, MidpointRounding.ToEven),
+            double d => RoundDouble(d, places),
+            float s => RoundWritten(s, places, () => JetDecimalConverter.FromSingle(s), r => (float)JetDecimalConverter.FromDecimal(r)),
+            long or ulong => Convert.ToInt64(value is bool b ? (b ? -1 : 0) : value, CultureInfo.InvariantCulture),
+            int or short or byte or bool => Convert.ToInt32(value is bool b ? (b ? -1 : 0) : value, CultureInfo.InvariantCulture),
+            _ => RoundDouble(ToNumber(value), places),
+        };
+
+        static object RoundDouble(double d, int places) =>
+            RoundWritten(d, places, () => JetDecimalConverter.FromDouble(d), JetDecimalConverter.FromDecimal);
+
+        // A number past a Decimal has no places left to cut.
+        static object RoundWritten<T>(T original, int places, Func<decimal> written, Func<decimal, T> back) where T : notnull
+        {
+            decimal exact;
+            try
+            {
+                exact = written();
+            }
+            catch (OverflowException)
+            {
+                return original;
+            }
+            decimal rounded = decimal.Round(exact, places, MidpointRounding.ToEven);
+            return rounded == exact ? original : back(rounded);
+        }
+    }
+
+    /// <summary>
+    /// IIf's condition, which unlike the others is rounded to a whole number first, half to even (verified vs ACE:
+    /// 0.4, 0.5, '0.4' and a date at 06:00 on 1899-12-30 are False, 0.6 and 1E+20 are True). Text that is not a
+    /// number is True.
+    /// </summary>
+    private static bool IifCondition(object value) => value switch
+    {
+        bool b => b,
+        string or char => !(Types.VbaText.TryTextAsNumber(value.ToString()!) is { } number && Math.Round(number, MidpointRounding.ToEven) == 0),
+        DateTime d => Math.Round(d.ToOADate(), MidpointRounding.ToEven) != 0,
+        Guid or byte[] => true,
+        _ => Math.Round(ToNumber(value), MidpointRounding.ToEven) != 0,
+    };
+
+    /// <summary>VBA <c>CBool</c> (verified vs ACE): "True" and "False" as written, otherwise whether the value
+    /// read as a number is non-zero, so 0.5, '$5' and a date are True.</summary>
+    private static bool VbaBool(object v) =>
+        v is bool b ? b
+        : v is string s && bool.TryParse(s, out bool parsed) ? parsed
+        : ToNumber(v) != 0;
+
+    private static double Finite(double value) =>
+        double.IsFinite(value) ? value : throw new OverflowException("Overflow: the result is too large for a number.");
+
+    /// <summary>The system ANSI code page, which Asc and Chr work in; unmappable characters take their best fit.</summary>
+    private static System.Text.Encoding Ansi =>
+        System.Text.CodePagesEncodingProvider.Instance.GetEncoding(CultureInfo.CurrentCulture.TextInfo.ANSICodePage) ?? System.Text.Encoding.Latin1;
+
+    private static char AnsiCharacter(int code) => Ansi.GetString([(byte)code])[0];
+
+    /// <summary>The first character of a value as text; an empty text is an invalid procedure call.</summary>
+    private static string FirstCharacter(object v)
+    {
+        string text = ToText(v);
+        return text.Length > 0
+            ? text[..1]
+            : throw new ArgumentException("Invalid procedure call: the text is empty.");
+    }
+
+    /// <summary>A whole-number argument, where outside <paramref name="least"/>-<paramref name="most"/> is an invalid
+    /// procedure call.</summary>
+    private static int InRange(int n, int least, int most = int.MaxValue) =>
+        n >= least && n <= most ? n : throw new ArgumentException($"Invalid procedure call: {n} is out of range.");
+
+    /// <summary>A count, length or position read as CLng reads it; below <paramref name="least"/> is an invalid
+    /// procedure call.</summary>
+    private static int Count(object v, int least = 0) => InRange(AsLong(v), least);
+
+    /// <summary>A value read as CInt reads it: half to even, and past an Integer is an overflow.</summary>
+    private static int AsInteger(object v) => Convert.ToInt16(ToNumber(v), CultureInfo.InvariantCulture);
+
+    /// <summary>A value read as CLng reads it: half to even, and past a Long is an overflow.</summary>
+    private static int AsLong(object v) => Convert.ToInt32(ToNumber(v), CultureInfo.InvariantCulture);
+
+    /// <summary>A setting read as CInt reads it (half to even; verified vs ACE: '2' and 1.5 are 2); outside
+    /// <paramref name="lowest"/>-<paramref name="highest"/> is an invalid procedure call.</summary>
+    private static int Setting(object v, int lowest, int highest) => InRange(AsInteger(v), lowest, highest);
+
     private static double Num(string name, object?[] args, int expected)
     {
         Arity(name, args, expected);
@@ -274,17 +399,21 @@ internal static class CalculatedEvaluator
     private static string Repeat(object?[] args)
     {
         if (args.Length != 2) throw new CalculatedExpressionException("String takes two arguments.");
-        string s = ToText(args[1]);
-        if (s.Length == 0) throw new CalculatedExpressionException("String of an empty character.");
-        return new string(s[0], (int)ToNumber(args[0]!));
+        int count = Count(args[0]!);
+        object charValue = args[1]!;
+        char ch = charValue is string or Guid or byte[]? FirstCharacter(charValue)[0]
+            : AnsiCharacter(AsLong(charValue) & 0xFF);
+        return new string(ch, count);
     }
 
     private static string Take(object?[] args, string name, bool fromLeft)
     {
         if (args.Length != 2) throw new CalculatedExpressionException($"{name} takes two arguments.");
         string s = ToText(args[0]);
-        int n = Math.Clamp((int)ToNumber(args[1]!), 0, s.Length);
-        return fromLeft ? s[..n] : s[^n..];
+        int n = Count(args[1]!);
+        return fromLeft
+            ? (n <= 0 ? "" : n >= s.Length ? s : s[..n])
+            : (n <= 0 ? "" : n >= s.Length ? s : s[^n..]);
     }
 
     private static string Mid(object?[] args, string name)
@@ -293,11 +422,11 @@ internal static class CalculatedEvaluator
             throw new CalculatedExpressionException(
                 $"{name} needs all three arguments in a calculated column, even though the third is optional in VBA.");
         string s = ToText(args[0]);
-        int start = (int)ToNumber(args[1]!);
-        int length = (int)ToNumber(args[2]!);
-        if (start < 1) throw new CalculatedExpressionException("Mid start is 1-based.");
-        if (start > s.Length) return "";
-        return s.Substring(start - 1, Math.Clamp(length, 0, s.Length - start + 1));
+        int start = Count(args[1]!, least: 1);
+        int length = Count(args[2]!);
+        int from = start - 1;
+        if (from >= s.Length) return "";
+        return s.Substring(from, Math.Min(length, s.Length - from));
     }
 
     /// <summary>Measured against ACE: three or four arguments, never two — <c>InStr([A],"a")</c> is a syntax
@@ -311,32 +440,86 @@ internal static class CalculatedEvaluator
             throw new CalculatedExpressionException(
                 $"{name} takes three or four arguments in a calculated column; the two-argument form VBA "
                 + "allows is a syntax error here.");
-        int start = (int)ToNumber(args[0]!);
-        string haystack = ToText(args[1]);
-        string needle = ToText(args[2]);
-        bool caseInsensitive = args.Length < 4 || (int)ToNumber(args[3]!) == 1;
-        if (start < 1) throw new CalculatedExpressionException("InStr start is 1-based.");
-        if (start > haystack.Length) return 0;
-        int found = haystack.IndexOf(needle, start - 1,
-            caseInsensitive ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
-        return found < 0 ? 0 : found + 1;
+        int start = Count(args[0]!, least: 1);
+        bool binary = args.Length > 3 && AsLong(args[3]!) switch
+        {
+            0 => true,
+            1 => false,
+            var mode when mode > 2 && IsLocaleId(mode) => false,
+            var mode => throw new ArgumentException($"Invalid procedure call: {mode} is not a comparison."),
+        };
+        string s1 = args[1] is byte[] b1 ? new(Array.ConvertAll(b1, b => (char)b)) : ToText(args[1]);
+        string s2 = args[2] is byte[] b2 ? new(Array.ConvertAll(b2, b => (char)b)) : ToText(args[2]);
+        if (s1.Length == 0) return 0;
+        if (s2.Length == 0) return start;
+        if (start > s1.Length) return 0;
+        int index = s1.IndexOf(s2, start - 1, binary ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase);
+        return index + 1;
+    }
+
+    private static bool IsLocaleId(int lcid)
+    {
+        try
+        {
+            return lcid > 0 && CultureInfo.GetCultureInfo(lcid).LCID == lcid;
+        }
+        catch (CultureNotFoundException)
+        {
+            return false;
+        }
     }
 
     private static DateTime DateSerial(object?[] args, string name)
     {
         if (args.Length != 3) throw new CalculatedExpressionException($"{name} takes three arguments.");
-        return new DateTime((int)ToNumber(args[0]!), 1, 1)
-            .AddMonths((int)ToNumber(args[1]!) - 1)
-            .AddDays((int)ToNumber(args[2]!) - 1);
+        int year = AsInteger(args[0]!), month = AsInteger(args[1]!), day = AsInteger(args[2]!);
+        int months = year * 12 + month - 1;
+        year = (int)Math.Floor(months / 12.0);
+        month = months - year * 12 + 1;
+        if (year < 100)
+        {
+            int latest = CultureInfo.CurrentCulture.Calendar.TwoDigitYearMax;
+            int century = latest - latest % 100;
+            year += year <= latest % 100 ? century : century - 100;
+        }
+        return InDateRange((year, month, day), static parts =>
+            new DateTime(parts.year, parts.month, 1).AddDays(parts.day - 1));
     }
+
+    /// <summary>A computed date, or an invalid procedure call when it falls outside 100-01-01 … 9999-12-31.</summary>
+    private static DateTime InDateRange<T>(T state, Func<T, DateTime> compute)
+    {
+        try
+        {
+            DateTime date = compute(state);
+            if (date.Year >= 100)
+                return date;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+        }
+        throw new ArgumentException("Invalid procedure call: the date is out of range.");
+    }
+
+    /// <summary>
+    /// A firstdayofweek argument: 1 (Sunday) to 7 (Saturday), or 0 for the system's first day; anything else is an
+    /// invalid procedure call (verified vs ACE: 0 is Monday under en-AU, and 8 and -1 are refused).
+    /// </summary>
+    private static DayOfWeek FirstDayOfWeek(object?[] args, int index, int absent = 1) =>
+        (args.Length <= index ? absent : Setting(args[index]!, 0, 7)) switch
+        {
+            0 => CultureInfo.CurrentCulture.DateTimeFormat.FirstDayOfWeek,
+            var day => (DayOfWeek)(day - 1),
+        };
+
+    /// <summary>How many days of the week come before the date's day, for a week starting on <paramref name="first"/>.</summary>
+    private static int DaysIntoWeek(DateTime date, DayOfWeek first) => ((int)date.DayOfWeek - (int)first + 7) % 7;
 
     private static DateTime TimeSerial(object?[] args, string name)
     {
         if (args.Length != 3) throw new CalculatedExpressionException($"{name} takes three arguments.");
-        return JetEpoch
-            .AddHours(ToNumber(args[0]!))
-            .AddMinutes(ToNumber(args[1]!))
-            .AddSeconds(ToNumber(args[2]!));
+        int h = AsInteger(args[0]!), m = AsInteger(args[1]!), s = AsInteger(args[2]!);
+        return JetEpoch.AddDays((h * 3600 + m * 60 + s) / 86400.0);
     }
 
     /// <summary>Access <c>MonthName(month, [abbreviate])</c>. Measured accepted with the optional omitted,
@@ -344,10 +527,10 @@ internal static class CalculatedEvaluator
     private static string MonthName(object?[] args, string name)
     {
         Arity(name, args, 1, 2);
-        int month = (int)ToNumber(args[0]!);
-        return args.Length > 1 && ToBoolean(args[1]!)
-            ? EnUs.DateTimeFormat.GetAbbreviatedMonthName(month)
-            : EnUs.DateTimeFormat.GetMonthName(month);
+        int number = Setting(args[0]!, 1, 12);
+        return args.Length > 1 && VbaBool(args[1]!)
+            ? EnUs.DateTimeFormat.GetAbbreviatedMonthName(number)
+            : EnUs.DateTimeFormat.GetMonthName(number);
     }
 
     /// <summary>Access <c>WeekdayName(weekday, [abbreviate], [firstDayOfWeek])</c>, likewise measured
@@ -355,14 +538,10 @@ internal static class CalculatedEvaluator
     private static string WeekdayName(object?[] args, string name)
     {
         Arity(name, args, 1, 3);
-        int weekday = (int)ToNumber(args[0]!);
-        int firstDay = args.Length > 2 ? (int)ToNumber(args[2]!) : 1;
-        if (firstDay == 0) firstDay = 1;                    // vbUseSystem -> vbSunday, for determinism
-        int index = ((((firstDay - 1) + (weekday - 1)) % 7) + 7) % 7;
-        string[] names = args.Length > 1 && ToBoolean(args[1]!)
-            ? EnUs.DateTimeFormat.AbbreviatedDayNames
-            : EnUs.DateTimeFormat.DayNames;
-        return names[index];
+        DayOfWeek first = FirstDayOfWeek(args, 2, absent: 0);
+        int index = ((int)first + Setting(args[0]!, 1, 7) - 1) % 7;
+        bool abbreviate = args.Length > 1 && VbaBool(args[1]!);
+        return (abbreviate ? EnUs.DateTimeFormat.AbbreviatedDayNames : EnUs.DateTimeFormat.DayNames)[index];
     }
 
     // ---------------------------------------------------------------- financial
@@ -372,94 +551,219 @@ internal static class CalculatedEvaluator
     // through a calculated column. Two copies exist only because of the layering: this evaluation happens in
     // Core at row-encode time, and Core cannot reach Engine (docs/format/page-02e-calculated-columns.md).
 
-    private static double Pow1(double rate, double nper) => Math.Pow(1 + rate, nper);
-
-    private static double AnnuityFactor(double rate, double nper, double type)
-        => (1 + rate * type) * (Pow1(rate, nper) - 1) / rate;
-
-    private static double PaymentOf(double rate, double nper, double pv, double fv, double type)
-        => rate == 0 ? -(pv + fv) / nper : -(pv * Pow1(rate, nper) + fv) / AnnuityFactor(rate, nper, type);
-
-    private static double InterestOf(double rate, double per, double nper, double pv, double fv, double type)
-    {
-        if (type == 1 && per == 1) return 0;
-        double pmt = PaymentOf(rate, nper, pv, fv, type);
-        double balance = pv * Pow1(rate, per - 1)
-                       + pmt * (rate == 0 ? per - 1 : AnnuityFactor(rate, per - 1, type));
-        double interest = -balance * rate;                  // an outflow, so negative like Pmt itself
-        return type == 1 ? interest / (1 + rate) : interest;
-    }
-
     /// <summary>VBA <c>Pmt(rate, nper, pv, [fv], [type])</c>: the constant payment for an annuity.</summary>
     private static double Pmt(object?[] args, string name)
     {
         Arity(name, args, 3, 5);
-        return PaymentOf(Fin(args, 0), Fin(args, 1), Fin(args, 2), Fin(args, 3, 0), Fin(args, 4, 0));
+        return Pmt(Fin(args, 0), Fin(args, 1), Fin(args, 2), Fin(args, 3, 0), Due(Fin(args, 4, 0)));
+    }
+
+    /// <summary>A "type" argument: payment at the start of each period when it rounds (half to even) to anything but 0
+    /// (verified vs ACE: 0.5 is the end, 1.5, 2 and -1 the start).</summary>
+    private static bool Due(double type) => Math.Round(type, MidpointRounding.ToEven) != 0;
+
+    private static ArgumentException OutOfRange(string argument) =>
+        new($"Invalid procedure call: {argument} is out of range.");
+
+    /// <summary>Access <c>Pmt(rate, nper, pv, [fv], [type])</c>: the payment each period. An nper of 0 is out of range.</summary>
+    private static double Pmt(double rate, double nper, double pv, double fv, bool due)
+    {
+        if (nper == 0)
+            throw OutOfRange("NPer");
+        if (rate == 0)
+            return (-fv - pv) / nper;
+        double start = due ? 1 + rate : 1;
+        double growth = Math.Pow(rate + 1, nper);
+        return (-fv - pv * growth) / (start * (growth - 1)) * rate;
+    }
+
+    /// <summary>Access <c>FV(rate, nper, pmt, [pv], [type])</c>: the value after the last payment.</summary>
+    private static double Fv(double rate, double nper, double pmt, double pv, bool due)
+    {
+        if (rate == 0)
+            return -pv - pmt * nper;
+        double start = due ? 1 + rate : 1;
+        double growth = Math.Pow(1 + rate, nper);
+        return -(pv * growth + pmt * start * (growth - 1) / rate);
+    }
+
+    /// <summary>Access <c>PV(rate, nper, pmt, [fv], [type])</c>: the value before the first payment.</summary>
+    private static double Pv(double rate, double nper, double pmt, double fv, bool due)
+    {
+        if (rate == 0)
+            return -fv - pmt * nper;
+        double start = due ? 1 + rate : 1;
+        double growth = Math.Pow(1 + rate, nper);
+        return -(fv + pmt * start * (growth - 1) / rate) / growth;
+    }
+
+    /// <summary>Access <c>NPer(rate, pmt, pv, [fv], [type])</c>: the number of payments. A rate of -1 or less, no
+    /// payment at a rate of 0, or payments that never reach the future value are out of range.</summary>
+    private static double NPer(double rate, double pmt, double pv, double fv, bool due)
+    {
+        if (rate <= -1)
+            throw OutOfRange("Rate");
+        if (rate == 0)
+            return pmt == 0 ? throw OutOfRange("Pmt") : -(pv + fv) / pmt;
+        double payment = due ? pmt * (1 + rate) / rate : pmt / rate;
+        double future = -fv + payment, present = pv + payment;
+        if (future < 0 && present < 0)
+            (future, present) = (-future, -present);
+        else if (future <= 0 || present <= 0)
+            throw OutOfRange("Pmt");
+        return (Math.Log(future) - Math.Log(present)) / Math.Log(rate + 1);
+    }
+
+    /// <summary>Access <c>IPmt(rate, per, nper, pv, [fv], [type])</c>: the interest in payment <c>per</c>, which must be
+    /// above 0 and below nper + 1.</summary>
+    private static double IPmt(double rate, double per, double nper, double pv, double fv, bool due)
+    {
+        if (per <= 0 || per >= nper + 1)
+            throw OutOfRange("Per");
+        if (due && per == 1)
+            return 0;
+        double pmt = Pmt(rate, nper, pv, fv, due);
+        if (due)
+            pv += pmt;
+        return Fv(rate, per - (due ? 2 : 1), pmt, pv, false) * rate;
+    }
+
+    /// <summary>Access <c>PPmt(rate, per, nper, pv, [fv], [type])</c>: the principal in payment <c>per</c>.</summary>
+    private static double PPmt(double rate, double per, double nper, double pv, double fv, bool due)
+    {
+        if (per <= 0 || per >= nper + 1)
+            throw OutOfRange("Per");
+        return Pmt(rate, nper, pv, fv, due) - IPmt(rate, per, nper, pv, fv, due);
+    }
+
+    /// <summary>
+    /// Access <c>Rate(nper, pmt, pv, [fv], [type], [guess])</c>: the rate per period, found by the secant method from the
+    /// guess (0.1 when omitted). An nper of 0 or less, or no answer within 40 steps, is out of range.
+    /// </summary>
+    private static double Rate(double nper, double pmt, double pv, double fv, bool due, double guess)
+    {
+        const double step = 0.00001, epsilon = 0.0000001;
+        if (nper <= 0)
+            throw OutOfRange("NPer");
+        double Error(double rate)
+        {
+            if (rate == 0)
+                return pv + pmt * nper + fv;
+            double growth = Math.Pow(rate + 1, nper);
+            double start = due ? 1 + rate : 1;
+            return pv * growth + pmt * start * (growth - 1) / rate + fv;
+        }
+
+        double rate0 = guess, error0 = Error(rate0);
+        double rate1 = error0 > 0 ? rate0 / 2 : rate0 * 2, error1 = Error(rate1);
+        for (int i = 0; i < 40; i++)
+        {
+            if (error1 == error0)
+            {
+                rate0 = rate1 > rate0 ? rate0 - step : rate0 + step;
+                error0 = Error(rate0);
+                if (error1 == error0)
+                    throw OutOfRange("Rate");
+            }
+            rate0 = rate1 - (rate1 - rate0) * error1 / (error1 - error0);
+            error0 = Error(rate0);
+            if (Math.Abs(error0) < epsilon)
+                return rate0;
+            (error0, error1) = (error1, error0);
+            (rate0, rate1) = (rate1, rate0);
+        }
+        throw OutOfRange("Rate");
+    }
+
+    /// <summary>Access <c>SLN(cost, salvage, life)</c>: straight-line depreciation. A life of 0 is out of range.</summary>
+    private static double Sln(double cost, double salvage, double life) =>
+        life == 0 ? throw OutOfRange("Life") : (cost - salvage) / life;
+
+    /// <summary>Access <c>SYD(cost, salvage, life, period)</c>: sum-of-years'-digits depreciation. A negative salvage, or a
+    /// period of 0 or less or past the life, is out of range.</summary>
+    private static double Syd(double cost, double salvage, double life, double period)
+    {
+        if (salvage < 0 || period > life || period <= 0)
+            throw OutOfRange("Period");
+        return (cost - salvage) * (life - period + 1) / (life * (life + 1) / 2);
+    }
+
+    /// <summary>
+    /// Access <c>DDB(cost, salvage, life, period, [factor])</c>: declining-balance depreciation at <c>factor</c> (2 when
+    /// omitted) over the life. A factor of 0 or less, a negative salvage, or a period of 0 or less or past the life is
+    /// out of range. A cost of 0 or less depreciates nothing, and a period's depreciation never takes the value below
+    /// the salvage.
+    /// </summary>
+    private static double Ddb(double cost, double salvage, double life, double period, double factor)
+    {
+        if (factor <= 0 || salvage < 0 || period <= 0 || period > life)
+            throw OutOfRange("Period");
+        if (cost <= 0)
+            return 0;
+        if (life < 2)
+            return cost - salvage;
+        if (life == 2)
+            return period > 1 ? 0 : cost - salvage;
+        if (period <= 1)
+        {
+            double first = cost * factor / life, most = cost - salvage;
+            return first > most ? most : first;
+        }
+        double remaining = (life - factor) / life;
+        double depreciation = factor * cost / life * Math.Pow(remaining, period - 1);
+        double excess = cost * (1 - Math.Pow(remaining, period)) - cost + salvage;
+        if (excess > 0)
+            depreciation -= excess;
+        return depreciation >= 0 ? depreciation : 0;
     }
 
     /// <summary>VBA <c>FV(rate, nper, pmt, [pv], [type])</c>: the future value of an annuity.</summary>
     private static double Fv(object?[] args, string name)
     {
         Arity(name, args, 3, 5);
-        double rate = Fin(args, 0), nper = Fin(args, 1), pmt = Fin(args, 2),
-               pv = Fin(args, 3, 0), type = Fin(args, 4, 0);
-        return rate == 0
-            ? -(pv + pmt * nper)
-            : -(pv * Pow1(rate, nper) + pmt * AnnuityFactor(rate, nper, type));
+        return Fv(Fin(args, 0), Fin(args, 1), Fin(args, 2), Fin(args, 3, 0), Due(Fin(args, 4, 0)));
     }
 
     /// <summary>VBA <c>PV(rate, nper, pmt, [fv], [type])</c>: the present value of an annuity.</summary>
     private static double Pv(object?[] args, string name)
     {
         Arity(name, args, 3, 5);
-        double rate = Fin(args, 0), nper = Fin(args, 1), pmt = Fin(args, 2),
-               fv = Fin(args, 3, 0), type = Fin(args, 4, 0);
-        return rate == 0
-            ? -(fv + pmt * nper)
-            : -(fv + pmt * AnnuityFactor(rate, nper, type)) / Pow1(rate, nper);
+        return Pv(Fin(args, 0), Fin(args, 1), Fin(args, 2), Fin(args, 3, 0), Due(Fin(args, 4, 0)));
     }
 
     /// <summary>VBA <c>NPer(rate, pmt, pv, [fv], [type])</c>: the number of periods for an annuity.</summary>
     private static double NPer(object?[] args, string name)
     {
         Arity(name, args, 3, 5);
-        double rate = Fin(args, 0), pmt = Fin(args, 1), pv = Fin(args, 2),
-               fv = Fin(args, 3, 0), type = Fin(args, 4, 0);
-        if (rate == 0) return -(pv + fv) / pmt;
-        double a = pmt * (1 + rate * type);
-        return Math.Log((a - fv * rate) / (a + pv * rate)) / Math.Log(1 + rate);
+        return NPer(Fin(args, 0), Fin(args, 1), Fin(args, 2), Fin(args, 3, 0), Due(Fin(args, 4, 0)));
     }
 
     /// <summary>VBA <c>IPmt(rate, per, nper, pv, [fv], [type])</c>: the interest portion of one payment.</summary>
     private static double IPmt(object?[] args, string name)
     {
         Arity(name, args, 4, 6);
-        return InterestOf(
-            Fin(args, 0), Fin(args, 1), Fin(args, 2), Fin(args, 3), Fin(args, 4, 0), Fin(args, 5, 0));
+        return IPmt(Fin(args, 0), Fin(args, 1), Fin(args, 2), Fin(args, 3), Fin(args, 4, 0), Due(Fin(args, 5, 0)));
     }
 
     /// <summary>VBA <c>PPmt(rate, per, nper, pv, [fv], [type])</c>: the principal portion, Pmt minus IPmt.</summary>
     private static double PPmt(object?[] args, string name)
     {
         Arity(name, args, 4, 6);
-        double rate = Fin(args, 0), nper = Fin(args, 2), pv = Fin(args, 3),
-               fv = Fin(args, 4, 0), type = Fin(args, 5, 0);
-        return PaymentOf(rate, nper, pv, fv, type) - InterestOf(rate, Fin(args, 1), nper, pv, fv, type);
+        return PPmt(Fin(args, 0), Fin(args, 1), Fin(args, 2), Fin(args, 3), Fin(args, 4, 0), Due(Fin(args, 5, 0)));
     }
 
     /// <summary>VBA <c>SLN(cost, salvage, life)</c>: straight-line depreciation.</summary>
     private static double Sln(object?[] args, string name)
     {
         Arity(name, args, 3);
-        return (Fin(args, 0) - Fin(args, 1)) / Fin(args, 2);
+        return Sln(Fin(args, 0), Fin(args, 1), Fin(args, 2));
     }
 
     /// <summary>VBA <c>SYD(cost, salvage, life, period)</c>: sum-of-years'-digits depreciation.</summary>
     private static double Syd(object?[] args, string name)
     {
         Arity(name, args, 4);
-        double life = Fin(args, 2);
-        return (Fin(args, 0) - Fin(args, 1)) * (life - Fin(args, 3) + 1) / (life * (life + 1) / 2);
+        return Syd(Fin(args, 0), Fin(args, 1), Fin(args, 2), Fin(args, 3));
     }
 
     /// <summary>VBA <c>DDB(cost, salvage, life, period, [factor])</c>: double-declining-balance depreciation,
@@ -467,11 +771,7 @@ internal static class CalculatedEvaluator
     private static double Ddb(object?[] args, string name)
     {
         Arity(name, args, 4, 5);
-        double cost = Fin(args, 0), salvage = Fin(args, 1), period = Fin(args, 3);
-        double rate = Fin(args, 4, 2) / Fin(args, 2);
-        double bookStart = cost * Math.Pow(1 - rate, period - 1);
-        double depreciation = bookStart * rate;
-        return bookStart - depreciation < salvage ? Math.Max(0, bookStart - salvage) : depreciation;
+        return Ddb(Fin(args, 0), Fin(args, 1), Fin(args, 2), Fin(args, 3), Fin(args, 4, 2));
     }
 
     /// <summary>VBA <c>Rate(nper, pmt, pv, [fv], [type], [guess])</c>: the per-period rate. There is no closed
@@ -479,25 +779,7 @@ internal static class CalculatedEvaluator
     private static double Rate(object?[] args, string name)
     {
         Arity(name, args, 3, 6);
-        double nper = Fin(args, 0), pmt = Fin(args, 1), pv = Fin(args, 2),
-               fv = Fin(args, 3, 0), type = Fin(args, 4, 0);
-        double r = Fin(args, 5, 0.1);
-
-        for (int iteration = 0; iteration < 100; iteration++)
-        {
-            const double step = 1e-6;
-            double value = Annuity(r);
-            double derivative = (Annuity(r + step) - value) / step;
-            if (Math.Abs(derivative) < 1e-12) break;
-            double next = r - value / derivative;
-            if (Math.Abs(next - r) < 1e-10) return next;
-            r = next;
-        }
-        return r;
-
-        double Annuity(double rate) => rate == 0
-            ? pv + pmt * nper + fv
-            : pv * Pow1(rate, nper) + pmt * (1 + rate * type) * (Pow1(rate, nper) - 1) / rate + fv;
+        return Rate(Fin(args, 0), Fin(args, 1), Fin(args, 2), Fin(args, 3, 0), Due(Fin(args, 4, 0)), Fin(args, 5, 0.1));
     }
 
     private static double Fin(object?[] args, int index) => ToNumber(args[index]!);

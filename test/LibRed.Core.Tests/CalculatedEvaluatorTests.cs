@@ -115,7 +115,7 @@ public class CalculatedEvaluatorTests
     // literal -- 2.345 is really 2.34499…, which makes it a test of double parsing, not of Round.
     [InlineData("Round(2.125, 2)", 2.12)]
     public void Evaluates_numeric_functions(string expression, double expected)
-        => Assert.Equal(expected, Assert.IsType<double>(Eval(expression)));
+        => Assert.Equal(expected, Convert.ToDouble(Eval(expression), System.Globalization.CultureInfo.InvariantCulture));
 
     [Theory]
     [InlineData("UCase(\"aB\")", "AB")]
@@ -146,7 +146,7 @@ public class CalculatedEvaluatorTests
     [InlineData("Weekday(#2003-09-29#)", 2.0)]
     [InlineData("Pmt(0.005, 60, 10000)", -193.3280)]
     public void Accepts_an_omitted_optional_where_ace_does(string expression, double expected)
-        => Assert.Equal(expected, Assert.IsType<double>(Eval(expression)), 4);
+        => Assert.Equal(expected, Convert.ToDouble(Eval(expression), System.Globalization.CultureInfo.InvariantCulture), 4);
 
     [Fact]
     public void Evaluates_InStr_in_its_full_form()
@@ -253,14 +253,27 @@ public class CalculatedEvaluatorTests
     public void Brackets_a_renamed_reference_when_the_new_name_needs_them()
         => Assert.Equal("[Order Qty]*2", CalculatedExpression.RenameColumnReference("Qty*2", "Qty", "Order Qty"));
 
+    // Without a firstDayOfWeek, WeekdayName counts from the system's first day: Monday under en-AU, where ACE's
+    // calculated WeekdayName(1) is Monday and WeekdayName(2, True) is Tue (measured through DAO).
     [Theory]
     [InlineData("MonthName(1)", "January")]
     [InlineData("MonthName(3, True)", "Mar")]
-    [InlineData("WeekdayName(1)", "Sunday")]
-    [InlineData("WeekdayName(2, True)", "Mon")]
+    [InlineData("WeekdayName(1)", "Monday")]
+    [InlineData("WeekdayName(2, True)", "Tue")]
     [InlineData("WeekdayName(1, False, 2)", "Monday")]     // firstDayOfWeek = vbMonday
     public void Evaluates_the_name_functions(string expression, string expected)
-        => Assert.Equal(expected, Eval(expression));
+    {
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.GetCultureInfo("en-AU");
+        try
+        {
+            Assert.Equal(expected, Eval(expression));
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = culture;
+        }
+    }
 
     // The ten financial functions, ported from LibRed.Engine's evaluator so that SQL and a calculated column
     // cannot give two answers for one formula. The expectations are the standard annuity and depreciation
