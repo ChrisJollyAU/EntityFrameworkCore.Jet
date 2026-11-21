@@ -310,6 +310,12 @@ Points verified against ACE that aren't obvious from that page:
 - **A whole-number column rounds half to even**, from a number or text alike (verified: `'2.5'` stores 2, `'3.5'` 4).
   A **Byte keeps the low byte** of that whole number rather than refusing one past its range (verified, on
   `INSERT`: 256 stores 0, -1 255, 300 44, 255.5 0); `SHORT` and `LONG` refuse one past theirs.
+- **A Double or Single stored into a Currency column is its exact binary value × 10000, rounded half to even** —
+  not its 15 (or 7) significant digits first (verified, on `INSERT` and `ALTER COLUMN`: the Double 0.00005 stores
+  0.0001, 1.00005 1.0001, 2.00005 2.0000, -0.00005 -0.0001; the Single 0.00005 stores 0, 2.00005 2.0001; the ties
+  0.03125 and 0.09375 store 0.0312 and 0.0938). A calculated Currency column's cached result over a Double is the
+  same (verified), and over a Decimal or text it is that decimal value exactly, half to even (verified: 1.00005 is
+  1.0000, 0.00015 0.0002). `CCur` converts a Double or Single the same way.
 - **A Boolean stored into a column that is not Yes/No is the Int16 -1 or 0, and from there that number** (verified,
   on `INSERT`, `UPDATE`, `INSERT … SELECT` and as a parameter: `True` stores what `CInt(True)` stores — -1 in a
   number, 255 in a `BYTE`, `-1` in text, 1899-12-29 in a date). A Yes/No column retyped by `ALTER COLUMN` converts

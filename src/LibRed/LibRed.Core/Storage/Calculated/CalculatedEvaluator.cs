@@ -575,7 +575,13 @@ internal static class CalculatedEvaluator
                 JetDataType.Int64 => checked((long)Math.Round(ToNumber(value), MidpointRounding.ToEven)),
                 JetDataType.Single => (float)ToNumber(value),
                 JetDataType.Double => ToNumber(value),
-                JetDataType.Currency => Math.Round(JetDecimalConverter.FromDouble(ToNumber(value)), 4, MidpointRounding.ToEven),
+                // A Decimal or text as storing it takes it, exactly (verified vs ACE: [N] over a Decimal or text 1.00005 is
+                // 1.0000, where the Double 1.00005 is 1.0001).
+                JetDataType.Currency => Types.JetTypeCodec.CurrencyFromScaled(Types.JetTypeCodec.CurrencyToScaled(
+                    value is decimal || value is string s && Types.VbaText.TryTextAsNumber(s) is not null
+                        ? Types.JetTypeCodec.NumberFromText(type, value)
+                        : ToNumber(value),
+                    CultureInfo.InvariantCulture)),
                 JetDataType.DateTime => ToDate(value),
                 JetDataType.Text or JetDataType.Memo => ToText(value),
                 _ => throw new CalculatedExpressionException($"Cannot store a calculated {type} value."),

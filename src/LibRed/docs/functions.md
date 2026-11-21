@@ -67,7 +67,9 @@ The JES surface. Every function in the VBA library is accounted for: it is here,
   shortest round-trippable form), and a Boolean as `"-1"` — the Jet Expression Service's answer, where the VBA
   runtime proper would say `"True"`.
 - `CBool` accepts a numeric string (`"-1"`) and a non-integral number.
-- `CCur` rounds to 4 decimal places, and is ACE's route to a decimal.
+- `CCur` rounds to 4 decimal places, half to even, and is ACE's route to a decimal. A Double or Single is taken at
+  its exact binary value, not its 15 (or 7) significant digits: `CCur(0.00005)` is 0.0001, `CCur(2.00005)` is
+  2.0000 and `CCur(0.03125)` is 0.0312.
 - `CVDate` is `CDate`: a Date, not a Variant (`VarType` 7).
 - `CVar` makes a **Variant** — see below.
 

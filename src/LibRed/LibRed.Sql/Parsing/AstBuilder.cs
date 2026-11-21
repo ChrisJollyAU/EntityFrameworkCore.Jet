@@ -1721,10 +1721,11 @@ internal static class AstBuilder
     }
 
     /// <summary>A number written with a decimal point or an exponent, as ACE reads it (verified vs ACE, over OLE DB):
-    /// a whole number a Long holds is a Long (<c>3.0</c>, <c>1E5</c>); a number a Decimal holds exactly is a Decimal
-    /// of the digits written (<c>1.50</c>, <c>15E-1</c>, <c>1E-28</c>, <c>3E9</c>, <c>7.9E28</c>); and anything
-    /// else is a Double — a Decimal's 29th place (<c>1.5E-28</c>), past its range (<c>1E29</c>), and a whole number
-    /// past a Long written with a point and no exponent (<c>3000000000.0</c>).</summary>
+    /// a whole number a Long holds is a Long (<c>3.0</c>, <c>11.0</c>, <c>1E5</c>, <c>2.0E1</c>); a number a Decimal holds
+    /// exactly is a Decimal of the digits written (<c>1.50</c>, <c>15E-1</c>, <c>1E-28</c>, <c>3E9</c>, <c>7.9E28</c>,
+    /// and <c>2147483648.0</c>, past a Long); and anything else is a Double — a Decimal's 29th place (<c>1.5E-28</c>),
+    /// past its range (<c>1E29</c>), and a number written with a point and no exponent whose whole part ends in a zero
+    /// (<c>10.0</c>, <c>20.</c>, <c>1000.0</c>, <c>-10.0</c>, <c>2147483650.0</c>, while <c>105.0</c> is a Long).</summary>
     private static object ParseNumber(string text)
     {
         // The value as mantissa × 10^exponent, the mantissa's trailing zeros moved into the exponent.
@@ -1748,10 +1749,11 @@ internal static class AstBuilder
         var largest = new BigInteger(decimal.MaxValue);
         if (exponent >= 0)
         {
+            // Written with a point and no exponent, trailing zeros before the point make it a Double.
+            if (point >= 0 && e < 0 && exponent > 0) return double.Parse(text, CultureInfo.InvariantCulture);
             BigInteger whole = exponent <= 28 ? mantissa * BigInteger.Pow(10, exponent) : largest + 1;
             if (whole >= int.MinValue && whole <= int.MaxValue) return (int)whole;
-            if (BigInteger.Abs(whole) > largest || point >= 0 && e < 0)
-                return double.Parse(text, CultureInfo.InvariantCulture);
+            if (BigInteger.Abs(whole) > largest) return double.Parse(text, CultureInfo.InvariantCulture);
         }
         else if (-exponent > 28 || BigInteger.Abs(mantissa) > largest)
             return double.Parse(text, CultureInfo.InvariantCulture);

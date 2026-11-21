@@ -120,6 +120,26 @@ public class ConversionFunctionTests(ConversionFunctionTests.Database database)
     public void Ccur_converts_to_four_places(string expression, string expected) =>
         Assert.Equal(decimal.Parse(expected, CultureInfo.InvariantCulture), Scalar(expression));
 
+    // A Double or Single is taken at its exact binary value, rounded to four places half to even — what ACE returned
+    // for CCur(CDbl(x)) and CCur(CSng(x)): the Single 2.00005 is 2.0000500679…, so 2.0001.
+    public static TheoryData<string, string, string> CurrencyFromBinary => new()
+    {
+        { "0.00005", "0.0001", "0" }, { "1.00005", "1.0001", "1" }, { "2.00005", "2", "2.0001" },
+        { "0.00015", "0.0001", "0.0002" }, { "0.00025", "0.0003", "0.0003" }, { "0.03125", "0.0312", "0.0312" },
+        { "0.09375", "0.0938", "0.0938" }, { "-0.03125", "-0.0312", "-0.0312" }, { "-0.00005", "-0.0001", "0" },
+        { "0.15625", "0.1562", "0.1562" }, { "123456789.00005", "123456789", "123456792" },
+        { "0.000049999999999999996", "0", "0" }, { "922337203685477.5", "922337203685477.5", "922337180385280" },
+        { "1E-20", "0", "0" }, { "0.12345", "0.1235", "0.1235" },
+    };
+
+    [Theory]
+    [MemberData(nameof(CurrencyFromBinary))]
+    public void Ccur_takes_a_double_or_single_at_its_exact_binary_value(string value, string fromDouble, string fromSingle)
+    {
+        Assert.Equal(decimal.Parse(fromDouble, CultureInfo.InvariantCulture), Scalar($"CCUR(CDBL('{value}'))"));
+        Assert.Equal(decimal.Parse(fromSingle, CultureInfo.InvariantCulture), Scalar($"CCUR(CSNG('{value}'))"));
+    }
+
     // CDec is a LibRed extension (ACE's expression service refuses it), reading its argument as CCur does.
     [Theory]
     [InlineData("CDEC(12345678901234567.123456789)", "12345678901234567.123456789")]

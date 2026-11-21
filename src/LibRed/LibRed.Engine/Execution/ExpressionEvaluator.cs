@@ -369,7 +369,7 @@ internal sealed partial class ExpressionEvaluator(
             // CDec has no working ACE equivalent — the Jet Expression Service's takes exactly two arguments and gives a
             // Long 0 whatever they are (verified) — so this is a LibRed extension with no parity contract to honour.
             // CCur is ACE's route to a decimal.
-            "CDEC" => DecimalArgument(f, number => number),
+            "CDEC" => DecimalArgument(f, ArithmeticDecimal),
             "CSTR" => Convert1(f, ConcatText),
             // CVDate is VBA's older name for CDate, and in ACE it is CDate: a Date, not a Variant (verified).
             "CDATE" or "CVDATE" => Convert1(f, v => ToDate(v)),
@@ -1662,33 +1662,30 @@ internal sealed partial class ExpressionEvaluator(
     /// <summary>
     /// A <c>CCur</c> or <c>CDec</c> argument as a Decimal, exactly where it can be: a Decimal as it is, and text that
     /// reads as a number within a Decimal's range as it reads (verified vs ACE: CCur('12345678901234.5678') and
-    /// CCur(12345678901234.5678) keep every place). Anything else is read as the conversion functions read it. Null
-    /// for a Null argument.
+    /// CCur(12345678901234.5678) keep every place). Anything else is read as the conversion functions read it and
+    /// handed over as it is, so a Double or Single reaches CCur unrounded. Null for a Null argument.
     /// </summary>
-    private object? DecimalArgument(FunctionCall f, Func<decimal, decimal> convert)
+    private object? DecimalArgument(FunctionCall f, Func<object, decimal> convert)
     {
         return Evaluate(f.Arguments[0]) switch
         {
             null => null,
             (string or char) and var text when VbaText.TextAsDecimal(text.ToString()!) is decimal exact => convert(exact),
-            var value => convert(ArithmeticDecimal(ConversionNumber(value))),
+            var value => convert(ConversionNumber(value)),
         };
     }
 
-    /// <summary>Access <c>CCur</c>: the value to four places, half to even; past a Currency is an overflow.</summary>
-    private static decimal ToCurrency(decimal number)
-    {
-        decimal value = decimal.Round(number, 4, MidpointRounding.ToEven);
-        return Math.Abs(value) <= 922337203685477.5807m || value == -922337203685477.5808m
-            ? value
-            : throw new OverflowException($"Overflow: {value} is outside the range of a Currency.");
-    }
+    /// <summary>Access <c>CCur</c>: the value to four places, half to even — a Double or Single from its exact binary
+    /// value, as storing it in a Currency column takes it (<see cref="JetTypeCodec.CurrencyToScaled(object, IFormatProvider)"/>);
+    /// past a Currency is an overflow.</summary>
+    private static decimal ToCurrency(object number) =>
+        JetTypeCodec.CurrencyFromScaled(JetTypeCodec.CurrencyToScaled(number, CultureInfo.InvariantCulture));
 
     /// <summary>Text, or a Double or Single, compared with a Currency column: read as storing it in the column reads it,
     /// then a Currency as <see cref="ToCurrency"/> makes one — with an index or without. Past a Currency is an
     /// overflow.</summary>
     private static decimal AsCurrencyColumn(object value) =>
-        ToCurrency(Dec(JetTypeCodec.NumberFromText(JetDataType.Currency, value)));
+        ToCurrency(JetTypeCodec.NumberFromText(JetDataType.Currency, value));
 
     /// <summary>Text compared with a date column, read as storing it in the column reads it — with an index or
     /// without. Text that is not a date is a type mismatch.</summary>
@@ -2264,6 +2261,15 @@ internal sealed partial class ExpressionEvaluator(
             return distinct == (b.Operator == BinaryOperator.IsDistinctFrom);
         }
 
+        // A Currency plus or less a Double, a Single or text takes the other as a Currency column takes it, first
+        // (verified vs ACE: Currency 0.0001 + Double 0.03125 is 0.0313, where the exact sum rounds to 0.0314, and
+        // 0.0001 + '1.00005' is 1.0001, the text read exactly).
+        if (b.Operator is BinaryOperator.Add or BinaryOperator.Subtract && left is not null && right is not null && IsCurrency(b))
+        {
+            if (left is double or float or string or char) left = AsCurrencyColumn(left);
+            if (right is double or float or string or char) right = AsCurrencyColumn(right);
+        }
+
         // The arithmetic operators other than '+' read text as a number even when the other side is Null, so text
         // that is not a number, a GUID or a binary value is a type mismatch before Null propagates (verified vs
         // ACE: 'abc' * NULL fails, '1' * NULL is Null).
@@ -2314,7 +2320,7 @@ internal sealed partial class ExpressionEvaluator(
         // places and its range apply to it where it is worked out, as CCur applies them (verified vs ACE: Currency
         // 1.2345 * 1.2345 is 1.524, 0.0003 * 1.2345 is 0.0004, and the largest Currency + 1 or * 3 is an
         // overflow). A Currency with a written decimal is not one, nor one times a Double; one plus or less a Double
-        // is, worked out as a Double first (verified vs ACE: Currency 1.2345 + Double 1.5 is the Currency 2.7345).
+        // is (verified vs ACE: Currency 1.2345 + Double 1.5 is the Currency 2.7345).
         if (b.Operator is BinaryOperator.Add or BinaryOperator.Subtract or BinaryOperator.Multiply)
         {
             object result = b.Operator switch
@@ -2323,7 +2329,7 @@ internal sealed partial class ExpressionEvaluator(
                 BinaryOperator.Subtract => Arithmetic(left, right, '-'),
                 _ => Arithmetic(left, right, '*'),
             };
-            return result is decimal or double or float && IsCurrency(b) ? ToCurrency(Dec(result)) : result;
+            return result is decimal or double or float && IsCurrency(b) ? ToCurrency(result) : result;
         }
 
         return b.Operator switch
@@ -3036,7 +3042,7 @@ internal sealed partial class ExpressionEvaluator(
     /// Double or Single becoming a Decimal first
     /// (<see cref="JetDecimalConverter"/>), so binary rounding (0.6 held as 0.5999…) cannot drop a digit; a Double
     /// column takes a Decimal as a Double (DECIMAL 1.1 * 1.11 is 1.221); a Currency column takes a Double to four
-    /// places (Currency 1.1 + Double 0.1 is 1.2).
+    /// places, as <see cref="ToCurrency"/> makes one.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static object? ToResultPlaces(object? value, NumberType type) => (type.Class, value) switch
@@ -3045,7 +3051,7 @@ internal sealed partial class ExpressionEvaluator(
             decimal.Round(d, type.Places, MidpointRounding.ToZero) + new decimal(0, 0, 0, false, (byte)type.Places),
         (NumberClass.Decimal, double or float) => CutFloating(value, type.Places),
         (NumberClass.Double, decimal d) => JetDecimalConverter.FromDecimal(d),
-        (NumberClass.Currency, double or float) => ToCurrency(Dec(value)),
+        (NumberClass.Currency, double or float) => ToCurrency(value),
         _ => value,
     };
 

@@ -4,8 +4,10 @@ namespace LibRed.Sql.Ast;
 public abstract record Expression : SqlNode;
 
 /// <summary>A literal constant (number, string, date, boolean or null). A number written with a decimal point or an
-/// exponent is a Decimal of exactly the digits written, its scale those after the point (<c>1.50</c> is 1.50), unless
-/// it is a whole number a Long holds; ACE keeps no more places than that in a product or quotient.</summary>
+/// exponent is the type ACE gives it: a whole number a Long holds is a Long, one a Decimal holds exactly is a Decimal of
+/// exactly the digits written, its scale those after the point (<c>1.50</c> is 1.50), and anything else is a Double.
+/// Written with a point and no exponent, a whole number whose whole part ends in a zero (<c>10.0</c>, <c>20.</c>) is a
+/// Double too. ACE keeps no more places than a Decimal literal's in a product or quotient.</summary>
 public sealed record LiteralExpression(object? Value) : Expression;
 
 /// <summary>A reference to a column, optionally table-qualified.</summary>

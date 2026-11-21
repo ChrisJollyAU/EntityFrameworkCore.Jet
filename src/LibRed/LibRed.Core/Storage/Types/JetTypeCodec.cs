@@ -282,10 +282,50 @@ public static class JetTypeCodec
         return new decimal((int)(uint)magnitude, (int)(uint)(magnitude >> 32), 0, raw < 0, scale);
     }
 
-    /// <summary>A value as a CURRENCY stores it — the inverse of <see cref="CurrencyFromScaled"/>: the decimal
-    /// (through <see cref="JetDecimalConverter"/>, never the runtime's conversion) × 10,000, rounded.</summary>
-    internal static long CurrencyToScaled(object value, IFormatProvider c) =>
-        (long)decimal.Round(JetDecimalConverter.ToDecimal(value, c) * CurrencyFactor);
+    /// <summary>A value as a CURRENCY stores it — the inverse of <see cref="CurrencyFromScaled"/>: a Double or Single as
+    /// <see cref="CurrencyToScaled(double)"/> makes it, anything else the decimal (through <see cref="JetDecimalConverter"/>,
+    /// never the runtime's conversion) to four places, half to even. Past a Currency is an overflow.</summary>
+    internal static long CurrencyToScaled(object value, IFormatProvider c)
+    {
+        if (value is double or float) return CurrencyToScaled(System.Convert.ToDouble(value, c));
+        decimal number = decimal.Round(JetDecimalConverter.ToDecimal(value, c), CurrencyScale, MidpointRounding.ToEven);
+        return Math.Abs(number) <= 922337203685477.5807m || number == -922337203685477.5808m
+            ? (long)(number * CurrencyFactor)
+            : throw new OverflowException($"Overflow: {number} is outside the range of a Currency.");
+    }
+
+    /// <summary>A Double (or a Single, widened, which is exact) as a Currency stores it: its exact binary value × 10,000,
+    /// rounded half to even — not first cut to its 15 (or 7) significant digits as a Decimal conversion is (measured,
+    /// CCur and a stored Currency alike: 0.00005 is 0.0001, 2.00005 is 2.0000, the Single 2.00005 is 2.0001, the tie
+    /// 0.03125 is 0.0312 and 0.09375 is 0.0938). Past a Currency is an overflow.</summary>
+    private static long CurrencyToScaled(double value)
+    {
+        if (!double.IsFinite(value)) throw new OverflowException($"Overflow: {value} is outside the range of a Currency.");
+        ulong bits = BitConverter.DoubleToUInt64Bits(value);
+        int field = (int)((bits >> 52) & 0x7FF);
+        ulong mantissa = bits & 0xF_FFFF_FFFF_FFFFUL;
+        if (field == 0 && mantissa == 0) return 0;
+        if (field != 0) mantissa |= 1UL << 52;
+        int exponent = (field == 0 ? 1 : field) - 1075; // value = mantissa × 2^exponent, exactly
+
+        // A whole binary exponent means at least 2^52, past a Currency's 2^63 units / 10,000.
+        if (exponent >= 0) throw new OverflowException($"Overflow: {value} is outside the range of a Currency.");
+
+        // The value × 10,000, which fits 67 bits before the binary exponent applies.
+        UInt128 scaled = (UInt128)mantissa * 10000;
+        if (-exponent >= 128)
+            scaled = 0; // under 2^67 × 2^-128, about 2^-61 of a unit: nowhere near half of one
+        else
+        {
+            int shift = -exponent;
+            UInt128 whole = scaled >> shift, rest = scaled - (whole << shift), half = (UInt128)1 << (shift - 1);
+            scaled = rest > half || (rest == half && (whole & 1) == 1) ? whole + 1 : whole;
+        }
+        // A CY is an int64: up to 2^63 - 1 units, and 2^63 below zero.
+        if (scaled > (value < 0 ? (UInt128)long.MaxValue + 1 : long.MaxValue))
+            throw new OverflowException($"Overflow: {value} is outside the range of a Currency.");
+        return value < 0 ? (long)(0 - (Int128)scaled) : (long)scaled;
+    }
 
     /// <summary>A CURRENCY's fixed decimal places — OLE Automation's <c>CY</c>, an int64 scaled by 10,000.</summary>
     private const byte CurrencyScale = 4;

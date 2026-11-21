@@ -33,6 +33,35 @@ public class StoredNumberConversionTests : TempDatabaseTest
         return engine.ExecuteQuery("SELECT V FROM T").Rows.Single()[0];
     }
 
+    // A Double or Single stored into a Currency column is its exact binary value rounded to four places, half to even —
+    // what ACE stored from a Double and a Single column, the same as CCur gives.
+    [Theory]
+    [MemberData(nameof(ConversionFunctionTests.CurrencyFromBinary), MemberType = typeof(ConversionFunctionTests))]
+    public void A_double_or_single_stored_as_currency_is_its_exact_binary_value(string value, string fromDouble, string fromSingle)
+    {
+        Assert.Equal(decimal.Parse(fromDouble, CultureInfo.InvariantCulture), Stored("CURRENCY", $"CDBL('{value}')"));
+        Assert.Equal(decimal.Parse(fromSingle, CultureInfo.InvariantCulture), Stored("CURRENCY", $"CSNG('{value}')"));
+    }
+
+    // Retyped to a Currency, a Double or Single column converts the same way (what ACE's ALTER COLUMN stored).
+    [Theory]
+    [InlineData("0.00005", "0.0001", "0")]
+    [InlineData("1.00005", "1.0001", "1")]
+    [InlineData("2.00005", "2", "2.0001")]
+    [InlineData("0.03125", "0.0312", "0.0312")]
+    [InlineData("0.09375", "0.0938", "0.0938")]
+    [InlineData("-0.00005", "-0.0001", "0")]
+    public void A_double_or_single_column_altered_to_currency_is_its_exact_binary_value(string value, string fromDouble, string fromSingle)
+    {
+        QueryEngine engine = Fresh("CREATE TABLE T (Id COUNTER PRIMARY KEY, D DOUBLE, S SINGLE)");
+        engine.ExecuteNonQuery($"INSERT INTO T (D, S) VALUES (CDBL('{value}'), CSNG('{value}'))");
+        engine.ExecuteNonQuery("ALTER TABLE T ALTER COLUMN D CURRENCY");
+        engine.ExecuteNonQuery("ALTER TABLE T ALTER COLUMN S CURRENCY");
+        object?[] row = engine.ExecuteQuery("SELECT D, S FROM T").Rows.Single();
+        Assert.Equal(decimal.Parse(fromDouble, CultureInfo.InvariantCulture), row[0]);
+        Assert.Equal(decimal.Parse(fromSingle, CultureInfo.InvariantCulture), row[1]);
+    }
+
     [Theory]
     [InlineData("LONG", "'1.5'", "2")]
     [InlineData("LONG", "'2.5'", "2")]

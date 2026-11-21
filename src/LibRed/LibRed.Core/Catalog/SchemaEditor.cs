@@ -2961,7 +2961,10 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             JetDataType.Int64 => Convert.ToInt64(value, inv),
             JetDataType.Single => JetDecimalConverter.ToSingle(value, inv),
             JetDataType.Double => JetDecimalConverter.ToDouble(value, inv),
-            JetDataType.Currency or JetDataType.FixedPoint => JetDecimalConverter.ToDecimal(value, inv),
+            // A Double or Single from its exact binary value, as storing it takes it (verified vs ACE: a Double 0.00005
+            // becomes 0.0001, a Single 2.00005 2.0001).
+            JetDataType.Currency => Storage.Types.JetTypeCodec.CurrencyFromScaled(Storage.Types.JetTypeCodec.CurrencyToScaled(value, inv)),
+            JetDataType.FixedPoint => JetDecimalConverter.ToDecimal(value, inv),
             JetDataType.DateTime => Storage.Types.JetTypeCodec.ToDate(value, inv),
             JetDataType.Text or JetDataType.Memo => Storage.Types.VbaText.Of(value),
             // As a written value becomes one. Bytes too few for a GUID are left for the write to refuse as too small,

@@ -32,6 +32,43 @@ public class CalculatedColumnWriteTests : TempDatabaseTest
         Assert.Empty(engine.ExecuteQuery("SELECT Id FROM T").Rows);
     }
 
+    // A Currency result over a Double is its exact binary value to four places, half to even, as storing the Double
+    // into a Currency column takes it (measured through DAO: a CURRENCY field with the expression [D]).
+    [Theory]
+    [InlineData("0.00005", "0.0001")]
+    [InlineData("1.00005", "1.0001")]
+    [InlineData("2.00005", "2")]
+    [InlineData("0.03125", "0.0312")]
+    [InlineData("0.09375", "0.0938")]
+    [InlineData("-0.00005", "-0.0001")]
+    public void A_currency_result_over_a_double_is_its_exact_binary_value(string value, string expected)
+    {
+        QueryEngine engine = Fresh();
+        engine.ExecuteNonQuery("CREATE TABLE T (Id LONG PRIMARY KEY, D DOUBLE, K CURRENCY AS ([D]))");
+        engine.ExecuteNonQuery($"INSERT INTO T (Id, D) VALUES (1, CDBL('{value}'))");
+        Assert.Equal(decimal.Parse(expected, System.Globalization.CultureInfo.InvariantCulture),
+            engine.ExecuteQuery("SELECT K FROM T").Rows.Single()[0]);
+    }
+
+    // Over a Decimal or text it is that decimal value exactly, half to even (measured through DAO: CURRENCY fields with
+    // the expressions [N] and [T] over a DECIMAL(18,5) and a TEXT column).
+    [Theory]
+    [InlineData("0.00005", "0")]
+    [InlineData("1.00005", "1")]
+    [InlineData("2.00005", "2")]
+    [InlineData("0.03125", "0.0312")]
+    [InlineData("0.00015", "0.0002")]
+    public void A_currency_result_over_a_decimal_or_text_is_its_exact_value(string value, string expected)
+    {
+        QueryEngine engine = Fresh();
+        engine.ExecuteNonQuery("CREATE TABLE T (Id LONG PRIMARY KEY, N DECIMAL(18,5), X TEXT(20), K CURRENCY AS ([N]), KT CURRENCY AS ([X]))");
+        engine.ExecuteNonQuery($"INSERT INTO T (Id, N, X) VALUES (1, {value}, '{value}')");
+        object?[] row = engine.ExecuteQuery("SELECT K, KT FROM T").Rows.Single();
+        decimal stored = decimal.Parse(expected, System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal(stored, row[0]);
+        Assert.Equal(stored, row[1]);
+    }
+
     // ACE computes a calculated column added to a table that already has rows (measured through DAO); left alone,
     // those rows would read Null for good, since nothing re-derives a cached value on read.
     [Fact]
