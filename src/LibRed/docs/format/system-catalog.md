@@ -409,6 +409,24 @@
   - Every check has one: a check whose expression does not parse is refused when it is created, in `CREATE TABLE`
     and `ALTER TABLE` alike (measured), so what it reads is always known. The engine parses the expression; the
     Core API takes what it reads from the caller.
+  - **What it reads is held** (measured): ACE refuses a `DROP TABLE` of a table another table's check reads — for
+    columns or for none (`COUNT(*)`) — and a `DROP COLUMN` or any `ALTER COLUMN` (a re-declaration that changes
+    nothing, and a `COUNTER` edit, included) of a column a check reads, the check's own table's included, with
+    *"DDL cannot be completed on this table because it is referenced by constraint chkX on table chkX."* — the
+    check's name in both places. A column of a read table that no check reads, and a table read only by its own
+    checks, are not held. Where several checks read it, the earliest-created is named, whichever
+    table it is on. A relationship's refusal, and `DROP COLUMN`'s of an indexed column, come first.
+  - A **rename** is held the same way (measured through DAO's `TableDef.Name` and `Field.Name`): a column a check
+    reads, its own table's included, and every table a check reads — so a table with any check of its own,
+    whatever the check reads, even `CHECK (1 > 0)` — refuse a new name with the same message, a rename to the same
+    name or a case-only one included. Nothing is rewritten: the check's text and its `Database` stay as they were.
+    A table's refusal comes ahead of a name another object has; a column's comes after one another column has
+    (*"Cannot define field more than once."*). A column renamed to its own name, or a case-only change, is not a
+    collision with itself.
+  - A column's **default and nullability** are **not** held: ACE changes the default (`ALTER COLUMN … SET DEFAULT`,
+    `… DROP DEFAULT`) and sets or clears `Required` (DAO's `Field.Required`; Access SQL has no form that changes
+    nullability alone) of a column a check reads, on its own table or another. `ALTER COLUMN c LONG NOT NULL` or
+    `… LONG DEFAULT 5` re-declares the column and is held.
 
   > **MSysQueries columns (8, verified).** The table has exactly: `ObjectId` (Int32, the
   > query object's `Id`), `Attribute` (Byte, the row kind — see below), `Flag` (Int16, attribute-specific),

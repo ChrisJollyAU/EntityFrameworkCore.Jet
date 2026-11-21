@@ -1183,6 +1183,10 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             throw new InvalidOperationException(
                 $"Cannot drop table '{tableName}': it is referenced by a relationship — drop the referencing table first.");
 
+        // Nor one another table's CHECK reads (measured; the relationship refusal comes first).
+        if (CheckReading(tableName, column: null, exceptOwnTable: true) is { } check)
+            throw ReferencedByCheck(check);
+
         // A complex (multi-value / attachment) column keeps its values in an f_<GUID> flat table and itself in a
         // MSysComplexColumns row, and neither is reachable from this table's own pages — so dropping the table
         // alone leaves the flat tables orphaned and catalog rows naming a table that is gone. ACE takes both
@@ -1410,6 +1414,10 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // create-side check exists to prevent (RenameNameValidationAccessTests).
         JetName.Validate(newName, "table name");
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, table.Name);
+        // Nor one a CHECK reads — its own table's checks included, and to the same name too; ahead of a taken name
+        // (measured through DAO's TableDef.Name).
+        if (CheckReading(table.Name, column: null, exceptOwnTable: false) is { } check)
+            throw ReferencedByCheck(check);
         // The table being renamed is not a collision with itself: renaming to the same name is a no-op that ACE
         // allows (and EF's schema "move" degrades to exactly that on a schema-less engine), as is a case-only
         // change. Both verified — RenameFanOutProbeTest.
@@ -1465,9 +1473,14 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         if (col is null) return false;
         JetName.Validate(newName, "column name");   // see RenameTable: unchecked, this corrupts the file
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, table.Name);
-        if (table.Columns.Any(c => string.Equals(c.Name, newName, StringComparison.OrdinalIgnoreCase)))
+        // The column being renamed is not a collision with itself: to its own name, or a case-only change, ACE
+        // allows it, as for a table (measured through DAO's Field.Name).
+        if (table.Columns.Any(c => c.ColumnId != col.ColumnId && string.Equals(c.Name, newName, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException(
                 $"ALTER TABLE '{tableName}' RENAME COLUMN '{oldName}' TO '{newName}': the table already has a column named '{newName}'.");
+        // Nor one a CHECK reads, to the same name too; after a taken name (measured through DAO's Field.Name).
+        if (CheckReading(table.Name, col.Name, exceptOwnTable: false) is { } check)
+            throw ReferencedByCheck(check);
 
         // A complex column's catalog row names its column by NAME, and the catalog will not resolve a row
         // whose name the owning table no longer has — so a rename that left the row behind did not merely
@@ -2292,6 +2305,66 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         return text.ToString();
     }
 
+    /// <summary>What a CHECK's <c>MSysObjects.Database</c> says its expression reads — the inverse of
+    /// <see cref="CheckReadsText"/>. A value cut short, or with text after its last table, is malformed.</summary>
+    internal static IReadOnlyList<(string Table, IReadOnlyList<string> Columns)> ReadCheckReads(string text)
+    {
+        int at = 0;
+        var reads = new List<(string Table, IReadOnlyList<string> Columns)>();
+        for (int tables = Count(); tables > 0; tables--)
+        {
+            string table = Name();
+            var columns = new List<string>();
+            for (int count = Count(); count > 0; count--) columns.Add(Name());
+            reads.Add((table, columns));
+        }
+        // Read strictly both ways: text past the last table is as malformed as a value cut short.
+        return at == text.Length ? reads : throw Malformed();
+
+        int Count() => at < text.Length ? text[at++] : throw Malformed();
+        string Name()
+        {
+            int length = Count();
+            if (length > text.Length - at) throw Malformed();
+            string name = text.Substring(at, length);
+            at += length;
+            return name;
+        }
+        InvalidDataException Malformed() => new("A CHECK constraint's MSysObjects.Database is malformed.");
+    }
+
+    /// <summary>
+    /// The CHECK that reads <paramref name="table"/> — or, given <paramref name="column"/>, that column of it — by
+    /// what its <c>MSysObjects.Database</c> records (<see cref="ReadCheckReads"/>), or null when none does. ACE
+    /// refuses to drop or rename such a table or column, or to alter such a column (measured: <see cref="ReferencedByCheck"/>),
+    /// and names the earliest-created check that reads it — the lowest id, whichever table it is on. A check reading
+    /// a table for no column (<c>COUNT(*)</c>) holds the table but none of its columns. <paramref name="exceptOwnTable"/>
+    /// passes over the table's own checks, which a DROP TABLE takes with it; a column its own table's check reads is
+    /// held like any other.
+    /// </summary>
+    private string? CheckReading(string table, string? column, bool exceptOwnTable)
+    {
+        const StringComparison oic = StringComparison.OrdinalIgnoreCase;
+        TableDefinition mo = _catalog.RequireTable("MSysObjects");
+        int idIndex = mo.RequireColumn("Id").Index, readsIndex = mo.RequireColumn("Database").Index;
+        return _catalog.UserTables
+            .Where(t => !exceptOwnTable || !string.Equals(t.Name, table, oic))
+            .SelectMany(t => t.CheckConstraints)
+            .Select(check => (check.Name, Row: _catalog.FindObjectRow(JetCatalog.RelationshipContainerParentId, check.Name, mo)))
+            .Where(check => check.Row?.Values[readsIndex] is string reads
+                && ReadCheckReads(reads).Any(read => string.Equals(read.Table, table, oic)
+                    && (column is null || read.Columns.Any(c => string.Equals(c, column, oic)))))
+            .OrderBy(check => Convert.ToInt32(check.Row!.Value.Values[idIndex], CultureInfo.InvariantCulture))
+            .Select(check => check.Name)
+            .FirstOrDefault();
+    }
+
+    /// <summary>ACE's refusal of a DROP TABLE, DROP COLUMN, ALTER COLUMN or rename of what a CHECK reads (measured, check
+    /// <c>chkX</c> on table <c>Owner</c>): it names the check twice, the second time where a table's name is
+    /// promised.</summary>
+    private static InvalidOperationException ReferencedByCheck(string check) => new(
+        $"DDL cannot be completed on this table because it is referenced by constraint {check} on table {check}.");
+
     /// <summary>Drops a named table-level CHECK — ALTER TABLE … DROP CONSTRAINT. Removes the matching entry from
     /// the <c>CheckConstraints</c> list in the table's <c>MSysObjects.LvProp</c> blob (the inverse of
     /// <see cref="AddCheckConstraint"/>): if any remain, rewrites the list; if it was the last one, drops the
@@ -2339,13 +2412,13 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
 
     /// <summary>Changes a column's declared type — ALTER TABLE … ALTER COLUMN. Apart from the counter edits and
     /// a re-declaration that changes nothing, every type or length change — a text column's length included, as
-    /// ACE makes it — is a full column rewrite, handled in place by <see cref="AlterColumnTypeInPlace"/>
+    /// ACE makes it — is a full column rewrite, handled in place by <see cref="AlterColumnTypeInPlace(TableDefinition, ColumnDef, ColumnSpec)"/>
     /// (byte-faithful with ACE), Memo/OLE included. Nothing here throws NotSupported for a storage-type
     /// change.</summary>
     public void AlterColumn(string tableName, string columnName, ColumnSpec newSpec)
     {
         (TableDefinition table, ColumnDef col) = CheckAlterColumn(tableName, columnName);
-        EnsureColumnIsNotInRelationship(table, col);
+        EnsureColumnCanBeAltered(table, col);
 
         // Widening a column reaches the same bytes as declaring it wide in the first place, so the limits
         // Create enforces apply here too. This sits ahead of the identity and counter short-circuits below
@@ -2407,7 +2480,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // Every other change — numeric type, a fixed size, fixed↔variable, to or from a long value, and a text or
         // binary length, widening as much as narrowing — edits the descriptor in place under a fresh id and
         // re-lays every row, rebuilding only the indexes over the column. ACE has no cheap length-only path.
-        AlterColumnTypeInPlace(tableName, columnName, newSpec);
+        AlterColumnTypeInPlace(table, col, newSpec);
     }
 
     /// <summary>Sets or removes one property in the blob's table-owned (empty-owner) block, leaving every
@@ -2437,24 +2510,25 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     }
 
     /// <summary>ACE rejects every type/length alteration of a relationship column, on either the
-    /// referencing or referenced side. Keep this check ahead of all specialized ALTER paths so none of
-    /// them can bypass it.</summary>
-    private void EnsureColumnIsNotInRelationship(TableDefinition table, ColumnDef column)
+    /// referencing or referenced side, and then — a re-declaration that changes nothing and a counter edit
+    /// included — of a column a CHECK reads, its own table's or another's (measured). Keep this check ahead of all
+    /// specialized ALTER paths so none of them can bypass it.</summary>
+    private void EnsureColumnCanBeAltered(TableDefinition table, ColumnDef column)
     {
         if (ColumnIsInRelationship(table, column))
             throw new InvalidOperationException(
                 $"Cannot change field '{column.Name}'. It is part of one or more relationships.");
+        if (CheckReading(table.Name, column.Name, exceptOwnTable: false) is { } check)
+            throw ReferencedByCheck(check);
     }
 
     /// <summary>Reseeds an existing AutoNumber column in place — ALTER COLUMN c COUNTER(seed, increment). Writes
     /// the TDEF header's last-value (<c>0x14</c> = seed − increment, so the next assigned id is <c>seed</c>) and
-    /// increment (<c>0x18</c>); no data or descriptor changes. ACE rejects reseeding a counter that participates
-    /// in a relationship ("Cannot change field 'X'. It is part of one or more relationships." — verified); match
-    /// that.</summary>
+    /// increment (<c>0x18</c>); no data or descriptor changes. ACE rejects reseeding a relationship column, or one a
+    /// CHECK reads; <see cref="AlterColumn"/> has refused those before it gets here, and the other caller,
+    /// <see cref="NumberExistingRows"/>, numbers a column just added, which nothing can reference yet.</summary>
     private void ReseedCounter(TableDefinition table, ColumnDef col, int seed, int increment)
     {
-        EnsureColumnIsNotInRelationship(table, col);
-
         if (increment == 0) throw TableDefinition.ZeroIncrement(col.Name);
         byte[] tdef = _channel.ReadPage(table.DefinitionPage).Span.ToArray();
         TableDefinition.WriteCounter(tdef, _channel.Format, seed, increment);
@@ -2470,8 +2544,8 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// demoted column just stops auto-assigning.
     /// <para>Promotion carries ACE's refusals: only one column may draw on that pair, so a second is rejected —
     /// complex columns are flagged <c>0x04</c> too but allocate from <c>0x1C</c>, so they do not count as the
-    /// existing one — and (like the reseed path) a column in a relationship is rejected. Demotion has neither:
-    /// ACE permits it, unlike int→counter promotion.</para></summary>
+    /// existing one. A relationship column, or one a CHECK reads, is refused either way, by
+    /// <see cref="AlterColumn"/>, its only caller, before it gets here.</para></summary>
     private void SetAutoNumber(TableDefinition table, ColumnDef col, bool autoNumber, int seed, int increment)
     {
         if (autoNumber)
@@ -2480,7 +2554,6 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
                 throw new InvalidOperationException(
                     $"Cannot make '{col.Name}' an AutoNumber: table '{table.Name}' already has one, and a table "
                     + "can have only one.");
-            EnsureColumnIsNotInRelationship(table, col);
             if (increment == 0) throw TableDefinition.ZeroIncrement(col.Name);
         }
 
@@ -2514,7 +2587,16 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     public void AlterColumnTypeInPlace(string tableName, string columnName, ColumnSpec newSpec)
     {
         (TableDefinition oldDef, ColumnDef oldTarget) = CheckAlterColumn(tableName, columnName);
-        EnsureColumnIsNotInRelationship(oldDef, oldTarget);
+        EnsureColumnCanBeAltered(oldDef, oldTarget);
+        AlterColumnTypeInPlace(oldDef, oldTarget, newSpec);
+    }
+
+    /// <summary>The retype itself, once the column is found and allowed to change — by
+    /// <see cref="AlterColumnTypeInPlace(string, string, ColumnSpec)"/>, or by <see cref="AlterColumn"/>, which
+    /// has made both checks before it gets here.</summary>
+    private void AlterColumnTypeInPlace(TableDefinition oldDef, ColumnDef oldTarget, ColumnSpec newSpec)
+    {
+        string tableName = oldDef.Name, columnName = oldTarget.Name;
         if (newSpec.Type is JetDataType.Ole or JetDataType.BigBinary
             && oldDef.Indexes.Any(i => i.Columns.Any(c => c.Column.ColumnId == oldTarget.ColumnId)))
             RejectOleIndexColumns([oldTarget.Name], _ => newSpec.Type);
@@ -2936,24 +3018,34 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // What ACE does NOT do is tidy up after it — the column's MSysComplexColumns row and its f_<GUID> flat
         // table are both still there afterwards, orphaned (measured in the same run; DROP TABLE, by contrast,
         // takes both). So neither does this: matching ACE is the rule, and a file where LibRed had removed
-        // rows ACE keeps is a file that differs from the one Access would have produced.
-        if (_catalog.ComplexColumns.Any(c =>
-                string.Equals(c.OwnerTable.Name, tableName, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(c.ColumnName, columnName, StringComparison.OrdinalIgnoreCase)))
+        // rows ACE keeps is a file that differs from the one Access would have produced. Those indexes are dropped
+        // only once every refusal below has passed, so a refused drop writes nothing.
+        bool complex = _catalog.ComplexColumns.Any(c =>
+            string.Equals(c.OwnerTable.Name, tableName, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(c.ColumnName, columnName, StringComparison.OrdinalIgnoreCase));
+        var droppedWithColumn = complex
+            ? table.Indexes.Where(ix => ix.Columns.All(c => c.Column.ColumnId == col.ColumnId)).ToList()
+            : [];
+
+        // ACE likewise rejects dropping an indexed/keyed column ("part of an index or is needed by the
+        // system"); the index must be dropped first. Also correct, permanent behaviour. Verified vs ACE. A complex
+        // column's indexes over it alone go with it; one over it and another column still refuses.
+        if (table.Indexes.Any(ix => ix.Columns.Any(c => c.Column.ColumnId == col.ColumnId)
+                && !droppedWithColumn.Contains(ix)))
+            throw new InvalidOperationException(
+                $"Cannot drop column '{columnName}': it is part of an index or key — drop the index/constraint first.");
+
+        // Nor one a CHECK reads, its own table's included (measured — after the index refusal, which ACE gives first).
+        if (CheckReading(table.Name, col.Name, exceptOwnTable: false) is { } check)
+            throw ReferencedByCheck(check);
+
+        if (complex)
         {
-            foreach (string index in table.Indexes
-                .Where(ix => ix.Columns.All(c => c.Column.ColumnId == col.ColumnId))
-                .Select(ix => ix.Name).ToList())
+            foreach (string index in droppedWithColumn.Select(ix => ix.Name))
                 DropIndex(tableName, index);
             table = _catalog.FindTable(tableName)!;
             col = table.Columns.First(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
         }
-
-        // ACE likewise rejects dropping an indexed/keyed column ("part of an index or is needed by the
-        // system"); the index must be dropped first. Also correct, permanent behaviour. Verified vs ACE.
-        if (table.Indexes.Any(ix => ix.Columns.Any(c => c.Column.ColumnId == col.ColumnId)))
-            throw new InvalidOperationException(
-                $"Cannot drop column '{columnName}': it is part of an index or key — drop the index/constraint first.");
 
         // A long-value column's maps, read from the TDEF before it loses them.
         var definition = new TableDefinition();
