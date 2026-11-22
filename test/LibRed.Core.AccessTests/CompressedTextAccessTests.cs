@@ -92,7 +92,7 @@ public class CompressedTextAccessTests : TempDatabaseTest
             var catalog = new JetCatalog(channel);
             TableDefinition definition = catalog.FindTable("MemoProbe")!;
             int column = definition.Columns.Single(c => c.Name == "C").Index;
-            Assert.Equal(values, new Table(channel, definition, catalog, databaseLocale: null).Rows().Select(r => (string)r[column]!));
+            Assert.Equal(values, new Table(channel, definition, catalog, databaseCollation: null).Rows().Select(r => (string)r[column]!));
         }
 
         // ...and so does ACE.

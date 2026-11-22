@@ -19,7 +19,7 @@ public class CalculatedEvaluatorTests
             CalculatedExpression.Parse(expression),
             name => values.TryGetValue(name, out object? v) ? v
                 : throw new CalculatedExpressionException($"No column '{name}'."),
-            databaseLocale: Collation.GeneralLegacy.Lcid);
+            databaseCollation: Collation.GeneralLegacy);
     }
 
     [Theory]
@@ -152,9 +152,9 @@ public class CalculatedEvaluatorTests
     [Fact]
     public void Evaluates_InStr_in_its_full_form()
     {
-        Assert.Equal(2.0, Eval("InStr(1, \"abc\", \"b\", 0)"));
-        Assert.Equal(0.0, Eval("InStr(1, \"abc\", \"z\", 0)"));
-        Assert.Equal(2.0, Eval("InStr(1, \"aBc\", \"b\", 1)"));   // compare = 1 is case-insensitive
+        Assert.Equal(2, Eval("InStr(1, \"abc\", \"b\", 0)"));
+        Assert.Equal(0, Eval("InStr(1, \"abc\", \"z\", 0)"));
+        Assert.Equal(2, Eval("InStr(1, \"aBc\", \"b\", 1)"));   // compare = 1 is case-insensitive
     }
 
     // ACE takes three or four arguments here and rejects two. With compare omitted it matches
@@ -163,28 +163,28 @@ public class CalculatedEvaluatorTests
     [Fact]
     public void Evaluates_InStr_without_its_compare_argument()
     {
-        Assert.Equal(1.0, Eval("InStr(1, \"hello\", \"H\")"));
-        Assert.Equal(0.0, Eval("InStr(1, \"hello\", \"H\", 0)"));
-        Assert.Equal(1.0, Eval("InStr(1, \"hello\", \"H\", 1)"));
-        Assert.Equal(0.0, Eval("InStr(1, \"hello\", \"a\")"));
+        Assert.Equal(1, Eval("InStr(1, \"hello\", \"H\")"));
+        Assert.Equal(0, Eval("InStr(1, \"hello\", \"H\", 0)"));
+        Assert.Equal(1, Eval("InStr(1, \"hello\", \"H\", 1)"));
+        Assert.Equal(0, Eval("InStr(1, \"hello\", \"a\")"));
     }
 
     // Searched as a query's InStr is (verified vs ACE): not in the collation, with the letters the locale ID spells
     // out — the database's, General here, when the compare argument is left out.
     [Theory]
-    [InlineData("InStr(1, \"ab \", \"ab  \")", 0.0)]
-    [InlineData("InStr(1, \"co-op\", \"coop\")", 0.0)]
-    [InlineData("InStr(1, \"ß\", \"ss\")", 1.0)]
-    [InlineData("InStr(1, \"aßb\", \"sb\")", 2.0)]
-    [InlineData("InStr(1, \"ß\", \"ss\", 0)", 0.0)]
-    [InlineData("InStr(1, \"ß\", \"ss\", 1041)", 0.0)]
-    [InlineData("InStr(1, \"ß\", \"sz\", 3079)", 1.0)]
-    [InlineData("InStr(1, \"ß\", \"ss\", 1034)", 1.0)]
-    [InlineData("InStr(1, \"ß\", \"ss\", 4103)", 0.0)]
-    [InlineData("InStr(1, \"ß\", \"ss\", 1024)", 0.0)]
-    [InlineData("InStr(1, \"\", \"s\", 2)", 0.0)]
-    [InlineData("InStr(1, \"s\", \"\", 2)", 1.0)]
-    public void InStr_searches_as_ace_searches_it(string expression, double expected)
+    [InlineData("InStr(1, \"ab \", \"ab  \")", 0)]
+    [InlineData("InStr(1, \"co-op\", \"coop\")", 0)]
+    [InlineData("InStr(1, \"ß\", \"ss\")", 1)]
+    [InlineData("InStr(1, \"aßb\", \"sb\")", 2)]
+    [InlineData("InStr(1, \"ß\", \"ss\", 0)", 0)]
+    [InlineData("InStr(1, \"ß\", \"ss\", 1041)", 0)]
+    [InlineData("InStr(1, \"ß\", \"sz\", 3079)", 1)]
+    [InlineData("InStr(1, \"ß\", \"ss\", 1034)", 1)]
+    [InlineData("InStr(1, \"ß\", \"ss\", 4103)", 0)]
+    [InlineData("InStr(1, \"ß\", \"ss\", 1024)", 0)]
+    [InlineData("InStr(1, \"\", \"s\", 2)", 0)]
+    [InlineData("InStr(1, \"s\", \"\", 2)", 1)]
+    public void InStr_searches_as_ace_searches_it(string expression, int expected)
         => Assert.Equal(expected, Eval(expression));
 
     [Fact]
@@ -224,8 +224,8 @@ public class CalculatedEvaluatorTests
     public void Evaluates_dates()
     {
         Assert.Equal(new DateTime(2003, 9, 30), Eval("[D] + 1", ("D", new DateTime(2003, 9, 29))));
-        Assert.Equal(2003.0, Eval("Year([D])", ("D", new DateTime(2003, 9, 29))));
-        Assert.Equal(9.0, Eval("Month([D])", ("D", new DateTime(2003, 9, 29))));
+        Assert.Equal(2003, Eval("Year([D])", ("D", new DateTime(2003, 9, 29))));
+        Assert.Equal(9, Eval("Month([D])", ("D", new DateTime(2003, 9, 29))));
         Assert.Equal(new DateTime(2020, 1, 1), Eval("DateSerial(2020, 1, 1)"));
     }
 

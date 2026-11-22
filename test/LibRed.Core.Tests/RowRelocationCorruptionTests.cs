@@ -59,7 +59,7 @@ public class RowRelocationCorruptionTests
             using var db = JetDatabase.Open(path, readOnly: false);
             Table table = db.OpenTable("T");
             Assert.Throws<InvalidDataException>(() =>
-                new RowInserter(table.Channel, table.Definition, databaseLocale: null).RewriteRowRaw(source, [1, 0, 0]));
+                new RowInserter(table.Channel, table.Definition, databaseCollation: null).RewriteRowRaw(source, [1, 0, 0]));
         }
         finally { TemporaryDatabase.Delete(path); }
     }

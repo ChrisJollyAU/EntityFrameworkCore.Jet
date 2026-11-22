@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "in=$(cat); printf '%s' \"$in\" | grep -qE '\"file_path\"[[:space:]]*:[[:space:]]*\"[^\"]*(CalculatedEvaluator|ExpressionEvaluator)[^\"]*\\.cs\"' || exit 0; echo '{\"decision\":\"block\",\"reason\":\"HARD RULE (CLAUDE.md): you just edited a calculated-column evaluator or the engine evaluator. Every VBA-style function changed in LibRed.Core/Storage/Calculated/CalculatedEvaluator.cs or LibRed.Engine/Execution/ExpressionEvaluator.cs must get the same change, as a 1:1 copy, in the other file in this same turn. Make that edit now if this one changed such a function.\"}'"
+            "command": "in=$(cat); printf '%s' \"$in\" | grep -qE '\"file_path\"[[:space:]]*:[[:space:]]*\"[^\"]*(CalculatedEvaluator|ExpressionEvaluator)[^\"]*\\.cs\"' || exit 0; echo '{\"decision\":\"block\",\"reason\":\"HARD RULE (CLAUDE.md): you just edited the calculated-column evaluator or the engine evaluator. Neither implements a function: every VBA/Access and SQL function lives once, in LibRed.Core/Storage/Types/ExpressionFunctions.cs, which both derive from. If this edit added or changed function logic here, move it into ExpressionFunctions now.\"}'"
           }
         ]
       },

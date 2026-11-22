@@ -1,4 +1,4 @@
-namespace LibRed.Engine.Execution;
+namespace LibRed.Storage.Types;
 
 /// <summary>
 /// VBA's <c>Empty</c>: what Access's one-argument <c>Nz</c> gives for a Null (verified vs Access). It is written out

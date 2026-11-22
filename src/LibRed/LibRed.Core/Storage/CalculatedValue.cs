@@ -41,10 +41,10 @@ internal static class CalculatedValue
 
 
     /// <summary>Evaluates a calculated column's expression against one row and coerces the result to the
-    /// type its payload is stored in. <paramref name="databaseLocale"/> is the database's locale ID, which an
-    /// InStr that names no comparison compares under; without it such an expression is refused.</summary>
+    /// type its payload is stored in. <paramref name="databaseCollation"/> is the database's collation, which its text
+    /// compares in and an InStr that names no comparison compares under; without it such an expression is refused.</summary>
     public static object? Evaluate(ColumnDef column, IReadOnlyList<ColumnDef> columns, object?[] values,
-        int? databaseLocale)
+        Collation? databaseCollation)
     {
         if (column.CalculatedExpression is not { Length: > 0 } text)
             throw new Calculated.CalculatedExpressionException(
@@ -61,7 +61,7 @@ internal static class CalculatedValue
         object? result = Calculated.CalculatedEvaluator.Evaluate(
             Calculated.CalculatedExpression.ParseCached(text),
             name => Lookup(column, columns, values, name),
-            databaseLocale);
+            databaseCollation);
 
         return Calculated.CalculatedEvaluator.Coerce(result, StoredType(column, 0));
     }

@@ -436,7 +436,7 @@ public sealed class JetCatalog
             }
             var columns = mo.Columns.ToDictionary(c => c.Name, c => c.Index, StringComparer.OrdinalIgnoreCase);
             var tables = new List<TableDefinition>();
-            var objects = new Table(_channel, mo, this, databaseLocale: null);
+            var objects = new Table(_channel, mo, this, databaseCollation: null);
             foreach ((RowId id, object?[] row) in objects.Rows(objects.DecodeOnly(
                          [columns["Id"], columns["Name"], columns["Type"]])).WithIds())
                 if (row[columns["Type"]] is short t && (ObjectType)t == ObjectType.Table)
@@ -487,7 +487,7 @@ public sealed class JetCatalog
             var columns = mo.Columns.ToDictionary(c => c.Name, c => c.Index, StringComparer.OrdinalIgnoreCase);
             var names = new Dictionary<int, string>();
             TableDefinition? mq = null;
-            foreach (object?[] row in new Table(_channel, mo, this, databaseLocale: null).Rows())
+            foreach (object?[] row in new Table(_channel, mo, this, databaseCollation: null).Rows())
             {
                 if (row[columns["Type"]] is not short t) continue;
                 if ((ObjectType)t == ObjectType.Query)
@@ -497,7 +497,7 @@ public sealed class JetCatalog
             }
             if (mq is null || names.Count == 0) return queries;
             var queryColumns = mq.Columns.ToDictionary(c => c.Name, c => c.Index, StringComparer.OrdinalIgnoreCase);
-            foreach (var group in new Table(_channel, mq, this, databaseLocale: null).Rows().Where(r => r[queryColumns["ObjectId"]] is int id && names.ContainsKey(id))
+            foreach (var group in new Table(_channel, mq, this, databaseCollation: null).Rows().Where(r => r[queryColumns["ObjectId"]] is int id && names.ContainsKey(id))
                          .GroupBy(r => (int)r[queryColumns["ObjectId"]]!))
                 if (ReadQuery(group.ToList(), queryColumns) is { } query)
                     queries[names[group.Key]] = query;
@@ -555,7 +555,7 @@ public sealed class JetCatalog
             return resolved;
         int? elementType = definition.FindColumn("ComplexTypeObjectID")?.Index;
 
-        var complexColumns = new Storage.Table(_channel, definition, this, databaseLocale: null);
+        var complexColumns = new Storage.Table(_channel, definition, this, databaseCollation: null);
         IEnumerable<object?[]> rows = ownerPage is not { } page ? complexColumns.Rows()
             : complexColumns.RowsWithKey([owner], [page], r => r[owner] is int o && o == page).Select(r => r.Values);
         foreach (object?[] row in rows)
@@ -594,7 +594,7 @@ public sealed class JetCatalog
         TableDefinition mo = MSysObjects;
         var columns = mo.Columns.ToDictionary(c => c.Name, c => c.Index, StringComparer.OrdinalIgnoreCase);
         int page = Convert.ToInt32(id, CultureInfo.InvariantCulture);
-        foreach (var row in new Table(_channel, mo, this, databaseLocale: null).RowsWithKey([columns["Id"]], [page],
+        foreach (var row in new Table(_channel, mo, this, databaseCollation: null).RowsWithKey([columns["Id"]], [page],
                      r => r[columns["Id"]] is int p && p == page && r[columns["Type"]] is short t && (ObjectType)t == ObjectType.Table))
             return ReadTable(row.Values, mo, columns, sourceRow: row.Id);
         return null;
@@ -811,7 +811,7 @@ public sealed class JetCatalog
 
         var columns = mq.Columns.ToDictionary(c => c.Name, c => c.Index, StringComparer.OrdinalIgnoreCase);
         int oid = columns["ObjectId"];
-        List<object?[]> queryRows = [.. new Table(_channel, mq, this, databaseLocale: null).RowsWhere([oid], r => r[oid] is int o && o == id)
+        List<object?[]> queryRows = [.. new Table(_channel, mq, this, databaseCollation: null).RowsWhere([oid], r => r[oid] is int o && o == id)
             .Select(r => r.Values)];
         return ReadQuery(queryRows, columns);
     }
@@ -902,7 +902,7 @@ public sealed class JetCatalog
                 && parent == parentIndex && named == nameIndex))
             throw new InvalidDataException("MSysObjects has no (ParentId, Name) index.");
 
-        foreach (var row in new Table(_channel, mo, this, databaseLocale: null).RowsWithKey([parentIndex, nameIndex], [container, name], Matches))
+        foreach (var row in new Table(_channel, mo, this, databaseCollation: null).RowsWithKey([parentIndex, nameIndex], [container, name], Matches))
             return row;
         return null;
 
@@ -1019,7 +1019,7 @@ public sealed class JetCatalog
         var groups = new Dictionary<string, (string Child, string Parent, RelationshipFlags Flags,
             List<(int Order, string Column, string ReferencedColumn)> Columns)>();
 
-        var relationships = new Table(_channel, def, this, databaseLocale: null);
+        var relationships = new Table(_channel, def, this, databaseCollation: null);
         int keyIdx = keyColumn is null ? -1 : columns[keyColumn];
         // No owned data page means no row can exist. The captured map dependencies still detect the
         // first relationship added later; a cached/live row count is never used to make this decision.
@@ -1577,7 +1577,7 @@ public sealed class JetCatalog
         foreach ((string column, object? value) in others ?? [])
             Set(msysObjects, values, column, value);
 
-        var inserter = new RowInserter(channel, msysObjects, databaseLocale: null);
+        var inserter = new RowInserter(channel, msysObjects, databaseCollation: null);
         if (properties is not null)
             Set(msysObjects, values, "LvProp", inserter.StorePackedLongValue(
                 msysObjects.RequireColumn("LvProp").ColumnId, properties));
@@ -1596,7 +1596,7 @@ public sealed class JetCatalog
         Set(msysAces, values, "FInheritable", inheritable);
         Set(msysAces, values, "ObjectId", objectId);
         Set(msysAces, values, "SID", sid);
-        new RowInserter(channel, msysAces, databaseLocale: null).Insert(values, updateIndexes: true);
+        new RowInserter(channel, msysAces, databaseCollation: null).Insert(values, updateIndexes: true);
     }
 
     /// <summary>Inserts the object's <c>MSysACEs</c> rows, maintaining the ObjectId index so Access's security
@@ -1616,7 +1616,7 @@ public sealed class JetCatalog
         (byte[] owner, _, byte[] creator) = SecuritySids;
 
         var grants = new List<(byte[] Sid, int Acm)>();
-        var aces = new Table(_channel, msysAces, this, databaseLocale: null);
+        var aces = new Table(_channel, msysAces, this, databaseCollation: null);
         foreach (object?[] row in aces.Rows(aces.DecodeOnly([idIndex, sidIndex, acmIndex, inheritIndex])))
         {
             if (row[idIndex] is not int id || id != containerId || row[inheritIndex] is not true) continue;
@@ -1724,7 +1724,7 @@ public sealed class JetCatalog
         TableDefinition msysObjects = RequireTable("MSysObjects");
         int idIndex = msysObjects.RequireColumn("Id").Index;
         int nextId = JetCatalog.FirstPagelessObjectId;
-        var objects = new Table(_channel, msysObjects, this, databaseLocale: null);
+        var objects = new Table(_channel, msysObjects, this, databaseCollation: null);
         foreach (object?[] row in objects.Rows(objects.DecodeOnly([idIndex])))
             if (row[idIndex] is int id && id < 0 && id >= nextId) nextId = id + 1;
         return nextId;
@@ -2002,7 +2002,7 @@ public sealed class JetCatalog
             if (name2 is not null) Set(mq, values, "Name2", name2);
             // A declared parameter's length; ACE writes it here and renders the PARAMETERS clause from it.
             if ((lvExtra ?? CarriedLvExtra) is { } extra) Set(mq, values, "LvExtra", extra);
-            new RowInserter(channel, mq, databaseLocale: null).Insert(values, updateIndexes: true);
+            new RowInserter(channel, mq, databaseCollation: null).Insert(values, updateIndexes: true);
         }
     }
 

@@ -576,7 +576,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         int[] childColumns = [.. columns.Select(c => child.RequireColumn(c.Column).Index)];
         int[] parentColumns = [.. columns.Select(c => parent.RequireColumn(c.ReferencedColumn).Index)];
 
-        var rows = new Table(_channel, child, _catalog, _collation.Lcid);
+        var rows = new Table(_channel, child, _catalog, _collation);
         var parentKeys = new IndexTree(_channel, parent);
         var probe = new object?[parent.Columns.Count];
         foreach (object?[] row in rows.Rows(rows.DecodeOnly(childColumns)))
@@ -675,7 +675,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             JetCatalog.Set(msys, values, "ccolumn", fk.Columns.Count);
             JetCatalog.Set(msys, values, "icolumn", i);
             JetCatalog.Set(msys, values, "grbit", (int)grbit);
-            new RowInserter(_channel, msys, databaseLocale: null).Insert(values, updateIndexes: true);
+            new RowInserter(_channel, msys, databaseCollation: null).Insert(values, updateIndexes: true);
         }
     }
 
@@ -892,7 +892,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             .ToArray();
 
         var seen = new HashSet<string>();
-        var rows = new Table(_channel, table, _catalog, _collation.Lcid);
+        var rows = new Table(_channel, table, _catalog, _collation);
         foreach (object?[] values in rows.Rows(rows.DecodeOnly(keyColumns.Select(k => k.Column.Index))))
         {
             if (keyColumns.Any(k => values[k.Column.Index] is null))
@@ -943,7 +943,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         var entries = new List<(byte[] Key, int Pointer, bool NullKey)>();
         // The key is all an entry is made from, so it is all that is decoded: a wide row, or one whose memo the
         // index cannot even hold, would otherwise be read whole for every entry.
-        var rows = new Table(_channel, table, _catalog, _collation.Lcid);
+        var rows = new Table(_channel, table, _catalog, _collation);
         foreach ((RowId id, object?[] values) in rows.Rows(rows.DecodeOnly(keyColumnIds)).WithIds())
         {
             if (IndexTree.LeavesOut(index, values)) continue;
@@ -1456,7 +1456,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         bool Names(object?[] v, (int Table, int Column) side) => columnOf is null
             ? NameMatches(v[side.Table], oldName)
             : NameMatches(v[side.Table], columnOf) && NameMatches(v[side.Column], oldName);
-        var table = new Table(_channel, def, _catalog, databaseLocale: null);
+        var table = new Table(_channel, def, _catalog, databaseCollation: null);
 
         foreach ((RowId id, object?[] values) in table.RowsWhere([.. sides.SelectMany(s => new[] { s.Table, s.Column })],
             v => sides.Any(s => Names(v, s))).ToList())
@@ -1571,7 +1571,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         (TableDefinition msys, Table table, int idIdx, ColumnDef lvProp) = ObjectProperties();
         foreach ((RowId id, object?[] values) in RowsKeyed(table, idIdx, objectId))
         {
-            values[lvProp.Index] = new RowInserter(_channel, msys, databaseLocale: null).StorePackedLongValue(lvProp.ColumnId, properties);
+            values[lvProp.Index] = new RowInserter(_channel, msys, databaseCollation: null).StorePackedLongValue(lvProp.ColumnId, properties);
             table.Update(id, values, new HashSet<int> { lvProp.Index });
             return;
         }
@@ -1588,7 +1588,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         int guid = def.RequireColumn("GUID").Index, id = def.RequireColumn("Id").Index,
             name = def.RequireColumn("Name").Index, type = def.RequireColumn("Type").Index,
             map = def.RequireColumn("NameMap").Index;
-        return [.. new Table(_channel, def, _catalog, databaseLocale: null).Rows().Select(r => new NameMap.CatalogRow(
+        return [.. new Table(_channel, def, _catalog, databaseCollation: null).Rows().Select(r => new NameMap.CatalogRow(
             (Guid)r[guid]!, (int)r[id]!, ((string)r[name]!).TrimEnd('\0'), (int)r[type]!,
             r[map] is byte[] blob ? NameMap.ReadRow(blob) : null))];
     }
@@ -1601,13 +1601,13 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         if (_catalog.FindTable("MSysNameMap") is not { } def) return false;
         int guidIndex = def.RequireColumn("GUID").Index, nameIndex = def.RequireColumn("Name").Index;
         ColumnDef mapColumn = def.RequireColumn("NameMap");
-        var table = new Table(_channel, def, _catalog, databaseLocale: null);
+        var table = new Table(_channel, def, _catalog, databaseCollation: null);
 
         foreach ((RowId id, object?[] values) in table.RowsWhere([guidIndex], v => v[guidIndex] is Guid g && g == objectGuid).ToList())
         {
             _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, (values[nameIndex] as string)?.TrimEnd('\0'));
             // A long value, like LvProp: stored first, the row given the descriptor (see WriteObjectProperties).
-            values[mapColumn.Index] = new RowInserter(_channel, def, databaseLocale: null).StorePackedLongValue(mapColumn.ColumnId, map.WriteRow());
+            values[mapColumn.Index] = new RowInserter(_channel, def, databaseCollation: null).StorePackedLongValue(mapColumn.ColumnId, map.WriteRow());
             var changed = new HashSet<int> { mapColumn.Index };
             if (name is not null)
             {
@@ -1667,7 +1667,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     private (TableDefinition Definition, Table Table, int IdIndex, ColumnDef LvProp) ObjectProperties()
     {
         TableDefinition msys = _catalog.RequireTable("MSysObjects");
-        return (msys, new Table(_channel, msys, _catalog, databaseLocale: null), msys.RequireColumn("Id").Index, msys.RequireColumn("LvProp"));
+        return (msys, new Table(_channel, msys, _catalog, databaseCollation: null), msys.RequireColumn("Id").Index, msys.RequireColumn("LvProp"));
     }
 
     /// <summary>The calculated columns of <paramref name="table"/> whose expression reads
@@ -1751,7 +1751,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             if (index.Columns.Any(c => changed.Contains(c.Column.Index)))
                 table.MoveIndexEntry(index, values, newValues, id);
 
-        new RowInserter(table.Channel, def, databaseLocale: null).Update(id, newValues, changed);
+        new RowInserter(table.Channel, def, databaseCollation: null).Update(id, newValues, changed);
     }
 
     /// <summary>Sets <paramref name="updates"/> on every row of <paramref name="catalogTable"/> whose
@@ -1776,7 +1776,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
 
         int key = t.RequireColumn(keyColumn).Index;
         var columns = updates.Select(u => (Column: t.RequireColumn(u.Column).Index, u.Value)).ToArray();
-        var table = new Table(_channel, t, _catalog, databaseLocale: null);
+        var table = new Table(_channel, t, _catalog, databaseCollation: null);
 
         foreach ((RowId id, object?[] values) in RowsKeyed(table, key, keyValue))
             SetCatalogValues(table, t, id, values, [.. columns]);
@@ -1810,7 +1810,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     {
         TableDefinition t = _catalog.RequireTable(catalogTable);
         int idx = t.RequireColumn(keyColumn).Index;
-        var table = new Table(_channel, t, _catalog, databaseLocale: null);
+        var table = new Table(_channel, t, _catalog, databaseCollation: null);
 
         List<(RowId Id, object?[] Values)> rows = RowsKeyed(table, idx, keyValue);
         if (t.RealIndexes.FirstOrDefault(i => i.Columns.Count > 0 && i.Columns[0].Column.Index == idx) is { } byKey)
@@ -1821,7 +1821,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         {
             foreach (IndexDef index in t.RealIndexes)
                 table.RemoveIndexEntry(index, values, id);
-            new RowInserter(table.Channel, t, databaseLocale: null).Delete(id);
+            new RowInserter(table.Channel, t, databaseCollation: null).Delete(id);
         }
     }
 
@@ -2116,10 +2116,10 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         if (spec.Increment == 0) throw TableDefinition.ZeroIncrement(spec.Name);
         int increment = spec.Increment;
 
-        var rows = new Table(_channel, table, _catalog, _collation.Lcid).Rows().WithIds().ToList();
+        var rows = new Table(_channel, table, _catalog, _collation).Rows().WithIds().ToList();
         if (rows.Count > 0)
         {
-            var writer = new RowInserter(_channel, table, _collation.Lcid);
+            var writer = new RowInserter(_channel, table, _collation);
             var changed = new HashSet<int> { column.Index };
             int number = 0;
             foreach ((RowId id, object?[] values) in rows)
@@ -2193,7 +2193,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         JetCatalog.Set(registry, row, "ComplexTypeObjectID", _catalog.RequireTable(column.ComplexTemplate!).DefinitionPage);
         JetCatalog.Set(registry, row, "ConceptualTableID", _catalog.RequireTable(ownerName).DefinitionPage);
         JetCatalog.Set(registry, row, "FlatTableID", flatPage);
-        new RowInserter(_channel, registry, databaseLocale: null).Insert(row, updateIndexes: true);
+        new RowInserter(_channel, registry, databaseCollation: null).Insert(row, updateIndexes: true);
         _catalog.Invalidate();
 
         AddIndex(ownerName, $"{column.Name[..Math.Min(column.Name.Length, OwnerIndexColumnLength)]}_{NewGuidName()}",
@@ -2627,8 +2627,8 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         int oldTargetId = oldTarget.ColumnId;
 
         // 1. Materialize (id + raw bytes + values) before touching disk; conversion throws here on bad data.
-        var reader = new RowInserter(_channel, oldDef, _collation.Lcid);
-        var rows = new Table(_channel, oldDef, _catalog, _collation.Lcid).Rows().WithIds()
+        var reader = new RowInserter(_channel, oldDef, _collation);
+        var rows = new Table(_channel, oldDef, _catalog, _collation).Rows().WithIds()
             .Select(r => (r.Id, Raw: reader.ReadRow(r.Id), Values: (object?[])r.Values.Clone()))
             .ToList();
         foreach (var r in rows)
@@ -2713,7 +2713,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             // table has, and appending the retyped column onto such a row lands it at the wrong index while its
             // descriptor names the high-water one, which is the "A column Id is incorrect" file ACE rejects.
             int newVarCount = RowCodec.VariableSlotCount(newDef.Columns, newDef.VariableColumnCount);
-            var writer = new RowInserter(_channel, newDef, _collation.Lcid);
+            var writer = new RowInserter(_channel, newDef, _collation);
 
             // 3. Re-lay each row: old fixed region + old var chunks verbatim (incl. the dead old slot), target
             //    appended (a new fixed slot, or a new variable chunk); count/var-table/null-bitmap rebuilt.
@@ -3175,14 +3175,14 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // A real delete, as the other catalog rows take (and as ACE's own DROP CONSTRAINT leaves the page —
         // measured by whole-file diff: the row's space back in the page's free count and the table's row count
         // down). Flagging the slot alone also left the index entries standing, pointing at a dead row.
-        var table = new Table(_channel, msys, _catalog, databaseLocale: null);
+        var table = new Table(_channel, msys, _catalog, databaseCollation: null);
         var rows = table.RowsWhere([nameIdx],
             values => string.Equals(values[nameIdx] as string, name, StringComparison.OrdinalIgnoreCase)).ToList();
         foreach ((RowId id, object?[] values) in rows)
         {
             foreach (IndexDef index in msys.RealIndexes)
                 table.RemoveIndexEntry(index, values, id);
-            new RowInserter(table.Channel, msys, databaseLocale: null).Delete(id);
+            new RowInserter(table.Channel, msys, databaseCollation: null).Delete(id);
         }
     }
 

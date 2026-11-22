@@ -719,7 +719,7 @@ public sealed class JetDatabase : IDisposable
     /// <summary>Opens a table directly from its TDEF page, bypassing the catalog — used during database
     /// creation to seed the system tables before they self-register in <c>MSysObjects</c>.</summary>
     internal Storage.Table OpenTableAt(int tdefPage, string name, bool isSystem = true) =>
-        new(_channel, Catalog.ReadTableDefinition(tdefPage, name, isSystem, out _), Catalog, databaseLocale: null);
+        new(_channel, Catalog.ReadTableDefinition(tdefPage, name, isSystem, out _), Catalog, databaseCollation: null);
 
     /// <summary>The other database files this one's statements reached through an IN externaldatabase clause, by
     /// <see cref="FileIdentity.Key"/>: one handle each, writable once anything has written there. Every handle opened
@@ -763,7 +763,7 @@ public sealed class JetDatabase : IDisposable
             ?? throw new ArgumentException(
                 $"The Microsoft Access database engine cannot find the input table or query '{name}'. Make sure it "
                 + "exists and that its name is spelled correctly.", nameof(name));
-        return new Table(_channel, def, Catalog, Collation.Lcid);
+        return new Table(_channel, def, Catalog, Collation);
     }
 
     /// <summary>Closes the database. A writable handle first returns the pages it released to the global free

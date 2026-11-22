@@ -240,10 +240,10 @@ public class RecordSizeAccessTests(ITestOutputHelper output) : TempDatabaseTest
         using var channel = LibRed.IO.PageChannel.Open(path, readOnly: false);
         var catalog = new JetCatalog(channel);
         TableDefinition definition = catalog.FindTable("WideRow")!;
-        var table = new Table(channel, definition, catalog, databaseLocale: null);
+        var table = new Table(channel, definition, catalog, databaseCollation: null);
         RowId id = table.Rows().WithIds().Single().Id;
 
-        var inserter = new RowInserter(channel, definition, databaseLocale: null);
+        var inserter = new RowInserter(channel, definition, databaseCollation: null);
         var thrown = Assert.Throws<InvalidOperationException>(
             () => inserter.RewriteRowRaw(id, new byte[4062]));
         Assert.Contains("Record is too large", thrown.Message);

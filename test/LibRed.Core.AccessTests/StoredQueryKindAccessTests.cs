@@ -62,7 +62,7 @@ public class StoredQueryKindAccessTests
         Set("Attribute", (byte)0x01);
         Set("Flag", flag);
         Set("Order", new byte[] { 0, 0, 0, 1 });   // 4-byte big-endian per-attribute counter
-        new Storage.RowInserter(queries.Channel, queries.Definition, databaseLocale: null).Insert(values, updateIndexes: true);
+        new Storage.RowInserter(queries.Channel, queries.Definition, databaseCollation: null).Insert(values, updateIndexes: true);
     }
 
     [Fact]

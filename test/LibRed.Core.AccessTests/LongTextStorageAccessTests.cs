@@ -55,7 +55,7 @@ public class LongTextStorageAccessTests(ITestOutputHelper output) : TempDatabase
 
         Assert.Equal(characters * 2, stored);
         Assert.Equal(payload, Assert.IsType<string>(
-            new Table(channel, definition, new JetCatalog(channel), databaseLocale: null).Rows().Single()[memo.Index]));
+            new Table(channel, definition, new JetCatalog(channel), databaseCollation: null).Rows().Single()[memo.Index]));
     }
 
     // Microsoft says "only instances of MEMO columns that, when compressed, will fit within 4096 bytes or
@@ -105,7 +105,7 @@ public class LongTextStorageAccessTests(ITestOutputHelper output) : TempDatabase
         // The storage form is the thing compression actually tracks: single page compresses, chained never does.
         Assert.Equal(expectCompressed ? LongValueStore.StorageKind.SinglePage : LongValueStore.StorageKind.Chained, storage);
         Assert.Equal(payload, Assert.IsType<string>(
-            new Table(channel, definition, new JetCatalog(channel), databaseLocale: null).Rows().Single()[memo.Index]));
+            new Table(channel, definition, new JetCatalog(channel), databaseCollation: null).Rows().Single()[memo.Index]));
     }
 
     // The storage form is chosen on the UNCOMPRESSED length, identically whether or not the column can

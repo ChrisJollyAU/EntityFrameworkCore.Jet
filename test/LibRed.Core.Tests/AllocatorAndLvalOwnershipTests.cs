@@ -92,7 +92,7 @@ public class AllocatorAndLvalOwnershipTests
         fixture.Table.Channel.WritePage(mapPage, page);
 
         Assert.Throws<InvalidDataException>(() =>
-            new RowInserter(fixture.Table.Channel, fixture.Table.Definition, databaseLocale: null)
+            new RowInserter(fixture.Table.Channel, fixture.Table.Definition, databaseCollation: null)
                 .StorePackedLongValue(column.ColumnId, new byte[100]));
     }
 

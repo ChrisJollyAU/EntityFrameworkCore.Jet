@@ -391,12 +391,17 @@ pure wrapper" and "they answer different questions" are not reasons. A duplicate
 same turn or handed to an agent in the same turn; it is never carried forward as a list. A reviewer — an
 orchestrating session included — confirms a claimed difference by reading both sites, not from a report.
 
-**Calculated-column functions stay in sync with the engine — a hard rule.** The VBA-style functions in
-`LibRed.Core/Storage/Calculated/CalculatedEvaluator.cs` are copies of LibRed.Engine's
-`Execution/ExpressionEvaluator.cs` ones (Core cannot reference the Engine). Whenever a VBA-style function is changed
-in either file, the same change is made to the other in the same turn — a 1:1 copy, not a reinterpretation. A
-change to one without the other is a hard failure. The rule applies only when those functions are modified, and
-any change to them or to those files triggers it; a `PostToolUse` hook reminds on every edit to either file.
+**One copy of every function — a hard rule.** The VBA/Access and SQL functions live once, in Core's
+`LibRed.Core/Storage/Types/ExpressionFunctions.cs` (and its `.Format.cs` partial), an abstract
+`ExpressionFunctions<TExpression>` that both evaluators derive from: LibRed.Engine's `Execution/ExpressionEvaluator.cs`
+over the SQL AST, and `LibRed.Core/Storage/Calculated/CalculatedEvaluator.cs` over a calculated column's expression.
+The engine's behaviour is the authority, Null propagation included. Neither evaluator implements a function:
+`ExpressionEvaluator` only resolves aggregates, checks FILTER and arity, and supplies `Evaluate`, `Text`,
+`IsCurrency`, `EvaluatePower` and `RandSeed`; `CalculatedEvaluator` only applies the calculated column's gates —
+ACE's whitelist, the `$` refusal, its measured argument counts and the Null arguments whose cached error LibRed
+refuses to write — and then calls the shared function. A function change is made in `ExpressionFunctions` and
+nowhere else; adding function logic to either evaluator, or a second copy anywhere, is a hard failure. A
+`PostToolUse` hook reminds on every edit to either evaluator.
 
 **Never change a test because a change makes it fail.** A failing test is evidence against the change, not a test
 to update. For every failing test, measure what ACE itself produces for that exact query, on that test's own schema

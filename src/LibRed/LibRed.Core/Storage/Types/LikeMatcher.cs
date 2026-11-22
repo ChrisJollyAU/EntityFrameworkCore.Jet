@@ -1,6 +1,4 @@
-using LibRed.Storage.Types;
-
-namespace LibRed.Engine.Execution;
+namespace LibRed.Storage.Types;
 
 /// <summary>
 /// The <c>LIKE</c> match with ANSI-92 wildcards, the set EF Core emits over both OLE DB and ODBC (verified vs ACE).
@@ -45,8 +43,13 @@ namespace LibRed.Engine.Execution;
 /// </remarks>
 internal static class LikeMatcher
 {
-    public static bool IsMatch(string value, string pattern)
+    /// <summary>Whether <paramref name="value"/> matches <paramref name="pattern"/>. With <paramref name="ansi89"/> —
+    /// a calculated column's expression — the wildcards are ANSI-89's: <c>*</c> any run, <c>?</c> any one character
+    /// and <c>#</c> one digit, where <c>%</c> and <c>_</c> are plain characters.</summary>
+    public static bool IsMatch(string value, string pattern, bool ansi89 = false)
     {
+        char anyRun = ansi89 ? '*' : '%', anyOne = ansi89 ? '?' : '_';
+        char[] wildcards = ansi89 ? ['*', '?', '#', '['] : ['%', '_', '['];
         string text = TextFold.Fold(value, TextFold.Letters.All, out int[]? source);
         int[]? characterEnd = null;
 
@@ -60,7 +63,7 @@ internal static class LikeMatcher
             if (first < 0)
                 return false;
 
-            if (pattern[i] == '%')
+            if (pattern[i] == anyRun)
             {
                 Array.Fill(reach, true, first, reach.Length - first);
                 i++;
@@ -68,12 +71,18 @@ internal static class LikeMatcher
             }
 
             var next = new bool[reach.Length];
-            if (pattern[i] == '_')
+            if (pattern[i] == anyOne)
             {
                 // One character of the value, however many it folds to (verified vs ACE: 'ß' LIKE '_' is True).
                 characterEnd ??= CharacterEnds(source, text.Length);
                 for (int p = first; p < text.Length; p++)
                     next[characterEnd[p]] |= reach[p];
+                i++;
+            }
+            else if (ansi89 && pattern[i] == '#')
+            {
+                for (int p = first; p < text.Length; p++)
+                    next[p + 1] |= reach[p] && char.IsAsciiDigit(text[p]);
                 i++;
             }
             else if (pattern[i] == '[')
@@ -97,7 +106,7 @@ internal static class LikeMatcher
             }
             else
             {
-                int end = pattern.IndexOfAny(['%', '_', '['], i);
+                int end = pattern.IndexOfAny(wildcards, i);
                 if (end < 0)
                     end = pattern.Length;
                 string run = TextFold.Fold(pattern[i..end], TextFold.Letters.All, out _);
