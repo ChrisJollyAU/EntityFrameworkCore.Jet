@@ -15,7 +15,7 @@ namespace LibRed.Engine.Tests;
 [Collection(AceCollection.Name)]
 public class LikeFoldTableGeneratorTest(ITestOutputHelper output)
 {
-    private const string ResourcePath = "src/LibRed/LibRed.Engine/Resources/LikeFold.bin";
+    private const string ResourcePath = "src/LibRed/LibRed.Core/Resources/LikeFold.bin";
 
     [Fact]
     public void Generate_the_like_fold_resource()
@@ -24,7 +24,7 @@ public class LikeFoldTableGeneratorTest(ITestOutputHelper output)
             "set LIBRED_GENERATE_LIKE=1 — this asks ACE 26,000 pairs and rewrites a resource");
 
         var pairs = LikeCandidates.Pairs;
-        HashSet<int> matched = LikeCandidates.AceMatches(Collation.GeneralLegacy);
+        HashSet<int> matched = LikeCandidates.AceMatches(Collation.GeneralLegacy, LikeCandidates.Like)[0];
 
         // Case pairs: one character each side. Each must be matched both ways and pair with nothing else, or a
         // simple map cannot describe it.

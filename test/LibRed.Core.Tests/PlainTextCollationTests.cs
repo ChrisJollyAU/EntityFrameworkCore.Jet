@@ -6,10 +6,9 @@ namespace LibRed.Core.Tests;
 
 /// <summary>
 /// Under an <b>untailored</b> General order — either version — two texts of printable ASCII without a hyphen or
-/// apostrophe are one value exactly when they are equal ignoring case. <c>InStr</c> leans on that to search such
-/// text directly instead of trying every substring against the collation, and only under those orders: a tailored
-/// one gives plain ASCII letters weights of their own (Czech <c>ch</c>, Danish <c>aa</c>), so nothing here holds
-/// for it. Held over every string of up to two characters and a random sweep of longer ones.
+/// apostrophe are one value exactly when they are equal ignoring case. A tailored order gives plain ASCII letters
+/// weights of their own (Czech <c>ch</c>, Danish <c>aa</c>), so nothing here holds for it. Held over every string
+/// of up to two characters and a random sweep of longer ones.
 /// </summary>
 public class PlainTextCollationTests
 {
@@ -23,7 +22,6 @@ public class PlainTextCollationTests
     public void Plain_ascii_is_equal_exactly_when_equal_ignoring_case(byte version)
     {
         JetTextComparer comparer = JetTextComparer.For(new Collation(CollatingOrder.General, version));
-        Assert.True(comparer.IsUntailoredGeneral);
 
         var random = new Random(20260927);
         IEnumerable<string> texts = Plain.Select(c => c.ToString())
@@ -46,8 +44,4 @@ public class PlainTextCollationTests
                 byFolded[folded] = text;
         }
     }
-
-    [Fact]
-    public void A_tailored_order_is_not_untailored_general()
-        => Assert.False(JetTextComparer.For(new Collation(CollatingOrder.Czech, 0)).IsUntailoredGeneral);
 }

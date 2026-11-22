@@ -378,8 +378,9 @@ internal sealed partial class ExpressionEvaluator(
             // VBA/Access string functions (verified vs ACE). A value that is not text is read as CStr writes it
             // (ConcatText): True is "-1", a date in the regional format, a GUID braced, and a binary value as
             // UTF-16 text, so Len(0x4100) is 1 where LenB is 2. Positions are 1-based and read as the conversion
-            // functions read numbers; a Null argument gives Null. Text compares in the database sort order unless
-            // a compare argument of 0 asks for a binary comparison.
+            // functions read numbers; a Null argument gives Null. StrComp compares in the database sort order unless
+            // a compare argument of 0 asks for a binary comparison; InStr, InStrRev and Replace search as TextFold
+            // searches, in no sort order.
             "LEN" => Convert1(f, v => ConcatText(v).Length),
             "LCASE" => Convert1(f, v => ConcatText(v).ToLowerInvariant()),
             "UCASE" => Convert1(f, v => ConcatText(v).ToUpperInvariant()),
@@ -800,13 +801,22 @@ internal sealed partial class ExpressionEvaluator(
         Optional(f, index, absent, v => Count(v, least));
 
     /// <summary>
+    /// The locale ID InStr, InStrRev or Replace searches under, 0 for a binary search: its evaluated compare
+    /// argument, or when the argument is <paramref name="absent"/> the database's locale ID, as
+    /// <see cref="TextFold.Locale(int, TextFold.Search)"/> reads it. Null when the argument is Null.
+    /// </summary>
+    private int? SearchLocale(object? compare, bool absent, TextFold.Search function) =>
+        absent ? TextFold.Locale(Text.Collation.Lcid, function, database: true)
+        : compare is { } given ? TextFold.Locale(AsLong(given), function)
+        : null;
+
+    /// <summary>
     /// Whether a compare argument asks for a binary comparison: 0 is binary, and 1 (the default when the argument is
     /// absent) or a locale ID is textual. Anything else is an invalid procedure call — the documented
     /// vbUseCompareOption (-1) and database comparison (2) included (verified vs ACE: 1031, 1033 and the neutral IDs
     /// 3 and 4 are accepted, 20000 is not). Null when the argument is Null.
-    /// <para>ACE compares text under a locale ID with that locale's Windows rules; LibRed uses the database order for
-    /// every locale. They were measured to agree on case, accents and hyphens, and to differ only in whether ß
-    /// matches ss: ACE expands it for 1031, 1033, 1036, 2057 and 3082 but not for 1027, 1041 or the neutral IDs.</para>
+    /// <para>StrComp is its one reader, and compares textually in the database order whatever locale ID it is given.
+    /// InStr, InStrRev and Replace read theirs with <see cref="SearchLocale"/>.</para>
     /// </summary>
     private bool? BinaryCompare(FunctionCall f, int index) =>
         Optional(f, index, false, v => AsLong(v) switch
@@ -828,37 +838,6 @@ internal sealed partial class ExpressionEvaluator(
             return false;
         }
     }
-
-    /// <summary>
-    /// The first match of <paramref name="find"/> in <paramref name="text"/> at or after <paramref name="start"/>, as
-    /// a position and length, or (-1, 0). A textual match compares in the database sort order, so 'SS' finds 'ß' and
-    /// the matched length can differ from <paramref name="find"/>'s.
-    /// </summary>
-    private static (int Index, int Length) FindText(string text, string find, int start, bool binary, JetTextComparer order)
-    {
-        if (binary || order.IsUntailoredGeneral && IsPlainText(text) && IsPlainText(find))
-        {
-            int index = text.IndexOf(find, start, binary ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase);
-            return (index, find.Length);
-        }
-        int shortest = Math.Max(1, (find.Length + 1) / 2);
-        for (int i = start; i < text.Length; i++)
-        {
-            for (int length = shortest; length <= Math.Min(text.Length - i, find.Length * 2); length++)
-            {
-                if (order.Compare(text.Substring(i, length), find) == 0)
-                    return (i, length);
-            }
-        }
-        return (-1, 0);
-    }
-
-    /// <summary>Text an untailored General order compares as plain case-insensitive text: printable ASCII with no
-    /// hyphen or apostrophe, which the order weighs apart, and no trailing space, which it ignores (held for both
-    /// versions by <c>PlainTextCollationTests</c>). A tailored order gives such letters weights of its own, so the
-    /// caller asks <see cref="JetTextComparer.IsUntailoredGeneral"/> first.</summary>
-    private static bool IsPlainText(string text) =>
-        text.All(c => c is >= ' ' and <= '~' and not ('-' or '\'')) && !text.EndsWith(' ');
 
     /// <summary>
     /// Access <c>String(count, character)</c>: the character repeated. A text gives its first character (an empty
@@ -896,8 +875,9 @@ internal sealed partial class ExpressionEvaluator(
 
     /// <summary>Access <c>InStrRev(string1, string2, [start=-1], [compare])</c>: the 1-based position of the last
     /// occurrence of string2 in string1 (0 if not found), searching within the first <c>start</c> characters
-    /// (the match must end at or before <c>start</c>; <c>start</c>=-1 means the whole string). Case-insensitive
-    /// unless compare=0 (binary). Semantics verified vs ACE, including its quirks: an empty needle returns the
+    /// (the match must end at or before <c>start</c>; <c>start</c>=-1 means the whole string). The text is searched
+    /// as <see cref="TextFold.Matches"/> searches it, under the compare argument's locale
+    /// (<see cref="SearchLocale"/>). Semantics verified vs ACE, including its quirks: an empty needle returns the
     /// effective start position; <c>start</c>=0 (or &lt;-1) → "Invalid procedure call", and one past the end of
     /// string1 gives 0; and — unlike <c>InStr</c> — a NULL string raises "Data type mismatch" rather than propagating
     /// NULL.</summary>
@@ -913,17 +893,21 @@ internal sealed partial class ExpressionEvaluator(
             return null;
         if (given == 0)
             throw new ArgumentException("Invalid procedure call: InStrRev() start must be -1 or a positive position.");
+        // Read before anything is answered: a compare argument that is not a comparison is an invalid procedure
+        // call even where the answer is 0 without searching (verified vs ACE). A Null one gives Null, where ACE
+        // raises "Data type mismatch".
+        if (SearchLocale(f.Arguments.Count > 3 ? Evaluate(f.Arguments[3]) : null, f.Arguments.Count <= 3,
+                TextFold.Search.InStrRev) is not { } locale)
+            return null;
         if (given > s1.Length)
             return 0;
-        if (BinaryCompare(f, 3) is not { } binary)
-            return null;
         int start = given > 0 ? given : s1.Length;
 
         if (s1.Length == 0) return 0;
         string window = s1[..start];                        // search within Left(string1, start)
         if (s2.Length == 0) return start;                   // empty needle → the effective start position
         int last = -1;
-        for ((int index, int _) = FindText(window, s2, 0, binary, Text); index >= 0; (index, _) = FindText(window, s2, index + 1, binary, Text))
+        foreach ((int index, int _) in TextFold.Matches(window, s2, locale, TextFold.Search.InStrRev))
             last = index;
         return last + 1;
     }
@@ -1100,7 +1084,9 @@ internal sealed partial class ExpressionEvaluator(
         int mode = InRange(AsLong(modeV), 0, 255);
         if (Optional(f, 2, 0, AsLong) is not { } locale)
             return null;
-        if (locale != 0 && !IsLocaleId(locale))
+        // A locale ID as InStr's compare argument takes one (verified vs ACE: 140, 1024, 1164 and 0x2000 are locales
+        // to StrConv too, though the runtime does not list them).
+        if (locale != 0 && !TextFold.IsLocale(locale))
             throw new ArgumentException($"Invalid procedure call: {locale} is not a locale.");
         if (sv is null)
             return null;
@@ -1626,11 +1612,13 @@ internal sealed partial class ExpressionEvaluator(
         if (characters.Length != translations.Length)
             throw new ArgumentException("Invalid procedure call: TRANSLATE's lists differ in length.");
 
+        int locale = TextFold.Locale(Text.Collation.Lcid, TextFold.Search.Replace, database: true);
         var result = new StringBuilder();
         foreach (Rune rune in ConcatText(text).EnumerateRunes())
         {
             string character = rune.ToString();
-            int at = Array.FindIndex(characters, c => Text.Equals(c, character));
+            int at = Array.FindIndex(characters,
+                c => TextFold.Matches(character, c, locale, TextFold.Search.Replace).FirstOrDefault((-1, 0)) == (0, character.Length));
             result.Append(at >= 0 ? translations[at] : character);
         }
         return result.ToString();
@@ -1740,16 +1728,20 @@ internal sealed partial class ExpressionEvaluator(
 
     /// <summary>Access INSTR([start,] string1, string2[, compare]) — the 1-based position of string2 in string1, 0 if
     /// it is not there. An empty string2 is found at start, wherever that is, unless string1 is empty; a start below 1
-    /// is an invalid procedure call.</summary>
+    /// is an invalid procedure call. The text is searched as <see cref="TextFold.Matches"/> searches it, under the
+    /// compare argument's locale (<see cref="TextFold.Locale(int, TextFold.Search)"/>) — the database's when there
+    /// is none.</summary>
     private int? Instr(FunctionCall f)
     {
         int argc = f.Arguments.Count;
-        // 2 args: (s1, s2); 3+: (start, s1, s2[, compare]).
-        if ((argc >= 3 ? CountArgument(f, 0, least: 1) : 1) is not { } start)
-            return null;
+        // 2 args: (s1, s2); 3+: (start, s1, s2[, compare]). A Null string gives Null before the start is checked
+        // (verified vs ACE: InStr(0, Null, 'a', 1) is Null).
         object? s1v = Evaluate(f.Arguments[argc >= 3 ? 1 : 0]);
         object? s2v = Evaluate(f.Arguments[argc >= 3 ? 2 : 1]);
-        if (s1v is null || s2v is null || BinaryCompare(f, 3) is not { } binary)
+        bool absent = argc < 4;
+        object? compare = absent ? null : Evaluate(f.Arguments[3]);
+        if (s1v is null || s2v is null || !absent && compare is null
+            || (argc >= 3 ? CountArgument(f, 0, least: 1) : 1) is not { } start)
             return null;
 
         // A byte[] argument (e.g. a 0xNN hex literal needle, or a binary haystack) coerces to a string one
@@ -1757,12 +1749,21 @@ internal sealed partial class ExpressionEvaluator(
         string s1 = ToJetString(s1v), s2 = ToJetString(s2v);
         if (s1.Length == 0) return 0;
         if (s2.Length == 0) return start;
+        // A compare argument that is not a comparison is an invalid procedure call only once there is something to
+        // search (verified vs ACE: InStr(1, '', 'a', 2) is 0, InStr(1, Null, 'a', 2) Null). A Null one has given Null
+        // above, as a Null argument does throughout; ACE raises "Data type mismatch" for it.
+        if (SearchLocale(compare, absent, TextFold.Search.InStr) is not { } locale)
+            return null;
         if (start > s1.Length) return 0;
-        return FindText(s1, s2, start - 1, binary, Text).Index + 1;
+        foreach ((int index, int _) in TextFold.Matches(s1, s2, locale, TextFold.Search.InStr))
+            if (index >= start - 1) return index + 1;
+        return 0;
     }
 
     /// <summary>Access REPLACE(string, find, replace[, start[, count[, compare]]]) — the text from start on, with
-    /// find replaced at most count times (all when count is -1). A start below 1 is an invalid procedure call.</summary>
+    /// find replaced at most count times (all when count is -1). A start below 1 is an invalid procedure call. The
+    /// text is searched as <see cref="TextFold.Matches"/> searches it for whole characters, under the compare
+    /// argument's locale (<see cref="SearchLocale"/>) — the database's when there is none.</summary>
     private string? Replace(FunctionCall f)
     {
         object? sv = Evaluate(f.Arguments[0]), findv = Evaluate(f.Arguments[1]), replv = Evaluate(f.Arguments[2]);
@@ -1776,7 +1777,8 @@ internal sealed partial class ExpressionEvaluator(
 
         if (CountArgument(f, 3, least: 1, absent: 1) is not { } start
             || CountArgument(f, 4, least: -1, absent: -1) is not { } count
-            || BinaryCompare(f, 5) is not { } binary)
+            || SearchLocale(f.Arguments.Count > 5 ? Evaluate(f.Arguments[5]) : null, f.Arguments.Count <= 5,
+                TextFold.Search.Replace) is not { } locale)
             return null;
 
         if (start > s.Length) return "";
@@ -1785,14 +1787,15 @@ internal sealed partial class ExpressionEvaluator(
 
         var sb = new StringBuilder();
         int pos = 0, replaced = 0;
-        while (true)
+        foreach ((int j, int length) in TextFold.Matches(s, find, locale, TextFold.Search.Replace))
         {
-            (int j, int length) = count >= 0 && replaced >= count ? (-1, 0) : FindText(s, find, pos, binary, Text);
-            if (j < 0) { sb.Append(s.AsSpan(pos)); break; }
+            if (count >= 0 && replaced >= count) break;
+            if (j < pos) continue;                          // overlaps the match just replaced
             sb.Append(s, pos, j - pos).Append(repl);
             pos = j + length;
             replaced++;
         }
+        sb.Append(s.AsSpan(pos));
         return sb.ToString();
     }
 

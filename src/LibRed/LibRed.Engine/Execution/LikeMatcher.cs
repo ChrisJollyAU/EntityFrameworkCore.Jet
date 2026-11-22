@@ -1,3 +1,5 @@
+using LibRed.Storage.Types;
+
 namespace LibRed.Engine.Execution;
 
 /// <summary>
@@ -25,7 +27,7 @@ namespace LibRed.Engine.Execution;
 /// variants, the titlecase digraphs and every letter Unicode added later. Four letters are spelt out: <c>ß</c> as
 /// <c>ss</c>, <c>æ</c> as <c>ae</c>, <c>œ</c> as <c>oe</c> and <c>þ</c> as <c>th</c>, capitals likewise — in the
 /// pattern, in a bracket list and in the value, so <c>'aßb' LIKE 'a[s]sb'</c> is True; <c>_</c> still takes the whole
-/// character. The table is measured (LikeFoldTableGeneratorTest) and embedded, so LIKE answers the same on every
+/// character. The table is <see cref="TextFold"/>'s: measured and embedded, so LIKE answers the same on every
 /// platform.</item>
 /// <item>None of it depends on the database's collation: the same pairs match in every one of the 405 non-CJK orders
 /// LibRed can create, Turkish included (verified vs ACE; the CJK orders are not yet screened). Width, kana, superscripts, hyphens and apostrophes, which the
@@ -43,59 +45,9 @@ namespace LibRed.Engine.Execution;
 /// </remarks>
 internal static class LikeMatcher
 {
-    /// <summary>What each character folds to, and the characters spelt out as several — ACE's own table.</summary>
-    private static readonly (char[] Fold, string?[] Expansions) Table = LoadTable();
-
-    /// <remarks>Laid out as the sort-key tables are: the two counts, then each section deflated on its own — the
-    /// case pairs as (character, what it folds to), the expansions as (character, letter count, letters). Both are
-    /// held as arrays indexed by character — the expansions only as far as the highest one — because every
-    /// character of every value tested is looked up in each.</remarks>
-    private static (char[] Fold, string?[] Expansions) LoadTable()
-    {
-        var fold = new char[char.MaxValue + 1];
-        for (int c = 0; c <= char.MaxValue; c++) fold[c] = (char)c;
-        var spelt = new Dictionary<char, string>();
-
-        using Stream stream = typeof(LikeMatcher).Assembly.GetManifestResourceStream("LibRed.Engine.Resources.LikeFold.bin")
-            ?? throw new InvalidOperationException("The LIKE fold table resource is missing from the assembly.");
-        var reader = new BinaryReader(stream);
-        int caseCount = reader.ReadInt32(), expansionCount = reader.ReadInt32();
-        var cases = new BinaryReader(new MemoryStream(Inflate(reader)));
-        var expansionStream = new BinaryReader(new MemoryStream(Inflate(reader)));
-
-        for (int i = 0; i < caseCount; i++)
-            fold[cases.ReadUInt16()] = (char)cases.ReadUInt16();
-        for (int i = 0; i < expansionCount; i++)
-        {
-            char c = (char)expansionStream.ReadUInt16();
-            var letters = new char[expansionStream.ReadByte()];
-            for (int k = 0; k < letters.Length; k++) letters[k] = (char)expansionStream.ReadUInt16();
-            spelt[c] = new string(letters);
-        }
-
-        var expansions = new string?[spelt.Count == 0 ? 0 : spelt.Keys.Max() + 1];
-        foreach ((char c, string letters) in spelt) expansions[c] = letters;
-        return (fold, expansions);
-
-        static byte[] Inflate(BinaryReader reader)
-        {
-            byte[] compressed = reader.ReadBytes(reader.ReadInt32());
-            var output = new MemoryStream();
-            using (var inflate = new System.IO.Compression.ZLibStream(new MemoryStream(compressed), System.IO.Compression.CompressionMode.Decompress))
-                inflate.CopyTo(output);
-            return output.ToArray();
-        }
-    }
-
-    /// <summary>The letters a character is spelt out as, already folded (ß as SS), or null for itself.</summary>
-    private static string? Expansion(char c) => c < Table.Expansions.Length ? Table.Expansions[c] : null;
-
-    /// <summary>A character folded by ACE's case table.</summary>
-    private static char FoldChar(char c) => Table.Fold[c];
-
     public static bool IsMatch(string value, string pattern)
     {
-        string text = Fold(value);
+        string text = TextFold.Fold(value, TextFold.Letters.All, out int[]? source);
         int[]? characterEnd = null;
 
         // reach[p] is whether the pattern so far can consume exactly the first p characters of the text.
@@ -119,7 +71,7 @@ internal static class LikeMatcher
             if (pattern[i] == '_')
             {
                 // One character of the value, however many it folds to (verified vs ACE: 'ß' LIKE '_' is True).
-                characterEnd ??= CharacterEnds(value, text.Length);
+                characterEnd ??= CharacterEnds(source, text.Length);
                 for (int p = first; p < text.Length; p++)
                     next[characterEnd[p]] |= reach[p];
                 i++;
@@ -148,7 +100,7 @@ internal static class LikeMatcher
                 int end = pattern.IndexOfAny(['%', '_', '['], i);
                 if (end < 0)
                     end = pattern.Length;
-                string run = Fold(pattern[i..end]);
+                string run = TextFold.Fold(pattern[i..end], TextFold.Letters.All, out _);
                 for (int p = first; p + run.Length <= text.Length; p++)
                 {
                     if (reach[p] && text.AsSpan(p).StartsWith(run, StringComparison.Ordinal))
@@ -161,53 +113,18 @@ internal static class LikeMatcher
         return reach[text.Length];
     }
 
-    /// <summary>For each position of the folded value, where the value's character it belongs to ends.</summary>
-    private static int[] CharacterEnds(string value, int foldedLength)
+    /// <summary>For each position of the folded value, where the value's character it belongs to ends — from the
+    /// characters <see cref="TextFold.Fold"/> says each position came from (null: one position per character).</summary>
+    private static int[] CharacterEnds(int[]? source, int foldedLength)
     {
         var ends = new int[foldedLength];
-        int p = 0;
-        foreach (char c in value)
-        {
-            int end = p + (Expansion(c)?.Length ?? 1);
-            for (; p < end; p++)
-                ends[p] = end;
-        }
+        for (int p = foldedLength - 1; p >= 0; p--)
+            ends[p] = source is not null && p + 1 < foldedLength && source[p + 1] == source[p] ? ends[p + 1] : p + 1;
         return ends;
     }
 
     private static bool Invalid(int first, string text) =>
         first < text.Length ? throw new ArgumentException("Invalid pattern string.") : false;
-
-    /// <summary>Text as the match compares it: expansions spelt out, every character folded. Folding keeps the
-    /// length, so positions in the folded text line up with one another.</summary>
-    private static string Fold(string text)
-    {
-        // Almost no text holds a character that is spelt out, and without one the folded text is the same length:
-        // written straight into the result, a table read per character.
-        bool spelt = false;
-        foreach (char c in text)
-        {
-            if (Expansion(c) is not null) { spelt = true; break; }
-        }
-        if (!spelt)
-        {
-            return string.Create(text.Length, text, static (span, source) =>
-            {
-                char[] fold = Table.Fold;
-                for (int i = 0; i < span.Length; i++) span[i] = fold[source[i]];
-            });
-        }
-
-        var folded = new System.Text.StringBuilder(text.Length);
-        foreach (char c in text)
-        {
-            if (Expansion(c) is { } expansion)
-                folded.Append(expansion);
-            else
-                folded.Append(FoldChar(c));
-        }
-        return folded.ToString();
-    }
 
     private sealed class BracketList(bool negated, List<string> members, List<(char Low, char High)> ranges)
     {
@@ -226,12 +143,12 @@ internal static class LikeMatcher
                 {
                     if (body[i] > body[i + 2])
                         return null;
-                    ranges.Add((FoldChar(body[i]), FoldChar(body[i + 2])));
+                    ranges.Add((TextFold.FoldChar(body[i]), TextFold.FoldChar(body[i + 2])));
                     i += 2;
                 }
                 else
                 {
-                    members.Add(Fold(body[i].ToString()));
+                    members.Add(TextFold.Fold(body[i].ToString(), TextFold.Letters.All, out _));
                 }
             }
             return new BracketList(negated, members, ranges);

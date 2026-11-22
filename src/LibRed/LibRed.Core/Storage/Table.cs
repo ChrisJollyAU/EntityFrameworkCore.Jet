@@ -10,16 +10,20 @@ namespace LibRed.Storage;
 /// </summary>
 public sealed class Table
 {
-    internal Table(PageChannel channel, TableDefinition definition, JetCatalog catalog)
+    // databaseLocale: the database's locale ID, from its collation — a calculated column's InStr compares under it
+    // (see RowInserter). Required, so a writer cannot leave it out by accident; null only for a system table.
+    internal Table(PageChannel channel, TableDefinition definition, JetCatalog catalog, int? databaseLocale)
     {
         Channel = channel;
         _catalog = catalog;
+        _databaseLocale = databaseLocale;
         Definition = definition;
         UsageMap = new UsageMap(channel, definition);
     }
 
     internal PageChannel Channel { get; }
     private readonly JetCatalog _catalog;
+    private readonly int? _databaseLocale;
     public TableDefinition Definition { get; }
     internal UsageMap UsageMap { get; }
 
@@ -195,7 +199,7 @@ public sealed class Table
     /// has taken its page).</param>
     public void Insert(object?[] values, object?[]? defaults = null, IReadOnlyList<int>? order = null,
         Action<object?[]>? validate = null, Action<object?[]>? reference = null) =>
-        Write(() => new RowInserter(Channel, Definition).Insert(values, updateIndexes: true, defaults, order, validate, reference));
+        Write(() => new RowInserter(Channel, Definition, _databaseLocale).Insert(values, updateIndexes: true, defaults, order, validate, reference));
 
     /// <summary>Every column but the calculated ones — what rewriting or deleting a row reads of it. A calculated
     /// result is never a key and never the caller's to change, and the rewrite carries it over or recomputes it
@@ -223,7 +227,7 @@ public sealed class Table
                     ? !oldBytes.AsSpan().SequenceEqual(newBytes) : !Equals(original[i], values[i]))
                     changed.Add(i);
 
-            new RowInserter(Channel, Definition).Update(id, values, changed,
+            new RowInserter(Channel, Definition, _databaseLocale).Update(id, values, changed,
                 _updateBuffer ??= new byte[Channel.Format.PageSize]);
             foreach (IndexDef index in Definition.RealIndexes
                 .Where(i => i.Columns.Any(c => changed.Contains(c.Column.Index))))
@@ -243,7 +247,7 @@ public sealed class Table
         new IndexTree(Channel, Definition).MoveEntry(index, oldValues, newValues, id);
         // An IGNORE NULL index the row was absent from never counted it, so has nothing to count out.
         if (!IndexTree.LeavesOut(index, oldValues))
-            new RowInserter(Channel, Definition).CountKeyMoved(index);
+            new RowInserter(Channel, Definition, _databaseLocale).CountKeyMoved(index);
     }
 
     /// <summary>Whether <paramref name="values"/>' key already exists in <paramref name="index"/> for a row
@@ -266,7 +270,7 @@ public sealed class Table
             {
                 if (values[complex.OwnerTable.RequireColumn(complex.ColumnName).Index] is not { } raw) continue;
                 int recordId = Convert.ToInt32(raw, System.Globalization.CultureInfo.InvariantCulture);
-                var flat = new Table(Channel, complex.FlatTable, _catalog);
+                var flat = new Table(Channel, complex.FlatTable, _catalog, _databaseLocale);
                 int linkColumn = complex.OwnerLink.Index;
                 foreach ((RowId flatId, _) in flat.RowsWithKey([linkColumn], [recordId], row =>
                     row[linkColumn] is { } link
@@ -275,7 +279,7 @@ public sealed class Table
             }
             foreach (IndexDef index in Definition.RealIndexes)
                 RemoveIndexEntry(index, values, id);
-            new RowInserter(Channel, Definition).Delete(id);
+            new RowInserter(Channel, Definition, _databaseLocale).Delete(id);
         });
     }
 
@@ -283,11 +287,11 @@ public sealed class Table
     /// <see cref="RowInserter.Truncate"/>. Rows are not visited, so nothing a row reaches is followed — a complex
     /// column's flat rows included, which ACE leaves too: the caller keeps to tables that no relationship names as
     /// its parent and that hold no CHECK constraint.</summary>
-    public void Truncate() => Write(() => new RowInserter(Channel, Definition).Truncate());
+    public void Truncate() => Write(() => new RowInserter(Channel, Definition, _databaseLocale).Truncate());
 
     /// <inheritdoc cref="RowInserter.CountKeysBeforeRefusal"/>
     public void CountKeysBeforeRefusal(IndexDef refusing, object?[] values) =>
-        new RowInserter(Channel, Definition).CountKeysBeforeRefusal(refusing, values);
+        new RowInserter(Channel, Definition, _databaseLocale).CountKeysBeforeRefusal(refusing, values);
 
     private void Write(Action action)
     {

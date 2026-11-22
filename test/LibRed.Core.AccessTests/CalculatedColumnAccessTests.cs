@@ -1288,6 +1288,115 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
         finally { TemporaryDatabase.Delete(path); }
     }
 
+    // InStr in a calculated column searches as it does in a query: by ACE's own case table rather than the
+    // collation, spelling out the letters its locale ID does — the DATABASE's when the compare argument is left
+    // out, which is why each collation gets its own file — and with a Null compare argument a type mismatch.
+    // [Qty] is the compare argument of the last column, so each row asks under a different one.
+    private static readonly (int Id, int? Qty, string? A)[] SearchRows =
+    [
+        (1, 0, "ß"), (2, 1, "aßb"), (3, 1033, "þ"), (4, 1041, "ßß"), (5, 3079, "æß"), (6, 1055, "þß"),
+        (7, 2, "s"), (8, 2, ""), (9, null, "s"), (10, null, null), (11, 1, null), (12, 1, "ab "), (13, 1, "Æ"),
+    ];
+
+    private static readonly (string Name, string Expression)[] SearchColumns =
+    [
+        ("Sss", "InStr(1,[A],\"ss\")"), ("Ss", "InStr(1,[A],\"s\")"), ("Sth", "InStr(1,[A],\"TH\")"),
+        ("Sae", "InStr(1,[A],\"e\")"), ("Ssp", "InStr(1,[A],\"ab  \")"), ("S2", "InStr(2,[A],\"s\")"),
+        ("Sss1", "InStr(1,[A],\"ss\",1)"), ("Sss0", "InStr(1,[A],\"ss\",0)"), ("Sss1041", "InStr(1,[A],\"ss\",1041)"),
+        ("Ssz3079", "InStr(1,[A],\"sz\",3079)"), ("Slit", "InStr(1,\"ß\",\"ss\")"), ("SQty", "InStr(1,[A],\"s\",[Qty])"),
+        ("SQtyEmpty", "InStr(1,[A],\"\",[Qty])"), ("SStartQty", "InStr([Qty],[A],\"s\",[Qty])"),
+    ];
+
+    [Theory]
+    [InlineData(CollatingOrder.General, 0)]
+    [InlineData(CollatingOrder.Japanese, 0)]
+    [InlineData(CollatingOrder.NorwegianDanish, 0)]
+    [InlineData(CollatingOrder.German, 1)]                // German phone book
+    [InlineData(CollatingOrder.Hungarian, 1)]             // Hungarian technical: 0x1040E
+    [InlineData(CollatingOrder.Georgian, 1)]              // Georgian modern: 0x10437
+    [InlineData(CollatingOrder.GermanLuxembourg, 0)]      // spells nothing out in InStr
+    [InlineData(CollatingOrder.ArabicNeutral, 0)]         // locale ID 1: the user's locale
+    [InlineData(CollatingOrder.BulgarianNeutral, 0)]      // locale ID 2: InStr without a compare argument is refused
+    public void InStr_searches_as_ace_searches_it(CollatingOrder order, byte sortId)
+    {
+        object? engine = CreateDbEngine();
+        Assert.SkipWhen(engine is null, "DAO is unavailable in this process; it authors the fixture.");
+
+        string path = TemporaryDatabase.CreatePath("calc-instr-");
+        try
+        {
+            JetDatabase.Create(path, collation: new Collation(order, 0, sortId));
+            object workspace = Invoke(engine!, "CreateWorkspace", "", "admin", "", UseJet)!;
+            object database = Invoke(workspace, "OpenDatabase", path)!;
+            foreach ((string name, string expression) in SearchColumns)
+                AppendCalculatedTable(database, name, DbLong, 0, expression);
+            Invoke(database, "Close");
+
+            var mismatches = new List<string>();
+            int unreadable = 0;
+            foreach ((string name, string expression) in SearchColumns)
+            {
+                string table = "T_" + name;
+                using (var connection = AceTestDatabase.Open(path))
+                    foreach (var row in SearchRows)
+                    {
+                        using var insert = connection.CreateCommand();
+                        insert.CommandText = $"INSERT INTO {table} (Id, Qty, A) VALUES ({row.Id}, {Literal(row.Qty)}, {Literal(row.A)})";
+                        insert.ExecuteNonQuery();
+                    }
+
+                var refused = new HashSet<int>();
+                using (var db = JetDatabase.Open(path, readOnly: false))
+                {
+                    Table t = db.OpenTable(table);
+                    foreach (var row in SearchRows)
+                    {
+                        var values = new object?[t.Definition.Columns.Count];
+                        values[t.Definition.FindColumn("Id")!.Index] = row.Id + 100;
+                        values[t.Definition.FindColumn("Qty")!.Index] = row.Qty;
+                        values[t.Definition.FindColumn("A")!.Index] = row.A;
+                        // Where ACE caches an error, LibRed refuses the row (see the matrix test).
+                        try { t.Insert(values); }
+                        catch (Exception e) when (e is ArgumentException or InvalidOperationException) { refused.Add(row.Id); }
+                    }
+                }
+
+                using (var connection = AceTestDatabase.Open(path))
+                    foreach (var row in SearchRows)
+                    {
+                        string ace = Read(connection, row.Id), libred = Read(connection, row.Id + 100);
+                        output.WriteLine($"  {name,-9} row {row.Id,2}  ACE {ace,-12} LibRed {libred}");
+                        if (ace == "UNREADABLE")
+                        {
+                            unreadable++;
+                            if (!refused.Contains(row.Id)) mismatches.Add($"{expression} row {row.Id}: ACE cached an error, LibRed wrote {libred}");
+                        }
+                        else if (ace != libred)
+                            mismatches.Add($"{expression} row {row.Id}: ACE {ace}, LibRed {libred}");
+
+                        string Read(System.Data.Common.DbConnection c, int id)
+                        {
+                            using var select = c.CreateCommand();
+                            select.CommandText = $"SELECT [{name}] FROM [{table}] WHERE Id = {id}";
+                            try
+                            {
+                                using var reader = select.ExecuteReader();
+                                return !reader.Read() ? "(missing)" : reader.IsDBNull(0) ? "(null)" : Describe(reader.GetValue(0));
+                            }
+                            catch (System.Data.Common.DbException) { return "UNREADABLE"; }
+                        }
+                    }
+            }
+
+            // Each row ACE cannot read is one LibRed refused, and every other row reads the same (both checked above,
+            // row by row). The instrument is measuring: some rows — a Null or a non-comparison compare argument —
+            // cache an error in every database.
+            Assert.Empty(mismatches);
+            Assert.True(unreadable > 0, "ACE cached no error at all — the instrument is not measuring");
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
     /// <summary>An Access SQL literal for a matrix value, so ACE is seeded with exactly what LibRed is.</summary>
     private static string Literal(object? value) => value switch
     {

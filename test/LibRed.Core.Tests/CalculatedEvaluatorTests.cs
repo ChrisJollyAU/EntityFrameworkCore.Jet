@@ -18,7 +18,8 @@ public class CalculatedEvaluatorTests
         return CalculatedEvaluator.Evaluate(
             CalculatedExpression.Parse(expression),
             name => values.TryGetValue(name, out object? v) ? v
-                : throw new CalculatedExpressionException($"No column '{name}'."));
+                : throw new CalculatedExpressionException($"No column '{name}'."),
+            databaseLocale: Collation.GeneralLegacy.Lcid);
     }
 
     [Theory]
@@ -166,6 +167,34 @@ public class CalculatedEvaluatorTests
         Assert.Equal(0.0, Eval("InStr(1, \"hello\", \"H\", 0)"));
         Assert.Equal(1.0, Eval("InStr(1, \"hello\", \"H\", 1)"));
         Assert.Equal(0.0, Eval("InStr(1, \"hello\", \"a\")"));
+    }
+
+    // Searched as a query's InStr is (verified vs ACE): not in the collation, with the letters the locale ID spells
+    // out — the database's, General here, when the compare argument is left out.
+    [Theory]
+    [InlineData("InStr(1, \"ab \", \"ab  \")", 0.0)]
+    [InlineData("InStr(1, \"co-op\", \"coop\")", 0.0)]
+    [InlineData("InStr(1, \"ß\", \"ss\")", 1.0)]
+    [InlineData("InStr(1, \"aßb\", \"sb\")", 2.0)]
+    [InlineData("InStr(1, \"ß\", \"ss\", 0)", 0.0)]
+    [InlineData("InStr(1, \"ß\", \"ss\", 1041)", 0.0)]
+    [InlineData("InStr(1, \"ß\", \"sz\", 3079)", 1.0)]
+    [InlineData("InStr(1, \"ß\", \"ss\", 1034)", 1.0)]
+    [InlineData("InStr(1, \"ß\", \"ss\", 4103)", 0.0)]
+    [InlineData("InStr(1, \"ß\", \"ss\", 1024)", 0.0)]
+    [InlineData("InStr(1, \"\", \"s\", 2)", 0.0)]
+    [InlineData("InStr(1, \"s\", \"\", 2)", 1.0)]
+    public void InStr_searches_as_ace_searches_it(string expression, double expected)
+        => Assert.Equal(expected, Eval(expression));
+
+    [Fact]
+    public void InStr_refuses_a_compare_argument_that_is_not_one()
+    {
+        Assert.Throws<ArgumentException>(() => Eval("InStr(1, \"s\", \"s\", 2)"));
+        Assert.Throws<ArgumentException>(() => Eval("InStr(5, \"s\", \"s\", 2)"));
+        // A Null one is a type mismatch, whatever the strings are.
+        Assert.Throws<CalculatedExpressionException>(() => Eval("InStr(1, \"s\", \"s\", [Q])", ("Q", null)));
+        Assert.Throws<CalculatedExpressionException>(() => Eval("InStr(1, [A], \"s\", [Q])", ("A", null), ("Q", null)));
     }
 
     [Theory]

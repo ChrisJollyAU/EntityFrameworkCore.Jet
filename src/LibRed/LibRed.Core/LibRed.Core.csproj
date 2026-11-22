@@ -44,6 +44,9 @@
     <!-- The Chinese, Japanese and Korean sort orders, one per order: the characters where each departs from
          General of its version. Measured by CjkSortOrderGeneratorTest (LIBRED_GENERATE_CJK=1). -->
     <EmbeddedResource Include="Resources\Cjk\*.bin" LogicalName="LibRed.Resources.Cjk.%(Filename).bin" />
+    <!-- ACE's case pairs and spelt-out letters for LIKE, InStr, InStrRev and Replace, measured
+         (LikeFoldTableGeneratorTest); read by TextFold. -->
+    <EmbeddedResource Include="Resources\LikeFold.bin" LogicalName="LibRed.Resources.LikeFold.bin" />
   </ItemGroup>
 
 </Project>

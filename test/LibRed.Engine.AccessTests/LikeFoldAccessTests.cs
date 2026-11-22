@@ -15,8 +15,8 @@ public class LikeFoldAccessTests
     public void Every_candidate_pair_matches_as_ace_matches_it()
     {
         var pairs = LikeCandidates.Pairs;
-        HashSet<int> ace = LikeCandidates.AceMatches(Collation.GeneralLegacy);
-        HashSet<int> libred = LikeCandidates.LibRedMatches(Collation.GeneralLegacy);
+        HashSet<int> ace = LikeCandidates.AceMatches(Collation.GeneralLegacy, LikeCandidates.Like)[0];
+        HashSet<int> libred = LikeCandidates.LibRedMatches(Collation.GeneralLegacy, LikeCandidates.Like)[0];
 
         string Show(int i) => $"'{pairs[i].Value}' LIKE '{pairs[i].Pattern}'";
         var missed = ace.Except(libred).Take(20).Select(Show).ToList();

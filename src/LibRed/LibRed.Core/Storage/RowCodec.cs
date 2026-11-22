@@ -32,8 +32,12 @@ namespace LibRed.Storage;
 public sealed class RowCodec(IReadOnlyList<ColumnDef> columns, JetFormatBase format,
     int? variableColumnCount = null,
     Func<ColumnDef, byte[], byte[]>? spillCalculated = null, int? columnIdHighWater = null,
-    LongValueStore? longValues = null, bool[]? decode = null)
+    LongValueStore? longValues = null, bool[]? decode = null, int? databaseLocale = null)
 {
+    // The database's locale ID, which a calculated column's InStr compares under when it names none. Null for a
+    // standalone encode, which has no database and so must refuse such an expression.
+    private readonly int? _databaseLocale = databaseLocale;
+
     private readonly IReadOnlyList<ColumnDef> _columns = columns;
 
     // The row's field sizes, the long-value descriptor sizes and the inline limit all come from here.
@@ -159,7 +163,7 @@ public sealed class RowCodec(IReadOnlyList<ColumnDef> columns, JetFormatBase for
         if (preservedCalculated is not null && preservedCalculated.TryGetValue(column.Index, out byte[]? kept))
             return kept;
 
-        byte[] envelope = CalculatedValue.Encode(column, CalculatedValue.Evaluate(column, _columns, values), _format);
+        byte[] envelope = CalculatedValue.Encode(column, CalculatedValue.Evaluate(column, _columns, values, _databaseLocale), _format);
         if (!column.HasLongValueMap) return envelope;
 
         // A memo-backed result inlines while it fits and spills to an LVAL page once it does not — the same

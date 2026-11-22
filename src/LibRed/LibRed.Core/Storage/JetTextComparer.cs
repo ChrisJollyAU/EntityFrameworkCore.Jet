@@ -40,12 +40,6 @@ public sealed class JetTextComparer : IEqualityComparer<string>
     /// <summary>The collation this compares in.</summary>
     public Collation Collation { get; }
 
-    /// <summary>Whether this is a General order with nothing tailored — no letter of its own and no reversed
-    /// accents — so plain ASCII compares as it does in General (see <c>PlainTextCollationTests</c>). A locale
-    /// that tailors nothing counts: its keys are General's.</summary>
-    public bool IsUntailoredGeneral =>
-        _encodable && _tailoring is null or { Entries.Count: 0, ReverseDiacritics: false };
-
     // Both sides are encoded into this thread's buffers: a comparison is made per row, or per pair in a sort,
     // and fresh lists each time were most of what a text GROUP BY allocated.
     [ThreadStatic] private static List<byte>? t_left;

@@ -217,7 +217,7 @@ public class ColumnRetypeParityAccessTests
         lines.AddRange(t.Columns.Select(c => $"{c.Name} {c.Type} id {c.ColumnId} {Convert.ToHexString(c.RawDescriptor ?? [])}"));
         lines.AddRange(tdef.LongValueOwnedMaps.Select(m => $"maps {m.Key}: {m.Value} {tdef.LongValueFreeMaps[m.Key]}"));
         var table = db.OpenTable(tableName);
-        var reader = new RowInserter(table.Channel, t);
+        var reader = new RowInserter(table.Channel, t, databaseLocale: null);
         foreach ((RowId id, object?[] values) in table.Rows().WithIds())
             lines.Add($"{id.Page}:{id.Row} {Convert.ToHexString(reader.ReadRow(id))} {string.Join("|", values.Select(v => v?.ToString() ?? "null"))}");
         return string.Join("\n", lines);

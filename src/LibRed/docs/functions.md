@@ -132,6 +132,34 @@ procedure call, and a result past a Double an overflow.
   argument is a **set** of characters, not a substring — every leading (or trailing) character that appears
   anywhere in it is removed, stopping at the first that does not. An empty set strips nothing; either argument
   Null gives Null. ACE takes only the one argument, and `Trim` takes only the one here too.
+- **`InStr`, `InStrRev` and `Replace` do not search in the database's collation** (verified vs ACE). Case folds by
+  the table `LIKE` uses — ACE's own, narrower than any runtime's — and everything a collation folds or ignores
+  counts: trailing spaces, hyphens, apostrophes, accents, width, kana and ignorable characters, so
+  `InStr('ab ', 'ab  ')` and `InStr('co-op', 'coop')` are 0.
+  - The compare argument is a **locale ID**: 0 is a binary search, 1 the user's locale and anything else the ID
+    itself. `-1` is an invalid procedure call. `2`, the documented database comparison, is one too for `InStr`;
+    `InStrRev` and `Replace` take it as the locale ID it also is, and take 1024 as the user's locale. `InStr`
+    refuses an argument only once there is something to search: `InStr(1, '', 'a', 2)` is 0. A Null argument gives
+    Null, where ACE raises a type mismatch.
+  - With no compare argument the search is under the **database's** locale ID, its sort ID included, read as the
+    argument would be: a database whose ID is 1 searches under the user's locale, and in one whose ID is 2
+    `InStr` is an invalid procedure call.
+  - The locale ID decides which letters are **spelt out**: `ß` as `ss`, `æ` as `ae`, `œ` as `oe`, `þ` as `th`,
+    capitals likewise. All of them for 1031, 1033, 1034, 1035, 1036, 1040, 1043, 1046, 1053, 2055, 2057, 2058,
+    2060, 2064, 2067, 2070, 3081, 3082, 3084, 4105, 4108 and 5129 — and, in `InStrRev` and `Replace` only, 4103
+    and 5127; all for 3079 (Austrian German), with `ß` as `sz`; all but `þ` for 1055 (Turkish); `ß` and `œ` for
+    1030, 1039 and 1044 (Danish, Icelandic, Norwegian Bokmål); `ß` alone for 1029, 1038, 1045 and 1051 (Czech,
+    Hungarian, Polish, Slovak); and none for any other — the neutral IDs, and an alternate sort of a listed one
+    such as German phone book (0x10407), included.
+  - `InStr` and `InStrRev` match letter by letter, inside a spelt-out letter too, and answer with the character
+    the match begins in: `InStr('ß', 's')` is 1 and `InStr('aßb', 'sb')` 2. `Replace` takes whole characters
+    only: `'ss'` replaces `ß` and `'s'` does not.
+  - A number is a locale ID when the runtime knows it as one, or when it is one of those Windows takes besides
+    (measured over -2 to 65535 and sort IDs 1 to 15 of every language ID ACE accepts, for each of the three
+    functions): 1024, 2048, 3072, 4096, 0x2000–0x4C00 in steps of 0x400, 0x4C09, 140, 1127, 1137, 1142, 1164 and
+    2305. `StrConv`'s locale argument takes the same IDs (verified vs ACE for each of those).
+  - The user's locale (compare 1, and 1024 to `InStrRev` and `Replace`) is, in ACE, the user's default locale.
+    LibRed takes it on every platform as .NET's current culture.
 - `Asc` and `Chr` work in the system ANSI code page (`Chr` takes 0–255).
 - A value that is not text is read as `CStr` writes it.
 
@@ -289,8 +317,9 @@ Two standard predicates, operators rather than functions, both never Null (ACE r
   is an empty one. A separator and at least two values.
 - **`TRANSLATE(text, characters, translations)`**, SQL Server's — each character of the text that is one of
   `characters` becomes the one at the same place in `translations`, once: `TRANSLATE('abc', 'ab', 'bc')` is `'bcc'`.
-  It is what as many `Replace` calls would do, so a character matches as `Replace` matches text, in the database sort
-  order. A surrogate pair is one character. Any argument Null gives Null; `characters` and `translations` must have
+  A character matches one of `characters` as `Replace` with no compare argument matches a whole character, one
+  character at a time — so, unlike `Replace`, two characters of the text never match one spelt-out letter:
+  `TRANSLATE('ss', 'ß', 'x')` is `'ss'`. A surrogate pair is one character. Any argument Null gives Null; `characters` and `translations` must have
   as many characters.
 
 ### Date and time

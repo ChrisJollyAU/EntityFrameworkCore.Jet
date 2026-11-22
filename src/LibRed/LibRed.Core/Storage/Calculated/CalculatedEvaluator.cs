@@ -20,22 +20,24 @@ namespace LibRed.Storage.Calculated;
 /// </remarks>
 internal static class CalculatedEvaluator
 {
-    /// <summary>Evaluates <paramref name="node"/>; <paramref name="value"/> resolves a column by name.</summary>
-    public static object? Evaluate(CalcNode node, Func<string, object?> value) => node switch
+    /// <summary>Evaluates <paramref name="node"/>; <paramref name="value"/> resolves a column by name, and
+    /// <paramref name="databaseLocale"/> is the database's locale ID, which an InStr that names no comparison
+    /// compares under; without one such an expression is refused.</summary>
+    public static object? Evaluate(CalcNode node, Func<string, object?> value, int? databaseLocale) => node switch
     {
         CalcLiteral l => l.Value,
         CalcColumn c => value(c.Name),
-        CalcUnary u => Unary(u, value),
-        CalcBinary b => Binary(b, value),
-        CalcIsNull i => Evaluate(i.Operand, value) is null != i.Negated,
-        CalcIn i => In(i, value),
-        CalcCall f => Call(f, value),
+        CalcUnary u => Unary(u, value, databaseLocale),
+        CalcBinary b => Binary(b, value, databaseLocale),
+        CalcIsNull i => Evaluate(i.Operand, value, databaseLocale) is null != i.Negated,
+        CalcIn i => In(i, value, databaseLocale),
+        CalcCall f => Call(f, value, databaseLocale),
         _ => throw new CalculatedExpressionException($"Unsupported expression node {node.GetType().Name}."),
     };
 
-    private static object? Unary(CalcUnary node, Func<string, object?> value)
+    private static object? Unary(CalcUnary node, Func<string, object?> value, int? databaseLocale)
     {
-        object? operand = Evaluate(node.Operand, value);
+        object? operand = Evaluate(node.Operand, value, databaseLocale);
         if (operand is null) return null;
         return node.Operator switch
         {
@@ -45,10 +47,10 @@ internal static class CalculatedEvaluator
         };
     }
 
-    private static object? Binary(CalcBinary node, Func<string, object?> value)
+    private static object? Binary(CalcBinary node, Func<string, object?> value, int? databaseLocale)
     {
-        object? left = Evaluate(node.Left, value);
-        object? right = Evaluate(node.Right, value);
+        object? left = Evaluate(node.Left, value, databaseLocale);
+        object? right = Evaluate(node.Right, value, databaseLocale);
 
         // '&' is the one operator that does NOT propagate Null: it concatenates it as "".
         if (node.Operator == "&") return ToText(left) + ToText(right);
@@ -99,19 +101,19 @@ internal static class CalculatedEvaluator
         }
     }
 
-    private static bool? In(CalcIn node, Func<string, object?> value)
+    private static bool? In(CalcIn node, Func<string, object?> value, int? databaseLocale)
     {
-        object? operand = Evaluate(node.Operand, value);
+        object? operand = Evaluate(node.Operand, value, databaseLocale);
         if (operand is null) return null;
         foreach (CalcNode candidate in node.Values)
         {
-            object? other = Evaluate(candidate, value);
+            object? other = Evaluate(candidate, value, databaseLocale);
             if (other is not null && Compare(operand, other) == 0) return true;
         }
         return false;
     }
 
-    private static object? Call(CalcCall node, Func<string, object?> value)
+    private static object? Call(CalcCall node, Func<string, object?> value, int? databaseLocale)
     {
         string name = node.Name;
 
@@ -137,23 +139,23 @@ internal static class CalculatedEvaluator
                     if (node.Arguments.Count != 3)
                         throw new CalculatedExpressionException(
                             $"{name} takes 3 arguments, not {node.Arguments.Count}.");
-                    object? condition = Evaluate(node.Arguments[0], value);
-                    return Evaluate(node.Arguments[condition is not null && IifCondition(condition) ? 1 : 2], value);
+                    object? condition = Evaluate(node.Arguments[0], value, databaseLocale);
+                    return Evaluate(node.Arguments[condition is not null && IifCondition(condition) ? 1 : 2], value, databaseLocale);
                 }
             case "CHOOSE":
                 {
                     if (node.Arguments.Count < 2)
                         throw new CalculatedExpressionException($"{name} needs at least two arguments.");
-                    object? indexValue = Evaluate(node.Arguments[0], value);
+                    object? indexValue = Evaluate(node.Arguments[0], value, databaseLocale);
                     if (indexValue is null)
                         throw new InvalidOperationException("Data type mismatch in criteria expression: Choose() index is null.");
                     double index = Math.Truncate(ToNumber(indexValue));
-                    object?[] choices = node.Arguments.Skip(1).Select(a => Evaluate(a, value)).ToArray();
+                    object?[] choices = node.Arguments.Skip(1).Select(a => Evaluate(a, value, databaseLocale)).ToArray();
                     return index < 1 || index > choices.Length ? null : choices[(int)index - 1];
                 }
         }
 
-        object?[] args = [.. node.Arguments.Select(a => Evaluate(a, value))];
+        object?[] args = [.. node.Arguments.Select(a => Evaluate(a, value, databaseLocale))];
 
         switch (name.ToUpperInvariant())
         {
@@ -177,6 +179,13 @@ internal static class CalculatedEvaluator
             throw new CalculatedExpressionException(
                 "CDbl cannot convert Null in a calculated column. Give the column a value, or guard the "
                 + "expression, e.g. IIf(IsNull([x]), 0, CDbl([x])).");
+
+        // InStr's compare argument does not propagate Null either: ACE caches an error for it, whatever the strings
+        // are — Null too — which its own reader then refuses. As with CDbl, LibRed refuses the write (where a query's
+        // InStr, which stores nothing, gives Null).
+        if (args.Length == 4 && args[3] is null && name.Equals("InStr", StringComparison.OrdinalIgnoreCase))
+            throw new CalculatedExpressionException(
+                "InStr's compare argument cannot be Null in a calculated column: ACE caches an error for it.");
 
         // Everything else propagates Null through any argument.
         if (args.Any(a => a is null)) return null;
@@ -214,7 +223,7 @@ internal static class CalculatedEvaluator
             // or four but not two. A wrong count is ACE's "Syntax error in expression", NOT its policy
             // refusal — measured, and the reverse of what an unknown function name gets.
             "MID" => Mid(args, name),
-            "INSTR" => InStr(args, name),
+            "INSTR" => InStr(args, name, databaseLocale),
 
             "YEAR" => (double)ToDate(Single(name, args)).Year,
             "MONTH" => (double)ToDate(Single(name, args)).Month,
@@ -433,40 +442,32 @@ internal static class CalculatedEvaluator
     /// error, <c>InStr(1,[A],"a")</c> and <c>InStr(1,[A],"a",0)</c> are both accepted and both populate. With
     /// <c>compare</c> omitted the match is case-<b>insensitive</b>: <c>InStr(1,"hello","H")</c> is 1 while an
     /// explicit <c>,0</c> gives 0. That is Access's <c>Option Compare Database</c> default rather than VBA's
-    /// binary one, so defaulting to 0 the way VBA does would silently miss matches.</summary>
-    private static double InStr(object?[] args, string name)
+    /// binary one, so defaulting to 0 the way VBA does would silently miss matches. The text is searched as
+    /// <see cref="Types.TextFold.Matches"/> searches it, under the compare argument's locale
+    /// (<see cref="Types.TextFold.Locale(int, Types.TextFold.Search)"/>) — the database's
+    /// (<paramref name="databaseLocale"/>) when there is none.</summary>
+    private static double InStr(object?[] args, string name, int? databaseLocale)
     {
         if (args.Length is not (3 or 4))
             throw new CalculatedExpressionException(
                 $"{name} takes three or four arguments in a calculated column; the two-argument form VBA "
                 + "allows is a syntax error here.");
         int start = Count(args[0]!, least: 1);
-        bool binary = args.Length > 3 && AsLong(args[3]!) switch
-        {
-            0 => true,
-            1 => false,
-            var mode when mode > 2 && IsLocaleId(mode) => false,
-            var mode => throw new ArgumentException($"Invalid procedure call: {mode} is not a comparison."),
-        };
         string s1 = args[1] is byte[] b1 ? new(Array.ConvertAll(b1, b => (char)b)) : ToText(args[1]);
         string s2 = args[2] is byte[] b2 ? new(Array.ConvertAll(b2, b => (char)b)) : ToText(args[2]);
         if (s1.Length == 0) return 0;
         if (s2.Length == 0) return start;
+        // A compare argument that is not a comparison is an invalid procedure call only once there is something
+        // to search.
+        int locale = args.Length <= 3
+            ? Types.TextFold.Locale(databaseLocale ?? throw new CalculatedExpressionException(
+                $"{name} without a compare argument compares under the database's locale, and this row is being "
+                + "encoded outside a database."), Types.TextFold.Search.InStr, database: true)
+            : Types.TextFold.Locale(AsLong(args[3]!), Types.TextFold.Search.InStr);
         if (start > s1.Length) return 0;
-        int index = s1.IndexOf(s2, start - 1, binary ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase);
-        return index + 1;
-    }
-
-    private static bool IsLocaleId(int lcid)
-    {
-        try
-        {
-            return lcid > 0 && CultureInfo.GetCultureInfo(lcid).LCID == lcid;
-        }
-        catch (CultureNotFoundException)
-        {
-            return false;
-        }
+        foreach ((int index, int _) in Types.TextFold.Matches(s1, s2, locale, Types.TextFold.Search.InStr))
+            if (index >= start - 1) return index + 1;
+        return 0;
     }
 
     private static DateTime DateSerial(object?[] args, string name)

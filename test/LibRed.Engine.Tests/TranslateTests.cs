@@ -32,7 +32,7 @@ public class TranslateTests(TranslateTests.Database database)
     [Theory]
     [InlineData("TRANSLATE('abc', 'x', 'y')", "abc")]
     [InlineData("TRANSLATE('abc', '', '')", "abc")]
-    [InlineData("TRANSLATE('aA', 'a', 'x')", "xx")]      // matched as Replace matches, in the database sort order
+    [InlineData("TRANSLATE('aA', 'a', 'x')", "xx")]      // matched as Replace matches a whole character
     public void Characters_match_as_replace_matches_them(string expression, string expected) =>
         Assert.Equal(expected, Scalar(expression));
 

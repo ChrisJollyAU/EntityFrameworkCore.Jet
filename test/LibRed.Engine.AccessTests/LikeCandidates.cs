@@ -52,8 +52,12 @@ internal static class LikeCandidates
                 if (seen.Add(p)) yield return p;
     }
 
-    /// <summary>Which pairs ACE says match, by index: all loaded into one table and asked in one query.</summary>
-    public static HashSet<int> AceMatches(Collation collation)
+    /// <summary>The <c>LIKE</c> match itself, as a predicate over a pair's value <c>V</c> and pattern <c>P</c>.</summary>
+    public const string Like = "V LIKE P";
+
+    /// <summary>Which pairs ACE says match each of <paramref name="predicates"/>, by index: all loaded into one
+    /// table and each predicate asked in one query.</summary>
+    public static HashSet<int>[] AceMatches(Collation collation, params string[] predicates)
     {
         string path = TemporaryDatabase.CreatePath("like-pairs-", ".accdb");
         try
@@ -83,18 +87,21 @@ internal static class LikeCandidates
                 transaction.Commit();
             }
 
-            using OleDbCommand query = ace.CreateCommand();
-            query.CommandText = "SELECT Id FROM Pairs WHERE V LIKE P";
-            var matched = new HashSet<int>();
-            using OleDbDataReader reader = query.ExecuteReader();
-            while (reader.Read()) matched.Add(reader.GetInt32(0));
-            return matched;
+            return [.. predicates.Select(predicate =>
+            {
+                using OleDbCommand query = ace.CreateCommand();
+                query.CommandText = "SELECT Id FROM Pairs WHERE " + predicate;
+                var matched = new HashSet<int>();
+                using OleDbDataReader reader = query.ExecuteReader();
+                while (reader.Read()) matched.Add(reader.GetInt32(0));
+                return matched;
+            })];
         }
         finally { TemporaryDatabase.Delete(path); }
     }
 
     /// <summary>Which pairs LibRed says match, asked the same way.</summary>
-    public static HashSet<int> LibRedMatches(Collation collation)
+    public static HashSet<int>[] LibRedMatches(Collation collation, params string[] predicates)
     {
         string path = TemporaryDatabase.CreatePath("like-pairs-libred-", ".accdb");
         try
@@ -108,7 +115,8 @@ internal static class LikeCandidates
                 engine.ExecuteNonQuery("INSERT INTO Pairs (Id, V, P) VALUES (@i, @v, @p)",
                     new Dictionary<string, object?> { ["@i"] = i, ["@v"] = Pairs[i].Value, ["@p"] = Pairs[i].Pattern });
             engine.ExecuteNonQuery("COMMIT");
-            return [.. engine.ExecuteQuery("SELECT Id FROM Pairs WHERE V LIKE P").Rows.Select(r => Convert.ToInt32(r[0]))];
+            return [.. predicates.Select(predicate => (HashSet<int>)
+                [.. engine.ExecuteQuery("SELECT Id FROM Pairs WHERE " + predicate).Rows.Select(r => Convert.ToInt32(r[0]))])];
         }
         finally { TemporaryDatabase.Delete(path); }
     }

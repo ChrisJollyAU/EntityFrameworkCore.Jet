@@ -84,7 +84,7 @@ public class LikeCollationProbeTests(ITestOutputHelper output)
         foreach (Collation collation in collations)
         {
             HashSet<int> matched;
-            try { matched = LikeCandidates.AceMatches(collation); }
+            try { matched = LikeCandidates.AceMatches(collation, LikeCandidates.Like)[0]; }
             catch (Exception e) when (e is OleDbException or InvalidOperationException or NotSupportedException)
             {
                 File.AppendAllText(reportPath, $"{collation.Order} v{collation.Version} sort {collation.SortId}: not created ({e.Message}){Environment.NewLine}");

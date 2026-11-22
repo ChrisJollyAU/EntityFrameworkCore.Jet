@@ -13,11 +13,16 @@ namespace LibRed.Storage;
 /// stores any long values, maintains every index B-tree, and enforces unique keys. The page's slot
 /// directory grows forward while row data is packed from the page end backward (see <see cref="DataPage"/>).
 /// </summary>
-internal sealed class RowInserter(PageChannel channel, TableDefinition table)
+internal sealed class RowInserter(PageChannel channel, TableDefinition table, int? databaseLocale)
 {
     private readonly PageChannel _channel = channel;
     private readonly UsageMap _usageMaps = new(channel);
     private readonly TableDefinition _table = table;
+
+    // The database's locale ID, its sort ID included, which a calculated column's InStr compares under when it
+    // names no comparison (verified vs ACE). The caller's, from the database's collation; a writer of rows that
+    // hold no such column needs none.
+    private readonly int? _databaseLocale = databaseLocale;
 
     private bool HasCalculatedColumns => _table.Columns.Any(c => c.IsCalculated);
 
@@ -67,7 +72,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
 
         // Encode first, to know how much room the record needs.
         var encoder = new RowCodec(_table.Columns, format,
-            _table.VariableColumnCount, SpillCalculated, _table.ColumnIdHighWater);
+            _table.VariableColumnCount, SpillCalculated, _table.ColumnIdHighWater, databaseLocale: _databaseLocale);
         byte[] record = encoder.Encode(storage, null, calculated ? values : null,
             slackOf: defaults is null || order is null ? null : InsertSlack(format, defaults, order));
 
@@ -194,7 +199,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         // Written over the old row, as ACE writes it: its fixed bytes, its dropped columns' chunks and their bits
         // stay wherever the new values do not land.
         var encoder = new RowCodec(_table.Columns, format,
-            _table.VariableColumnCount, SpillCalculated, _table.ColumnIdHighWater);
+            _table.VariableColumnCount, SpillCalculated, _table.ColumnIdHighWater, databaseLocale: _databaseLocale);
         byte[] record = encoder.Encode(storage, preservedCalculated, HasCalculatedColumns ? values : null, oldLayout,
             UpdateSlack(oldLayout, changedColumns), buffer);
 

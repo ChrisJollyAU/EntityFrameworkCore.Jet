@@ -51,4 +51,22 @@ public class StrCompStrConvTests : TempDatabaseTest
     [Fact]
     public void StrConv_mode_4_is_rejected() // narrow->wide errors in the JES
         => Assert.Throws<ArgumentException>(() => Eval("StrConv('hello', 4)"));
+
+    // The locale IDs ACE takes that the runtime does not list are locales to StrConv as to InStr (verified vs ACE:
+    // StrConv('ab', 1, id) is 'AB' for each); 20000 is not one.
+    [Theory]
+    [InlineData(140)]
+    [InlineData(1024)]
+    [InlineData(1164)]
+    [InlineData(2305)]
+    [InlineData(4096)]
+    [InlineData(8192)]
+    [InlineData(19456)]
+    [InlineData(19465)]
+    public void StrConv_takes_the_locale_ids_ace_does(int locale)
+        => Assert.Equal("AB", Convert.ToString(Eval($"StrConv('ab', 1, {locale})")));
+
+    [Fact]
+    public void StrConv_refuses_a_number_that_is_no_locale()
+        => Assert.Throws<ArgumentException>(() => Eval("StrConv('ab', 1, 20000)"));
 }

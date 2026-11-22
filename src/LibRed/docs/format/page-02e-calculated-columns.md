@@ -155,7 +155,9 @@ refusal.
 > it apart from every other rejected conversion.
 >
 > **`InStr` takes three or four arguments here, never two** — its behaviour otherwise is the ordinary one in
-> [functions.md](../functions.md). The other three-argument shape, `InStr([A],"a",1)`, is accepted at design
+> [functions.md](../functions.md): with no compare argument it searches under the **database's** locale ID
+> (page 0's, sort ID included), and for a compare argument that is Null ACE caches an error its own reader refuses,
+> whatever the strings are. The other three-argument shape, `InStr([A],"a",1)`, is accepted at design
 > time and then caches a value ACE cannot read, because `start` receives a non-numeric — the same trap as the
 > `$` variants and an index on a calculated column.
 
