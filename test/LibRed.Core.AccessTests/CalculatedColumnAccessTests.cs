@@ -1196,6 +1196,10 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
         ("LkByte", DbByte,   0, "[A] Like \"h*\""),
         ("LkAll", DbText,   40, "([A] Like \"*\") & \"\""),
         ("LkAll2", DbText,  40, "([A] Like \"**\") & \"\""),
+        // A character class, a negated one and a range.
+        ("LkCls", DbText,   40, "([A] Like \"[gh]*\") & \"\""),
+        ("LkNeg", DbText,   40, "([A] Like \"[!h]*\") & \"\""),
+        ("LkRng", DbText,   40, "([A] Like \"[a-h]*\") & \"\""),
     ];
 
     /// <summary>The envelope's leading status for the second (bad-input) row of a probe table.</summary>
