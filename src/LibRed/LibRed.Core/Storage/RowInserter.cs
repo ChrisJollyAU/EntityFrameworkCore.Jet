@@ -40,7 +40,8 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
     /// <param name="defaults">The table's all-defaults record — each column's evaluated default, null where it has
     /// none — that ACE writes a new row over; with <paramref name="order"/> it decides the record's slack (spec §5).
     /// Null for a row written with no defaults.</param>
-    /// <param name="order">The columns the statement names, in the order it names them.</param>
+    /// <param name="order">The columns the statement names, in the order it names them, which alone are held to their
+    /// declared width (see <see cref="Table.Insert"/>); null for every column.</param>
     /// <param name="validate">The caller's checks of the row, run once its ids are drawn (see <see cref="Table.Insert"/>).</param>
     /// <param name="reference">The caller's check of the row's references (see <see cref="Table.Insert"/>).</param>
     public void Insert(object?[] values, bool updateIndexes, object?[]? defaults = null, IReadOnlyList<int>? order = null,
@@ -74,7 +75,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
         var encoder = new RowCodec(_table.Columns, format,
             _table.VariableColumnCount, SpillCalculated, _table.ColumnIdHighWater, databaseCollation: _databaseCollation);
         byte[] record = encoder.Encode(storage, null, calculated ? values : null,
-            slackOf: defaults is null || order is null ? null : InsertSlack(format, defaults, order));
+            slackOf: defaults is null || order is null ? null : InsertSlack(format, defaults, order), written: order);
 
         EnsureRecordFits(format, record);
 
@@ -100,14 +101,17 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
 
     /// <summary>
     /// Rewrites an existing row in place at its slot (page + row index preserved, matching Access, so
-    /// index rowid pointers stay valid). Any changed memo/OLE value is re-materialized onto LVAL pages;
+    /// index rowid pointers stay valid). Any written memo/OLE value is re-materialized onto LVAL pages;
     /// the page is repacked to absorb a size change (slot order = physical order, as Access keeps it).
     /// A row that no longer fits its page is <b>relocated</b> — the slot becomes a 4-byte forward pointer and
     /// the row moves to a page with room, as Access does — and one that outgrows its new page moves again.
     /// Index-key maintenance for a changed indexed column is the caller's responsibility. <c>buffer</c> is the one
     /// the statement builds its updated rows in (see RowCodec's <c>Encode</c>), or null for a row rewritten on its own.
+    /// <c>written</c> are the columns the statement writes besides those it changes (see
+    /// <see cref="Table.Update(RowId, object?[], IReadOnlySet{int}, IReadOnlySet{int}?)"/>); null for none.
     /// </summary>
-    public void Update(RowId id, object?[] values, IReadOnlySet<int> changedColumns, byte[]? buffer = null)
+    public void Update(RowId id, object?[] values, IReadOnlySet<int> changedColumns, byte[]? buffer = null,
+        IReadOnlySet<int>? written = null)
     {
         // An update is several writes — the old long values are freed, the new ones materialised onto pages,
         // then the row itself — and the row is the last of them, so it is the last thing that can fail (a
@@ -120,7 +124,9 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
         if (ownTransaction) _channel.BeginTransaction();
         try
         {
-            UpdateCore(id, values, changedColumns, buffer);
+            // A changed column is always written, whatever the caller named.
+            UpdateCore(id, values, changedColumns, buffer,
+                written is null || changedColumns.IsSubsetOf(written) ? written ?? changedColumns : new HashSet<int>(written.Concat(changedColumns)));
             if (ownTransaction) _channel.CommitTransaction(flush: false);
         }
         catch when (ownTransaction)
@@ -130,7 +136,8 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
         }
     }
 
-    private void UpdateCore(RowId id, object?[] values, IReadOnlySet<int> changedColumns, byte[]? buffer)
+    private void UpdateCore(RowId id, object?[] values, IReadOnlySet<int> changedColumns, byte[]? buffer,
+        IReadOnlySet<int> written)
     {
         JetFormatBase format = _channel.Format;
         RejectExplicitCalculatedValues(values, changedColumns);
@@ -143,9 +150,11 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
         // this update moves has to be keyed off them, and a descriptor is not a key.
         object?[] storage = (object?[])values.Clone();
 
-        // Long-value (memo/OLE) columns: keep an unchanged column's on-disk descriptor verbatim (so it is not
-        // needlessly re-materialised onto fresh LVAL pages), and free a changed column's old chained pages —
-        // after the new values are written, as ACE does: the UPDATE that frees them never reuses them.
+        // Long-value (memo/OLE) columns: keep the on-disk descriptor of a column the statement does not write verbatim
+        // (so it is not needlessly re-materialised onto fresh LVAL pages), and free a written column's old chained
+        // pages — after the new values are written, as ACE does: the UPDATE that frees them never reuses them. A
+        // column written with the value it already had is re-materialised too (verified vs ACE: SET M = M writes a
+        // 3000-character memo's chain again, with a fresh stamp).
         byte[] oldRow = ReadRowBytes(id);
         // One layout for both: the trailer arithmetic is the same for either selection off this row.
         RowCodec.Layout oldLayout = RowCodec.ParseLayout(_table, format, oldRow);
@@ -156,7 +165,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
         {
             if (column.Type is not (JetDataType.Memo or JetDataType.Ole)) continue;
             if (!oldDescriptors.TryGetValue(column.Index, out byte[]? oldDescriptor)) continue; // old value was null
-            if (changedColumns.Contains(column.Index)) replaced.Add((column, oldDescriptor));
+            if (written.Contains(column.Index)) replaced.Add((column, oldDescriptor));
             else storage[column.Index] = new LongValueStore.DescriptorValue(oldDescriptor);
         }
 
@@ -169,7 +178,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
         foreach (ColumnDef column in _table.Columns)
         {
             if (!column.IsCalculated) continue;
-            if (CalculatedValue.ReferencedIndexes(column, _table.Columns).Overlaps(changedColumns)) continue;
+            if (CalculatedValue.ReferencedIndexes(column, _table.Columns).Overlaps(written)) continue;
             if (!oldCalculated.TryGetValue(column.Index, out byte[]? kept)) continue;
             (preservedCalculated ??= [])[column.Index] = kept;
         }
@@ -201,7 +210,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
         var encoder = new RowCodec(_table.Columns, format,
             _table.VariableColumnCount, SpillCalculated, _table.ColumnIdHighWater, databaseCollation: _databaseCollation);
         byte[] record = encoder.Encode(storage, preservedCalculated, HasCalculatedColumns ? values : null, oldLayout,
-            UpdateSlack(oldLayout, changedColumns), buffer);
+            UpdateSlack(oldLayout, changedColumns), buffer, written);
 
         // Here as well as on the insert path, and before the in-place rewrite rather than beside the
         // page-search: a row that grows past the cap but still fits its current page is rewritten where it

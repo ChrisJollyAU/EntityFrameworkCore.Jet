@@ -889,6 +889,7 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
         SetProperty(textField, "AllowZeroLength", true);
         Invoke(fields, "Append", textField);
         Invoke(fields, "Append", Invoke(tdf, "CreateField", "D1", DbDate)!);
+        Invoke(fields, "Append", Invoke(tdf, "CreateField", "YN", DbBoolean)!);
 
         object field = size > 0
             ? Invoke(tdf, "CreateField", name, type, size)!
@@ -1021,6 +1022,179 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
         }
         finally { TemporaryDatabase.Delete(path); }
     }
+
+    // A division by zero is an error ACE caches as well, so LibRed refuses the write as it does for CDbl over Null.
+    // Row 1 divides 0 by 0 and row 2 divides 7 by 0, which VBA itself raises as different errors.
+    [Fact]
+    public void Records_what_ace_stores_for_a_division_by_zero()
+    {
+        object? engine = CreateDbEngine();
+        Assert.SkipWhen(engine is null, "DAO is unavailable in this process; it authors the fixture.");
+
+        string path = TemporaryDatabase.CreatePath("calc-div0-");
+        try
+        {
+            object workspace = Invoke(engine!, "CreateWorkspace", "", "admin", "", UseJet)!;
+            object database = Invoke(workspace, "CreateDatabase", path, ";LANGID=0x0409;CP=1252;COUNTRY=0", 128)!;
+            AppendCalculatedTable(database, "Div0", DbDouble, 0, "[Qty]/0");
+            Invoke(database, "Close");
+
+            using (var connection = AceTestDatabase.Open(path))
+                foreach ((int id, int qty) in ((int, int)[])[(1, 0), (2, 7)])
+                {
+                    using var insert = connection.CreateCommand();
+                    insert.CommandText = $"INSERT INTO T_Div0 (Id, Qty, Price, A, D1) VALUES ({id}, {qty}, 1, 'a', #2003-09-29#)";
+                    insert.ExecuteNonQuery();
+                }
+
+            (byte[] zeroByZero, byte[] sevenByZero) = StoredEnvelopes(path, "T_Div0", "Div0");
+            output.WriteLine($"  0/0 {Convert.ToHexString(zeroByZero)}");
+            output.WriteLine($"  7/0 {Convert.ToHexString(sevenByZero)}");
+            // 7/0 is error 11, division by zero; 0/0 is error 6, overflow — as VBA raises them.
+            Assert.Equal(11u, BitConverter.ToUInt32(sevenByZero, 0));
+            Assert.Equal(6u, BitConverter.ToUInt32(zeroByZero, 0));
+
+            using (var db = JetDatabase.Open(path, readOnly: true))
+            {
+                var read = Assert.Throws<LibRed.Storage.Calculated.CalculatedExpressionException>(
+                    () => db.OpenTable("T_Div0").Rows().ToList());
+                output.WriteLine($"  LibRed reads it as: {read.Message}");
+            }
+
+            using (var db = JetDatabase.Open(path, readOnly: false))
+            {
+                Table t = db.OpenTable("T_Div0");
+                var values = new object?[t.Definition.Columns.Count];
+                values[t.Definition.FindColumn("Id")!.Index] = 3;
+                values[t.Definition.FindColumn("Qty")!.Index] = 7;
+                var refused = Assert.Throws<LibRed.Storage.Calculated.CalculatedExpressionException>(() => t.Insert(values));
+                output.WriteLine($"  LibRed refuses the write: {refused.Message}");
+            }
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // A Like in a calculated column, read back through DAO, since OLE DB reads no row of one, whoever wrote it. DAO's
+    // rows hold the ANSI-89 answer ('hello' Like "h*" True, 'zz' False), and so must LibRed's; rows written over OLE DB
+    // hold Null.
+    [Fact]
+    public void Computes_a_like_as_ace_does_through_dao()
+    {
+        object? engine = CreateDbEngine();
+        Assert.SkipWhen(engine is null, "DAO is unavailable in this process; it authors the fixture.");
+
+        string path = TemporaryDatabase.CreatePath("calc-like-");
+        try
+        {
+            object workspace = Invoke(engine!, "CreateWorkspace", "", "admin", "", UseJet)!;
+            object database = Invoke(workspace, "CreateDatabase", path, ";LANGID=0x0409;CP=1252;COUNTRY=0", 128)!;
+            AppendCalculatedTable(database, "LkO", DbBoolean, 0, "[A] Like \"h*\"");
+            foreach ((string name, int type, int size, string expression) in LikeColumns)
+                AppendCalculatedTable(database, name, type, size, expression);
+            // DAO writes rows 1, 2 and 5; LibRed writes 3, 4 and 6, the same A values in the same order.
+            var refused = new HashSet<string>();
+            foreach ((string name, _, _, _) in LikeColumns)
+                foreach ((int id, string a) in ((int, string)[])[(1, "'hello'"), (2, "'zz'"), (5, "NULL")])
+                {
+                    try { Invoke(database, "Execute", $"INSERT INTO T_{name} (Id, Qty, Price, A, D1) VALUES ({id}, 1, 1, {a}, #2003-09-29#)"); }
+                    catch (TargetInvocationException) { refused.Add($"T_{name} {id}"); }
+                }
+            Invoke(database, "Close");
+
+            using (var db = JetDatabase.Open(path, readOnly: false))
+                foreach ((string name, _, _, _) in LikeColumns)
+                {
+                    Table t = db.OpenTable("T_" + name);
+                    foreach ((int id, string? a) in ((int, string?)[])[(3, "hello"), (4, "zz"), (6, null)])
+                    {
+                        var values = new object?[t.Definition.Columns.Count];
+                        values[t.Definition.FindColumn("Id")!.Index] = id;
+                        values[t.Definition.FindColumn("A")!.Index] = a;
+                        try { t.Insert(values); }
+                        catch (LibRed.Storage.Calculated.CalculatedExpressionException) { refused.Add($"T_{name} {id}"); }
+                    }
+                }
+
+            string? textOverOleDb = null;
+            using (var connection = AceTestDatabase.Open(path))
+            {
+                foreach ((int id, string a) in ((int, string)[])[(1, "'hello'"), (2, "'zz'")])
+                {
+                    using var insert = connection.CreateCommand();
+                    insert.CommandText = $"INSERT INTO T_LkO (Id, Qty, Price, A, D1) VALUES ({id}, 1, 1, {a}, #2003-09-29#)";
+                    insert.ExecuteNonQuery();
+                }
+                // A Text result over OLE DB.
+                using var text = connection.CreateCommand();
+                text.CommandText = "INSERT INTO T_LkTx (Id, Qty, Price, A, D1) VALUES (9, 1, 1, 'hello', #2003-09-29#)";
+                try { text.ExecuteNonQuery(); textOverOleDb = "accepted"; }
+                catch (System.Data.OleDb.OleDbException ex) { textOverOleDb = ex.Message; }
+                output.WriteLine($"  OLE DB inserts into T_LkTx: {textOverOleDb}");
+            }
+
+            var read = new Dictionary<string, string>();
+            database = Invoke(workspace, "OpenDatabase", path)!;
+            foreach (string table in (string[])["T_LkO", .. LikeColumns.Select(c => "T_" + c.Name)])
+            {
+                object recordset = Invoke(database, "OpenRecordset", $"SELECT Id, {table[2..]} FROM {table} ORDER BY Id", 4)!;
+                while (!(bool)GetProperty(recordset, "EOF")!)
+                {
+                    object fields = GetProperty(recordset, "Fields")!;
+                    object Field(string name) => fields.GetType().InvokeMember("Item", BindingFlags.GetProperty, null, fields, [name])!;
+                    object id = GetProperty(Field("Id"), "Value")!;
+                    string value;
+                    try { value = Describe(GetProperty(Field(table[2..]), "Value")); }
+                    catch (TargetInvocationException ex) { value = $"error -- {ex.InnerException?.Message.Trim()}"; }
+                    output.WriteLine($"  {table} row {id}: DAO reads {value}");
+                    read[$"{table} {id}"] = value;
+                    Invoke(recordset, "MoveNext");
+                }
+                Invoke(recordset, "Close");
+            }
+            Invoke(database, "Close");
+            string oleDb = AceScalar(path, "SELECT LkD FROM T_LkD WHERE Id = 1");
+            output.WriteLine($"  OLE DB reads T_LkD row 1: {oleDb}");
+
+            Assert.Equal("True (Boolean)", read["T_LkD 1"]);
+            Assert.Equal("False (Boolean)", read["T_LkD 2"]);
+            Assert.Equal(read["T_LkD 1"], read["T_LkD 3"]);   // LibRed's rows, as DAO's
+            Assert.Equal(read["T_LkD 2"], read["T_LkD 4"]);
+            Assert.StartsWith("error", oleDb, StringComparison.Ordinal);
+            // Over OLE DB a Yes/No result caches Null, and a Text one is refused.
+            Assert.Equal(" (DBNull)", read["T_LkO 1"]);
+            Assert.Equal(" (DBNull)", read["T_LkO 2"]);
+            Assert.Contains("CHECK constraint", textOverOleDb, StringComparison.Ordinal);
+
+            // Every column: LibRed's row as DAO's, a refusal as a refusal.
+            var mismatches = new List<string>();
+            foreach ((string name, _, _, string expression) in LikeColumns)
+                foreach ((int dao, int libred) in ((int, int)[])[(1, 3), (2, 4), (5, 6)])
+                {
+                    string Value(int id) => refused.Contains($"T_{name} {id}") ? "REFUSED" : read.GetValueOrDefault($"T_{name} {id}", "(missing)");
+                    output.WriteLine($"  {name,-6} DAO {Value(dao),-28} LibRed {Value(libred)}");
+                    if (Value(dao) == "(missing)") mismatches.Add($"{name} row {dao}: DAO wrote nothing");
+                    if (Value(dao) != Value(libred)) mismatches.Add($"{name} [{expression}] row {dao}: DAO {Value(dao)}, LibRed {Value(libred)}");
+                }
+            Assert.Empty(mismatches);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // A Like, and the Boolean it gives, through the paths a calculated column can take it.
+    private static readonly (string Name, int Type, int Size, string Expression)[] LikeColumns =
+    [
+        ("LkD",   DbBoolean, 0, "[A] Like \"h*\""),
+        ("LkTx",  DbText,   40, "([A] Like \"h*\") & \"\""),
+        ("LkStr", DbText,   40, "Str([A] Like \"h*\")"),
+        ("LkIif", DbText,   40, "IIf([A] Like \"h*\",\"y\",\"n\")"),
+        ("LkLng", DbLong,    0, "[A] Like \"h*\""),
+        ("LkCol", DbText,   40, "[A] Like \"h*\""),
+        ("LkBT",  DbText,   40, "IIf(IsNull([A]) Like \"T*\",\"y\",\"n\")"),
+        ("LkBM",  DbText,   40, "IIf(IsNull([A]) Like \"-1\",\"y\",\"n\")"),
+        ("LkByte", DbByte,   0, "[A] Like \"h*\""),
+        ("LkAll", DbText,   40, "([A] Like \"*\") & \"\""),
+        ("LkAll2", DbText,  40, "([A] Like \"**\") & \"\""),
+    ];
 
     /// <summary>The envelope's leading status for the second (bad-input) row of a probe table.</summary>
     private static uint Status(string path, string table, string column)
@@ -1178,6 +1352,136 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
         ("PCDbl",   DbDouble,   0, "CDbl([Qty])/3"),
         ("PStr",    DbText,    40, "Str([Qty])"),
         ("PLeft",   DbText,    40, "Left([A],2)"),
+        ("PAndF",   DbBoolean,  0, "[Qty] And False"),        // Null And False is False
+        ("POrT",    DbBoolean,  0, "[Qty] Or True"),          // Null Or True is True
+        ("PAndCut", DbBoolean,  0, "([Id]<0) And (CDbl([Qty])>0)"),   // whether And short-circuits
+        ("PAnd2",   DbLong,     0, "[Qty] And 2"),            // logical or bitwise over numbers
+        ("PNot",    DbLong,     0, "Not [Qty]"),
+        ("PDiv0",   DbDouble,   0, "[Qty]/0"),
+        ("PString", DbText,    40, "String(3,65)"),           // a number is a character code
+        ("PChoose", DbText,    40, "Choose(1.6,\"a\",\"b\")"),   // the index is truncated
+        ("PCatNull",  DbText,    40, "[A] & [A]"),            // Null & Null
+        ("PInNull",   DbBoolean,  0, "[Qty] In (1, Null)"),
+        ("PEqTrue",   DbBoolean,  0, "[Qty] = True"),          // compared with -1, not the query's truth test
+        ("PNeNull",   DbBoolean,  0, "[Qty] <> Null"),
+        ("PMulText",  DbDouble,   0, "[A] * [Qty]"),           // text read as a number beside a Null
+        ("PCurDbl",   DbCurrency, 0, "[Price] + [Qty]/32"),    // a Double into a Currency
+        ("PCmpText",  DbBoolean,  0, "[A] > 1"),
+        ("PNegText",  DbDouble,   0, "-[A]"),
+        ("PChooseQ",  DbText,    40, "Choose([Qty],\"a\",\"b\")"),
+        ("PStringQ",  DbText,    40, "String(3,[Qty])"),
+        ("PIsCat",    DbBoolean,  0, "IsNull([A] & [A])"),     // Null & Null, seen through a Boolean
+        ("PIsNullTx", DbText,    40, "IsNull([A]) & \"\""),     // a Boolean written as text
+        ("PNegPow",   DbDouble,   0, "-2^2"),                  // a minus written against a number
+        ("PNegPowQ",  DbDouble,   0, "-[Qty]^2"),
+        ("PNegZeroTx", DbText,   40, "(-[Qty]^2) & \"\""),     // a negative zero written as text
+        ("PNegZeroSt", DbText,   40, "Str(-[Qty]^2)"),
+        ("PPowPow",   DbDouble,   0, "2^3^2"),                 // how ^ associates
+        ("PPowNeg",   DbDouble,   0, "2^-2^2"),
+        ("PNegSp",    DbDouble,   0, "- 2^2"),                 // a minus with a space
+        ("PNegPt",    DbDouble,   0, "-.5^2"),
+        ("PPowPlus",  DbDouble,   0, "2^+3"),                  // a plus against the exponent
+        ("PPowPlus2", DbDouble,   0, "2^+3^2"),
+        ("PNegZeroCol", DbText,  40, "-[Qty]^2"),              // a negative zero stored as text
+        ("PCmpTx",    DbText,    40, "([Qty] > 1) & \"\""),
+        ("PIsNullStr", DbText,   40, "Str(IsNull([A]))"),       // a real Boolean through the other text paths
+        ("PIsNullLen", DbLong,    0, "Len(IsNull([A]))"),
+        ("PIsNullIif", DbText,   40, "IIf([Qty]>0, IsNull([A]), IsNull([D1])) & \"\""),
+        ("PIsNullPl",  DbText,   40, "IsNull([A]) + \"x\""),
+        ("PIsNullEqT", DbBoolean, 0, "IsNull([A]) = \"True\""),
+        ("PIsNullEqM", DbBoolean, 0, "IsNull([A]) = \"-1\""),
+        ("PIsNullGtE", DbBoolean, 0, "IsNull([A]) > \"\""),
+        ("PIsNullEqF", DbBoolean, 0, "IsNull([A]) = \"False\""),
+        ("PIsNullMul", DbLong,    0, "IsNull([A]) * 2"),
+        ("PIsNullRnd", DbDouble,  0, "Round(IsNull([A]))"),
+        ("PIsNullNot", DbText,   40, "(Not IsNull([A])) & \"\""),
+        // Every other path a real Boolean (IsNull, IsEmpty) can take in a calculated column; a Like's are in
+        // Computes_a_like_as_ace_does_through_dao, since OLE DB neither writes nor reads a calculated Like.
+        ("PBUcase",  DbText,    40, "UCase(IsNull([A]))"),
+        ("PBLcase",  DbText,    40, "LCase(IsNull([A]))"),
+        ("PBTrim",   DbText,    40, "Trim(IsNull([A]))"),
+        ("PBLeft",   DbText,    40, "Left(IsNull([A]),2)"),
+        ("PBRight",  DbText,    40, "Right(IsNull([A]),2)"),
+        ("PBMid",    DbText,    40, "Mid(IsNull([A]),2,2)"),
+        ("PBInstr",  DbLong,     0, "InStr(1,IsNull([A]),\"e\")"),
+        ("PBInstr2", DbLong,     0, "InStr(1,\"x-1Truex\",IsNull([A]))"),
+        ("PBAsc",    DbLong,     0, "Asc(IsNull([A]))"),
+        ("PBString", DbText,    40, "String(2,IsNull([A]))"),
+        ("PBTxt",    DbText,    40, "IsNull([A])"),
+        ("PBMemo",   DbMemo,     0, "IsNull([A])"),
+        ("PBCat2",   DbText,    40, "IsNull([A]) & IsNull([A])"),
+        ("PBPlus1",  DbText,    40, "(IsNull([A])+1) & \"\""),
+        ("PBMinus",  DbText,    40, "(IsNull([A])-1) & \"\""),
+        ("PBDiv",    DbText,    40, "(IsNull([A])/2) & \"\""),
+        ("PBPow",    DbText,    40, "(IsNull([A])^2) & \"\""),
+        ("PBNeg",    DbText,    40, "(-IsNull([A])) & \"\""),
+        ("PBBB",     DbText,    40, "(IsNull([A])+IsNull([A])) & \"\""),
+        ("PBPlusT",  DbText,    40, "IsNull([A]) + \"1\""),
+        ("PBAbs",    DbText,    40, "Abs(IsNull([A])) & \"\""),
+        ("PBSgn",    DbText,    40, "Sgn(IsNull([A])) & \"\""),
+        ("PBInt",    DbText,    40, "Int(IsNull([A])) & \"\""),
+        ("PBFix",    DbText,    40, "Fix(IsNull([A])) & \"\""),
+        ("PBCdbl",   DbText,    40, "CDbl(IsNull([A])) & \"\""),
+        ("PBRndTx",  DbText,    40, "Round(IsNull([A])) & \"\""),
+        ("PBDate",   DbDate,     0, "[D1]+IsNull([A])"),
+        ("PBAndT",   DbText,    40, "(IsNull([A]) And True) & \"\""),
+        ("PBOrF",    DbText,    40, "(IsNull([A]) Or False) & \"\""),
+        ("PBAnd3",   DbText,    40, "(IsNull([A]) And 3) & \"\""),
+        ("PBEqTrue", DbBoolean,  0, "IsNull([A]) = True"),
+        ("PBEqM1",   DbBoolean,  0, "IsNull([A]) = -1"),
+        ("PBLt0",    DbBoolean,  0, "IsNull([A]) < 0"),
+        ("PBEqCmp",  DbBoolean,  0, "IsNull([A]) = ([Qty] > 3)"),
+        ("PBEqB",    DbBoolean,  0, "IsNull([A]) = IsNull([D1])"),
+        ("PBIn",     DbBoolean,  0, "IsNull([A]) In (-1)"),
+        ("PBInTx",   DbBoolean,  0, "IsNull([A]) In (\"-1\")"),
+        ("PBColCmp", DbBoolean,  0, "[A] > IsNull([D1])"),
+        ("PBIifC",   DbText,    40, "IIf(IsNull([A]),\"y\",\"n\")"),
+        ("PBChoose", DbText,    40, "Choose(1,IsNull([A])) & \"\""),
+        ("PBIifMix", DbText,    40, "IIf([Qty]>0, IsNull([A]), 5) & \"\""),
+        ("PBLng",    DbLong,     0, "IsNull([A])"),
+        ("PBDbl",    DbDouble,   0, "IsNull([A])"),
+        ("PBByte",   DbByte,     0, "IsNull([A])"),
+        ("PByteM1",  DbByte,     0, "[Qty]*0-1"),               // whether 255 is the Boolean's or any -1's
+        ("PByteCmp", DbByte,     0, "[Qty] > 1"),
+        ("PByteNot", DbByte,     0, "Not IsNull([A])"),
+        ("PBInt16",  DbInteger,  0, "IsNull([A])"),
+        ("PBCur",    DbCurrency, 0, "IsNull([A])"),
+        ("PBDate2",  DbDate,     0, "IsNull([A])"),
+        ("PBBool",   DbBoolean,  0, "IsNull([A])"),
+        ("PBEmpty",  DbText,    40, "IsEmpty([A]) & \"\""),
+        ("PBEmptyS", DbText,    40, "Str(IsEmpty([A]))"),
+        // A stored Yes/No column (True where Qty > 0): whether it is a real Boolean too.
+        ("PYnTx",    DbText,    40, "[YN] & \"\""),
+        ("PYnStr",   DbText,    40, "Str([YN])"),
+        ("PYnLen",   DbLong,     0, "Len([YN])"),
+        ("PYnUc",    DbText,    40, "UCase([YN])"),
+        ("PYnAsc",   DbLong,     0, "Asc([YN])"),
+        ("PYnEqM",   DbBoolean,  0, "[YN] = \"-1\""),
+        ("PYnTxt",   DbText,    40, "[YN]"),
+        ("PYnByte",  DbByte,     0, "[YN]"),
+        ("PYnNeg",   DbText,    40, "(-[YN]) & \"\""),
+        ("PYnIif",   DbText,    40, "IIf([YN],\"y\",\"n\")"),
+        ("PYnCmp",   DbText,    40, "([YN] = True) & \"\""),
+        ("PTextNull", DbDouble,   0, "\"abc\" * [Qty]"),       // text read before a Null propagates
+        ("PNeFalse",  DbBoolean,  0, "[A] <> False"),
+        ("PCurDiv",   DbDouble,   0, "[Price]/3"),
+        ("PCurSq",    DbCurrency, 0, "[Price]*[Price]*10000"),
+        ("PCurX2",    DbCurrency, 0, "[Price]*2"),
+        ("PCurLit",   DbCurrency, 0, "[Price]+1.00005"),
+        ("PCurRound", DbCurrency, 0, "Round([Price],2) + [Qty]/32"),
+        ("PCurRoundD", DbDouble,  0, "Round([Price],2) + [Qty]/32"),  // whether Round keeps the Currency
+        ("PQtyBig",   DbDouble,   0, "[Qty]*1000000000"),      // whole numbers past a Long
+        ("PCurDec",   DbDouble,   0, "[Price]*1.11"),          // a written decimal beside a Currency
+        ("PDblDec",   DbDouble,   0, "([Qty]/32)*1.11"),       // beside a Double
+        ("PPowNegCol", DbDouble,  0, "2^-[Qty]^2"),
+        ("PSpMinus",  DbBoolean,  0, "[A] > - 1"),             // a spaced minus beside a text column
+        ("PAtMinus",  DbBoolean,  0, "[A] > -1"),
+        ("POrCut",    DbBoolean,  0, "([Id]>0) Or (CDbl([Qty])>0)"),   // whether Or short-circuits
+        ("PInTxt",    DbBoolean,  0, "[A] In ([Qty]+0)"),       // a text column In a computed number
+        ("PDecInt",   DbInteger,  0, "0.5000000000000000000000000001+[Qty]*0"),   // a Decimal just past a half, stored
+        ("PDecLng",   DbLong,     0, "2.5000000000000000000000000001+[Qty]*0"),
+        ("PTxtEq",    DbBoolean,  0, "[A] = [Qty]+0"),
+        ("PCurEqTxt", DbBoolean,  0, "[Price] = Left(\"1.00005\",7)"),
     ];
 
     [Fact]
@@ -1205,16 +1509,24 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
 
             var mismatches = new List<string>();
             var aceCannotReadItself = new List<string>();
+            var aceRefusesItself = new List<string>();
             foreach ((string name, string expression) in created)
             {
                 string table = "T_" + name;
+                // A Text or Memo result whose expression raises an error is refused by ACE itself ("Error evaluating
+                // CHECK constraint"), rather than cached: that row is ACE's refusal, which LibRed must make too.
+                var aceRefused = new HashSet<int>();
                 using (var connection = AceTestDatabase.Open(path))
                     foreach (var row in Matrix)
                     {
                         using var insert = connection.CreateCommand();
-                        insert.CommandText = $"INSERT INTO {table} (Id, Qty, Price, A, D1) VALUES "
-                            + $"({row.Id}, {Literal(row.Qty)}, {Literal(row.Price)}, {Literal(row.A)}, {Literal(row.D1)})";
-                        insert.ExecuteNonQuery();
+                        insert.CommandText = $"INSERT INTO {table} (Id, Qty, Price, A, D1, YN) VALUES "
+                            + $"({row.Id}, {Literal(row.Qty)}, {Literal(row.Price)}, {Literal(row.A)}, {Literal(row.D1)}, {row.Qty is int and > 0})";
+                        try { insert.ExecuteNonQuery(); }
+                        catch (System.Data.OleDb.OleDbException ex) when (ex.Message.Contains("CHECK constraint", StringComparison.Ordinal))
+                        {
+                            aceRefused.Add(row.Id);
+                        }
                     }
 
                 var refused = new HashSet<int>();
@@ -1229,6 +1541,7 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
                         values[t.Definition.FindColumn("Price")!.Index] = row.Price;
                         values[t.Definition.FindColumn("A")!.Index] = row.A;
                         values[t.Definition.FindColumn("D1")!.Index] = row.D1;
+                        values[t.Definition.FindColumn("YN")!.Index] = row.Qty is int and > 0;
                         // LibRed refuses a row whose calculated value would be a cached ERROR rather than a
                         // value -- see the CDbl-over-Null note below. ACE accepts such a row and writes the
                         // unreadable state, so a refusal here is the divergence, not a failure.
@@ -1258,19 +1571,26 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
 
                 foreach (var row in Matrix)
                 {
-                    string ace = byId.GetValueOrDefault(row.Id, "(missing)");
+                    string ace = aceRefused.Contains(row.Id) ? "REFUSED" : byId.GetValueOrDefault(row.Id, "(missing)");
                     string libred = byId.GetValueOrDefault(row.Id + 100, "(missing)");
                     output.WriteLine($"  {name,-8} row {row.Id}  ACE {ace,-28} LibRed {libred}");
 
+                    if (ace == "REFUSED")
+                    {
+                        aceRefusesItself.Add($"{name} row {row.Id}");
+                        if (!refused.Contains(row.Id)) mismatches.Add($"{name} [{expression}] row {row.Id}: ACE refuses it, LibRed wrote {libred}");
+                        continue;
+                    }
                     if (ace.StartsWith("UNREADABLE", StringComparison.Ordinal))
                     {
                         aceCannotReadItself.Add($"{name} row {row.Id}");
                         // LibRed must not merely disagree here — it must have declined to write the row at
                         // all, which is the whole point of the divergence.
-                        Assert.Contains(row.Id, refused);
+                        if (!refused.Contains(row.Id)) mismatches.Add($"{name} [{expression}] row {row.Id}: ACE caches an error, LibRed wrote {libred}");
                         continue;
                     }
-                    Assert.DoesNotContain(row.Id, refused);   // nothing else may be refused
+                    // Nothing else may be refused.
+                    if (refused.Contains(row.Id)) mismatches.Add($"{name} [{expression}] row {row.Id}: ACE {ace}, LibRed refused it");
                     if (ace != libred) mismatches.Add($"{name} [{expression}] row {row.Id}: ACE {ace}, LibRed {libred}");
                 }
             }
@@ -1282,8 +1602,28 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
             // conversion a calculated column may contain. ACE accepts the row and caches the error, after
             // which its own reader refuses that row and only a compact-and-repair clears it. LibRed refuses
             // the INSERT instead, so the unreadable state never reaches the file. Pinned exactly, so a NEW
-            // unreadable case shows up rather than being absorbed into this one.
-            Assert.Equal(["PCDbl row 4"], aceCannotReadItself);
+            // unreadable case shows up rather than being absorbed into this one. A division by zero is the same:
+            // ACE caches the error for every row with a value, 0/0 included, and a Null over 0 is Null. So are text that
+            // is not a number read as one (PMulText, PNegText, PTextNull), text compared with a number or False
+            // (PCmpText, PNeFalse), and a -1 that is not a VBA Boolean stored in a Byte (PByteM1, PByteCmp, PByteNot,
+            // PYnByte).
+            Assert.Equal([
+                "PCDbl row 4", "PDiv0 row 1", "PDiv0 row 2", "PDiv0 row 3", "PDiv0 row 5",
+                "PMulText row 1", "PMulText row 2", "PMulText row 3", "PMulText row 5",
+                "PCmpText row 1", "PCmpText row 2", "PCmpText row 3", "PCmpText row 5",
+                "PNegText row 1", "PNegText row 2", "PNegText row 3", "PNegText row 5",
+                "PByteM1 row 1", "PByteM1 row 2", "PByteM1 row 3", "PByteM1 row 5", "PByteCmp row 1", "PByteCmp row 5",
+                "PByteNot row 1", "PByteNot row 2", "PByteNot row 3", "PByteNot row 5", "PYnByte row 1", "PYnByte row 5",
+                "PTextNull row 1", "PTextNull row 2", "PTextNull row 3", "PTextNull row 4", "PTextNull row 5",
+                "PNeFalse row 1", "PNeFalse row 2", "PNeFalse row 3", "PNeFalse row 5",
+                "PAtMinus row 1", "PAtMinus row 2", "PAtMinus row 3", "PAtMinus row 5",
+            ], aceCannotReadItself);
+            // What ACE refuses to write, a Text result whose expression raises an error, pinned the same way: Choose past
+            // its arms over Null, and a Boolean plus text that is not a number.
+            Assert.Equal([
+                "PChooseQ row 4",
+                "PIsNullPl row 1", "PIsNullPl row 2", "PIsNullPl row 3", "PIsNullPl row 4", "PIsNullPl row 5",
+            ], aceRefusesItself);
         }
         finally { TemporaryDatabase.Delete(path); }
     }

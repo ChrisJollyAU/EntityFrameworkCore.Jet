@@ -1720,6 +1720,9 @@ internal static class AstBuilder
         return value.Date == DateTime.MinValue ? new DateTime(1899, 12, 30).Add(value.TimeOfDay) : value;
     }
 
+    // DELIBERATE DUPLICATE (the owner's decision, 2026-11-23; CLAUDE.md "One copy of every function"): LibRed.Core's
+    // CalculatedExpression.ParseInteger and ParseNumber copy ParseInteger and ParseNumber, since LibRed.Core cannot
+    // reference this project and project references stay as they are. A change to either is made to both.
     /// <summary>A number written with a decimal point or an exponent, as ACE reads it (verified vs ACE, over OLE DB):
     /// a whole number a Long holds is a Long (<c>3.0</c>, <c>11.0</c>, <c>1E5</c>, <c>2.0E1</c>); a number a Decimal holds
     /// exactly is a Decimal of the digits written (<c>1.50</c>, <c>15E-1</c>, <c>1E-28</c>, <c>3E9</c>, <c>7.9E28</c>,
@@ -1761,6 +1764,10 @@ internal static class AstBuilder
             CultureInfo.InvariantCulture);
     }
 
+    // DELIBERATE DUPLICATE (the owner's decision, 2026-11-23; CLAUDE.md "One copy of every function"): LibRed.Core's
+    // CalculatedExpression.ParsePower, IsSignedNumber and ParseOperand copy SignedNumber, PowerChain and BuildPower, since
+    // LibRed.Core cannot reference this project and project references stay as they are. A change to either is made to
+    // both.
     /// <summary>
     /// A minus written directly against a number that begins with a digit is part of that number, which is then a single
     /// operand binding tighter than <c>^</c> (verified vs ACE: <c>-2 ^ 2</c> is 4 and <c>2 ^ -2 ^ 2</c> is 0.0625, while

@@ -179,15 +179,14 @@ internal static class AccessTypeMapper
     // openable by Access (an over-long fixed column produces an unreadable file).
     private const int MaxTextCharacters = 255;
     private const int MaxBinaryBytes = 510;
-    internal const int MaxDecimalPrecision = 28;
 
     private static ColumnSpec Decimal(ColumnDefinition column)
     {
         int precision = column.Size ?? 18;
         int scale = column.Scale ?? 0;
-        if (precision is < 1 or > MaxDecimalPrecision)
+        if (precision is < 1 or > Storage.Types.JetTypeCodec.MaxNumericPrecision)
             throw new InvalidOperationException(
-                $"Precision of field '{column.Name}' must be from 1 through {MaxDecimalPrecision} (got {precision}).");
+                $"Precision of field '{column.Name}' must be from 1 through {Storage.Types.JetTypeCodec.MaxNumericPrecision} (got {precision}).");
         if (scale < 0 || scale > precision)
             throw new InvalidOperationException(
                 $"Scale of field '{column.Name}' must be from 0 through its precision {precision} (got {scale}).");

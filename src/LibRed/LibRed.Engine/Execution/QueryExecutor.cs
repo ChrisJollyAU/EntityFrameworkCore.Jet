@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using LibRed.Engine.Plan;
 using LibRed.Engine.Planning;
 using LibRed.Sql.Ast;
+using LibRed.Storage.Types;
 
 namespace LibRed.Engine.Execution;
 
@@ -40,11 +41,8 @@ internal readonly record struct OutputColumn(
     /// <summary>The output of <paramref name="table"/>'s stored <paramref name="column"/>.</summary>
     public static OutputColumn Of(string? qualifier, LibRed.Catalog.TableDefinition table, LibRed.Catalog.ColumnDef column)
     {
-        bool numeric = column.Type == LibRed.Catalog.JetDataType.FixedPoint;
-        return new(qualifier, column.Name, Schema.JetClrTypeMap.ToClrType(column.Type),
-            column.Type == LibRed.Catalog.JetDataType.Currency,
-            numeric ? column.Scale : null, numeric ? column.Precision : null,
-            Source: (table, column));
+        (Type clrType, bool currency, int? scale, int? precision) = LibRed.Catalog.JetClrTypeMap.ValueType(column);
+        return new(qualifier, column.Name, clrType, currency, scale, precision, Source: (table, column));
     }
 
     /// <summary>A computed column of <paramref name="type"/>, computed by <paramref name="expression"/>.
@@ -1500,7 +1498,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
                 }
             case CaseExpression @case:
                 return ChoiceVariance(CaseResults(@case), columns);
-            case FunctionCall function when ChoiceArms(function) is { } arms:
+            case FunctionCall function when ExpressionFunctions<Expression>.ChoiceArms(function.Name, function.Arguments) is { } arms:
                 return ChoiceVariance(arms, columns);
             default:
                 return Variance.None;
@@ -1525,17 +1523,6 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
             ? Variance.Mixed : Variance.None;
     }
 
-    /// <summary>The values a choice picks among, or null for a function that is not one.</summary>
-    internal static IEnumerable<Expression>? ChoiceArms(FunctionCall function) =>
-        function.Name.TrimEnd('$').ToUpperInvariant() switch
-        {
-            "IIF" when function.Arguments.Count == 3 => function.Arguments.Skip(1),
-            "SWITCH" => function.Arguments.Where((_, i) => i % 2 == 1),
-            "CHOOSE" => function.Arguments.Skip(1),
-            "COALESCE" or "GREATEST" or "LEAST" => function.Arguments,
-            _ => null,
-        };
-
     /// <summary>The type an expression counts as where it is an operand: a Variant or a Mixed value as a Double.</summary>
     private Type? OperandType(Expression expression, IReadOnlyList<OutputColumn> columns) =>
         VarianceOf(expression, columns) != Variance.None ? typeof(double) : DeclaredType(expression, columns);
@@ -1548,7 +1535,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
     /// of which can hold a value of another type than the one it declares.</summary>
     private bool HoldsChoiceOrVariance(Expression expression, IReadOnlyList<OutputColumn> columns) =>
         expression is CaseExpression
-        || expression is FunctionCall function && ChoiceArms(function) is not null
+        || expression is FunctionCall function && ExpressionFunctions<Expression>.ChoiceArms(function.Name, function.Arguments) is not null
         || VarianceOf(expression, columns) != Variance.None
         || (expression.Operands()?.Any(o => HoldsChoiceOrVariance(o, columns)) ?? false);
 
@@ -1557,12 +1544,21 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
     /// written out later. Anything else holding a choice, a Variant or a Mixed value becomes the type it declares,
     /// which its values need not already have — a Mixed value becomes text, a Variant date plus 1 a Double, and
     /// <c>IIF(…, D, 2) + 1</c> a date where the choice picks the 2. A choice with an arm of unknown type declares
-    /// nothing, so nothing is converted.
+    /// nothing, so nothing is converted. Neither is anything else, but for Long arithmetic, which past a Long is a Double
+    /// (ExpressionFunctions.Arithmetic) that its Long column cannot hold: storing it there is the overflow (verified vs
+    /// ACE: <c>SELECT [Qty]*1000000000</c> over 7 fails, where <c>([Qty]*1000000000) &amp; ''</c> is 7000000000). And
+    /// anything computed that declares a Byte — CByte, whose value is an Integer as ACE's is, and Max or Min over it —
+    /// since its column is declared a Byte, the type the cast CByte stands for asks for.
     /// </summary>
     private (Type? ConvertTo, bool Variant) ItemConversion(Expression expression, IReadOnlyList<OutputColumn> columns) =>
         VarianceOf(expression, columns) == Variance.Variant
             ? (null, true)
-            : (HoldsChoiceOrVariance(expression, columns) ? DeclaredType(expression, columns) : null, false);
+            : (HoldsChoiceOrVariance(expression, columns)
+                || expression is BinaryExpression { Operator: BinaryOperator.Add or BinaryOperator.Subtract or BinaryOperator.Multiply }
+                    && DeclaredType(expression, columns) == typeof(int)
+                    && ExpressionEvaluator.NumberTypeOf(expression, columns, e => DeclaredType(e, columns)).Class == NumberClass.Whole
+                || expression is not ColumnReference && DeclaredType(expression, columns) == typeof(byte)
+                ? DeclaredType(expression, columns) : null, false);
 
     /// <summary>Which of <paramref name="keys"/> compare as text: a Variant or a Mixed value sorts, groups and takes
     /// Min, Max, First and Last as its text.</summary>
@@ -1720,7 +1716,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
         // aggregate that reached a `_ => argument` default would be declared as whatever it was fed, which is
         // right for these four and wrong for any statistic. Null says "not typed" instead, and
         // AggregateSurfaceTests holds every name RunningAggregate computes to having one.
-        "MIN" or "MAX" or "FIRST" or "LAST" => argument,
+        _ when ExpressionFunctions<Expression>.KeepsArgumentType(name) => argument,
         _ => null,
     };
 
@@ -1730,7 +1726,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
         Type? argument = function.Arguments.Count == 0 ? null
             : OperandType(function.Arguments[function.WithinGroup is null ? 0 : ^1], columns);
         // Min, Max, First and Last take a Variant's or a Mixed value's text, and give it (verified vs ACE).
-        if (name is "MIN" or "MAX" or "FIRST" or "LAST" && function.Arguments.Count == 1
+        if (ExpressionFunctions<Expression>.KeepsArgumentType(name) && function.Arguments.Count == 1
             && VarianceOf(function.Arguments[0], columns) != Variance.None)
             return typeof(string);
         if (QueryPlanner.IsAggregate(name))
@@ -1749,33 +1745,26 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
             // a Round beside a whole number in IIF, CASE or COALESCE left the Integer to declare the column while
             // the Round arm returned a Decimal.
             "ROUND" or "ABS" => KeptNumberType(argument, typeof(double)),
-            "INT" or "FIX" or "FLOOR" or "CEILING" or "CEIL" => KeptNumberType(argument, typeof(DateTime)),
+            _ when ExpressionFunctions<Expression>.KeepsNumberType(name) => KeptNumberType(argument, typeof(DateTime)),
             "SGN" or "SIGN" => typeof(int),
             "CSTR" or "FORMAT" or "LCASE" or "UCASE" or "TRIM" or "LTRIM" or "RTRIM"
                 or "LEFT" or "RIGHT" or "MID" or "REPLACE" or "STRING" or "SPACE" or "HEX"
-                or "OCT" or "WEEKDAYNAME" or "MONTHNAME" or "PARTITION" or "CONCAT_WS" or "TRANSLATE" => typeof(string),
+                or "OCT" or "WEEKDAYNAME" or "MONTHNAME" or "PARTITION" or "CONCAT_WS" or "TRANSLATE" or "TYPENAME" => typeof(string),
             // DateDiff counts into Access's Long Integer whatever the interval, and DateDiff_Big into an Int64
             "DATEDIFF_BIG" => typeof(long),
             "LEN" or "DATALENGTH" or "INSTR" or "INSTRREV" or "ASC" or "ASCW" or "DATEPART" or "DATEDIFF"
-                or "YEAR" or "MONTH" or "DAY" or "HOUR" or "MINUTE" or "SECOND" or "WEEKDAY" or "IMESTATUS" => typeof(int),
+                or "YEAR" or "MONTH" or "DAY" or "HOUR" or "MINUTE" or "SECOND" or "WEEKDAY" or "IMESTATUS" or "VARTYPE" => typeof(int),
             "CDATE" or "CVDATE" or "NOW" or "DATE" or "TIME" or "DATEADD" or "DATESERIAL" or "TIMESERIAL"
                 or "DATEVALUE" or "TIMEVALUE" or "GETUTCDATE" or "SYSDATETIME" or "SYSUTCDATETIME" => typeof(DateTime),
             "SQR" or "SIN" or "COS" or "TAN" or "ATN" or "LOG" or "EXP" or "RND"
                 or "SQRT" or "LN" or "LOG10" or "POWER" or "ASIN" or "ACOS" or "ATAN" or "ATAN2" or "SINH" or "COSH"
                 or "TANH" or "DEGREES" or "RADIANS" or "PI"
                 or "PMT" or "FV" or "PV" or "NPER" or "IPMT" or "PPMT" or "DDB" or "RATE" or "SLN" or "SYD" => typeof(double),
-            // IIF chooses between two values as CASE does, so it takes CASE's rule rather than ACE's own (which
-            // makes every whole number a Long, any Decimal a Double, and lets Currency beat Double).
-            "IIF" when function.Arguments.Count == 3 => UnifiedType(function.Arguments.Skip(1), columns),
-            // SWITCH and CHOOSE pick one of their values as IIF does, and take its rule.
-            "SWITCH" or "CHOOSE" => UnifiedType(ChoiceArms(function)!, columns),
-            // The standard makes COALESCE shorthand for a CASE over its arguments, so it takes the same rule:
-            // the highest-precedence type among them. Unified the same way, which also means a bare NULL
-            // argument contributes no type rather than erasing the others.
-            "COALESCE" => UnifiedType(function.Arguments, columns),
-            // GREATEST/LEAST return one of their arguments, so they declare the type the arguments unify to —
-            // SQL Server's "highest precedence type" rule, the same as COALESCE.
-            "GREATEST" or "LEAST" => UnifiedType(function.Arguments, columns),
+            // A choice — IIF, SWITCH, CHOOSE, COALESCE, GREATEST, LEAST — declares the type its arms unify to, as CASE
+            // does, rather than ACE's own rule (which makes every whole number a Long, any Decimal a Double, and lets
+            // Currency beat Double). The standard makes COALESCE shorthand for a CASE, and GREATEST/LEAST take SQL
+            // Server's "highest precedence type" rule, the same; a bare NULL arm contributes no type.
+            _ when ExpressionFunctions<Expression>.ChoiceArms(name, function.Arguments) is { } arms => UnifiedType(arms, columns),
             // NULLIF returns its first expression, or a NULL of that expression's type — so unlike COALESCE
             // it takes the first argument's type outright rather than unifying across both. The second
             // argument only ever participates in the comparison.
@@ -2821,7 +2810,17 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
         // and the projection each take the groups one at a time, and a scope per group made every group resolve its
         // column references afresh.
         var groups = new List<(object?[] KeyRow, Dictionary<FunctionCall, object?> Values, object?[] Keys)>();
-        ExpressionEvaluator groupEval = Eval(inColumns, [], outer);
+        // The nodes that are GROUP BY expressions, which a group's evaluation takes as its keys (Grouping).
+        var grouped = new HashSet<Expression>(ReferenceEqualityComparer.Instance);
+        void Grouped(Expression e)
+        {
+            if (e is not ColumnReference && node.GroupBy.Any(key => SameExpression(e, key, inColumns))) grouped.Add(e);
+            else foreach (Expression operand in e.Operands() ?? []) Grouped(operand);
+        }
+        foreach (Expression read in node.Projection.Select(item => item.Value)
+                     .Concat(node.Having is { } having ? [having] : []).Concat(node.OrderBy.Select(key => key.Value)))
+            Grouped(read);
+        ExpressionEvaluator groupEval = Eval(inColumns, [], outer).Grouping(grouped);
         foreach (GroupState state in groupStates)
         {
             var values = new Dictionary<FunctionCall, object?>(ReferenceComparer.Instance);
@@ -2859,7 +2858,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
         // Access/SQL Server do). The grouping key is the one the group was found by, already keyed.
         var outRows = new List<(object?[] Row, object?[] SortKeys, object?[] GroupKeys)>(groups.Count);
         bool[] sortByText = ComparedAsText(node.OrderBy.Select(k => k.Value), columns);
-        ExpressionEvaluator? windowEval = windows.Count > 0 ? Eval(columns, [], outer) : null;
+        ExpressionEvaluator? windowEval = windows.Count > 0 ? Eval(columns, [], outer).Grouping(grouped) : null;
         for (int g = 0; g < groups.Count; g++)
         {
             var (keyRow, values, keys) = groups[g];
@@ -3053,7 +3052,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
 
         /// <summary>Min, Max, First and Last take a Variant's or a Mixed value's text (verified vs ACE: Max of 3, 10
         /// and 25 held as Variants is "3").</summary>
-        public bool ByText => _byText ??= Name is "MIN" or "MAX" or "FIRST" or "LAST"
+        public bool ByText => _byText ??= ExpressionFunctions<Expression>.KeepsArgumentType(Name)
             && executor.VarianceOf(call.Arguments[0], columns) != Variance.None;
 
         public bool Currency => _currency ??=

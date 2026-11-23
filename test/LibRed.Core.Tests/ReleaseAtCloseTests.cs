@@ -94,14 +94,17 @@ public class ReleaseAtCloseTests
         string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "release-length-");
         try
         {
-            int before, highest;
+            int before, lowest, highest;
             using (var db = JetDatabase.Open(path, readOnly: false))
             {
                 PageChannel channel = db.OpenTable("MSysObjects").Channel;
                 var allocator = channel.Allocator;
                 before = ReleasedBits(channel).Length;
-                for (int i = 0; i < 400; i++) allocator.Allocate();
+                lowest = allocator.Allocate();
+                for (int i = 1; i < 400; i++) allocator.Allocate();
                 highest = channel.PageCount - 1;
+                Assert.True(lowest < before * 8);
+                allocator.Release(lowest);
                 allocator.Release(highest);
             }
 
@@ -114,7 +117,41 @@ public class ReleaseAtCloseTests
                 Assert.True(expected > before);
                 Assert.Equal(expected, ReleasedBits(channel).Length);
                 Assert.All(ReleasedBits(channel), b => Assert.Equal(0, b));
-                Assert.True(FreeMapBit(channel,highest));
+                Assert.True(FreeMapBit(channel, lowest));
+                Assert.True(FreeMapBit(channel, highest));
+            }
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // Released pages all past the window move it, the record keeping its length (measured vs ACE: pages 664-669
+    // released into a 69-byte record at page 0 leave it at page 664, 69 bytes; pages near 1968 at 1968).
+    [Fact]
+    public void The_close_moves_the_released_map_to_pages_released_past_its_window()
+    {
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "release-move-");
+        try
+        {
+            int before, highest;
+            using (var db = JetDatabase.Open(path, readOnly: false))
+            {
+                PageChannel channel = db.OpenTable("MSysObjects").Channel;
+                var allocator = channel.Allocator;
+                before = ReleasedBits(channel).Length;
+                for (int i = 0; i < 400; i++) allocator.Allocate();
+                highest = channel.PageCount - 1;
+                Assert.True(highest >= before * 8);
+                allocator.Release(highest);
+            }
+
+            using (var db = JetDatabase.Open(path))
+            {
+                PageChannel channel = db.OpenTable("MSysObjects").Channel;
+                (_, _, byte[] holder, DataPage.RowSlot slot) = TestDatabases.GlobalMap(channel, Format.ReleasedPagesMapPointerOffset);
+                Assert.Equal(highest / 8 * 8, UsageMap.StartPage(InlineMap(holder, slot), Format));
+                Assert.Equal(before, ReleasedBits(channel).Length);
+                Assert.All(ReleasedBits(channel), b => Assert.Equal(0, b));
+                Assert.True(FreeMapBit(channel, highest));
             }
         }
         finally { TemporaryDatabase.Delete(path); }

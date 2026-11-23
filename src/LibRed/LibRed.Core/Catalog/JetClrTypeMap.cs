@@ -1,6 +1,4 @@
-using LibRed.Catalog;
-
-namespace LibRed.Engine.Schema;
+namespace LibRed.Catalog;
 
 /// <summary>Maps Jet/ACE column types to the CLR types the engine exposes.</summary>
 public static class JetClrTypeMap
@@ -26,4 +24,13 @@ public static class JetClrTypeMap
         JetDataType.Complex => typeof(int),
         _ => typeof(object),
     };
+
+    /// <summary>What a stored <paramref name="column"/>'s values are taken to be: its CLR type, whether it is a
+    /// Currency, and a Decimal column's scale and precision (null for any other column).</summary>
+    internal static (Type ClrType, bool Currency, int? Scale, int? Precision) ValueType(ColumnDef column)
+    {
+        bool numeric = column.Type == JetDataType.FixedPoint;
+        return (ToClrType(column.Type), column.Type == JetDataType.Currency,
+            numeric ? column.Scale : null, numeric ? column.Precision : null);
+    }
 }

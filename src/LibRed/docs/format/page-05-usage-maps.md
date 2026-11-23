@@ -294,13 +294,16 @@ Any page set in the released-pages map is likewise **never allocated**, and at c
 the free map and the map is left empty. Before that merge, the close sizes the map to cover every page released.
 An inline record that already covers them stays as it is. Otherwise, in order of preference:
 
-- **Lengthen it.** Keeping its start page, the record grows, never shrinks, to the shortest that covers the
-  highest page released: 5 header bytes plus `roundUp(⌈(highest + 1 − start) / 8⌉, 4)` bitmap bytes — page 569
-  gives a 77-byte record, page 728 a 97-byte one. The record grows only while its holder keeps **4 bytes free**,
-  the same limit as the free map's growth below.
-- **Move its window.** When that is too long, the start page becomes the lowest page released rounded down to a
-  multiple of 8, and the record is sized the same way from there — pages 32,819–33,825 released into a 69-byte
-  record starting at page 0 give start page 32,816 and a 133-byte record.
+- **Lengthen it** — only when its window already reaches the lowest page released. Keeping its start page, the
+  record grows, never shrinks, to the shortest that covers the highest page released: 5 header bytes plus
+  `roundUp(⌈(highest + 1 − start) / 8⌉, 4)` bitmap bytes — pages below 512 released with pages up to 1,969 give
+  a 253-byte record from page 0. The record grows only while its holder
+  keeps **4 bytes free**, the same limit as the free map's growth below.
+- **Move its window.** When every page released lies past the window, or lengthening is too long, the start page
+  becomes the lowest page released rounded down to a multiple of 8, and the record is sized the same way from
+  there, never shrinking — pages 664–669 released into a 69-byte record starting at page 0 give start page 664 and
+  the same 69 bytes, though lengthening would have taken only 89; pages 32,819–33,825 give start page 32,816 and a
+  133-byte record.
 - **Convert it to reference form.** When even the moved window is too long:
   1. the inline record grows at its old start just far enough to cover the highest released page it can reach
      — at most 4,005 bytes beside a 69-byte free map, covering 32,000 pages — and the released pages it covers

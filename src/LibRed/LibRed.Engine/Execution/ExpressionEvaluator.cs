@@ -11,27 +11,6 @@ using System.Text.RegularExpressions;
 
 namespace LibRed.Engine.Execution;
 
-/// <summary>What ACE takes a result to be, as far as its decimal places go (see
-/// <see cref="ExpressionEvaluator.NumberTypeOf"/>).</summary>
-internal enum NumberClass
-{
-    Other,
-    Whole,
-    Text,
-    Date,
-    Decimal,
-    Currency,
-    Double,
-}
-
-/// <summary>A result's <see cref="NumberClass"/>, with its places when it is a Decimal, and the whole digits it counts
-/// beside a Decimal: a Decimal's precision is <c>Integers + Places</c>.</summary>
-internal readonly record struct NumberType(NumberClass Class, int Places = 0, int Integers = 0)
-{
-    /// <summary>A Decimal's precision.</summary>
-    public int Precision => Integers + Places;
-}
-
 /// <summary>
 /// Evaluates an AST <see cref="Expression"/> against a single row, resolving column
 /// references through an <see cref="EvalScope"/> (which chains to outer scopes for
@@ -69,9 +48,45 @@ internal sealed partial class ExpressionEvaluator(
     /// beats a Double (<c>WHERE F * 1.11 = 0.111</c> holds for a Double 0.1). Anything else is a result value — a
     /// column, a sort or group key, an aggregate's argument, a value written — whose arithmetic is the same but for
     /// the written numbers beside which the result is a Double (<see cref="NumberTypeOf"/>): those are Doubles, so
-    /// <c>F * 1.11</c> is 0.11100000000000002 there.
+    /// <c>F * 1.11</c> is 0.11100000000000002 there. A VBA Boolean (<see cref="VbaBoolean"/>) is one only while the
+    /// expression uses it: what an evaluation hands out is the plain Boolean (verified vs ACE: a subquery's or derived
+    /// table's <c>IsNull(x)</c> is written "-1" by the query around it, where the expression's own <c>&amp;</c> writes
+    /// "True").
     /// </summary>
-    public override object? Evaluate(Expression expression) => expression switch
+    public override object? Evaluate(Expression expression)
+    {
+        if (_evaluating)
+            return _grouped?.Contains(expression) == true ? VbaBoolean.Plain(Value(expression)) : Value(expression);
+        if (expression is LiteralExpression or ColumnReference)
+            return Value(expression);
+        _evaluating = true;
+        try
+        {
+            return VbaBoolean.Plain(Value(expression));
+        }
+        finally
+        {
+            _evaluating = false;
+        }
+    }
+
+    /// <summary>Whether an evaluation is under way (<see cref="Evaluate"/>), so a value is handed to the expression
+    /// around it rather than out.</summary>
+    private bool _evaluating;
+
+    /// <summary>The expressions a grouped query's group keys are (<see cref="Grouping"/>), by node.</summary>
+    private IReadOnlySet<Expression>? _grouped;
+
+    /// <summary>Evaluates <paramref name="grouped"/> — the nodes of a grouped query's projection that are its GROUP BY
+    /// expressions — as the group keys they are: values handed out of their own evaluation, so a VBA Boolean among
+    /// them is plain (verified vs ACE: <c>IsNull(A) &amp; ''</c> grouped by <c>IsNull(A)</c> is "-1", not "True").</summary>
+    public ExpressionEvaluator Grouping(IReadOnlySet<Expression> grouped)
+    {
+        _grouped = grouped;
+        return this;
+    }
+
+    private object? Value(Expression expression) => expression switch
     {
         LiteralExpression l => l.Value,
         ColumnReference c => scope.TryResolve(c, out object? v) ? v
@@ -95,7 +110,7 @@ internal sealed partial class ExpressionEvaluator(
         SystemVariableExpression v => ResolveSystemVariable(v.Name),
         OutputColumnPosition p => scope.At(p.Position),
         SoughtValue s => Sought(s),
-        ComparedAsWritten w => !ComparedByTruth(Evaluate(w.Value)?.GetType(), IsCurrency(w.Value)),
+        ComparedAsWritten w => !ComparedByTruth(VbaBoolean.Plain(Evaluate(w.Value))?.GetType(), IsCurrency(w.Value)),
         _ => throw new NotSupportedException($"Cannot evaluate {expression.GetType().Name}."),
     };
 
@@ -106,7 +121,7 @@ internal sealed partial class ExpressionEvaluator(
     /// the column converts it, Null where the column cannot hold it, and as it is where the index cannot answer for it.</summary>
     private object? Sought(SoughtValue s)
     {
-        object? value = Evaluate(s.Value);
+        object? value = VbaBoolean.Plain(Evaluate(s.Value));
         // IDE0028's only fix here is `[]`, which would drop the comparer and key the nodes structurally.
 #pragma warning disable IDE0028
         _soughtColumns ??= new Dictionary<SoughtValue, ColumnDef?>(ReferenceEqualityComparer.Instance);
@@ -182,7 +197,7 @@ internal sealed partial class ExpressionEvaluator(
     /// <c>=</c> (measured; deliberately not followed).</summary>
     private bool? EvaluateInSubquery(InSubqueryExpression inq)
     {
-        object? val = Evaluate(inq.Value);
+        object? val = VbaBoolean.Plain(Evaluate(inq.Value));
         bool membership = inq is { Comparison: BinaryOperator.Equal, All: false };
         bool? result = null;
 
@@ -462,16 +477,20 @@ internal sealed partial class ExpressionEvaluator(
     // as a -1/0 integer — the nullable-bool convention — works as a bare predicate), a null as not-true.
     public bool IsTrue(Expression expression) => AsBool(Evaluate(expression)) is true;
 
+    // DELIBERATE DUPLICATE (the owner's decision, 2026-11-23; CLAUDE.md "One copy of every function"): EvaluateUnary,
+    // EvaluateBinary, EvaluateInList and CompareAsKinds dispatch the operators over the SQL AST as CalculatedEvaluator's
+    // Unary, Binary, In and CompareAsKinds do over a CalcNode, calling the same ExpressionFunctions helpers; where they
+    // differ, and why, is listed at CalculatedEvaluator.Unary. A change to one is made to the other.
     private object? EvaluateUnary(UnaryExpression u)
     {
         // NOT EXISTS is not the lookup EXISTS is: ACE compares its correlation as written (ExecuteExists).
         if (u is { Operator: UnaryOperator.Not, Operand: ExistsExpression notExists })
             return !subqueries.ExecuteExists(notExists.Query, scope, negated: true);
 
-        object? v = Evaluate(u.Operand);
+        object? v = VbaBoolean.Plain(Evaluate(u.Operand));
         return u.Operator switch
         {
-            UnaryOperator.Not => AsBool(v) is bool b ? !b : null, // coerce a -1/0 integer boolean too
+            UnaryOperator.Not => Not(v),
             UnaryOperator.Negate => v is null ? null : Negate(v),
             UnaryOperator.BitNot => v is null ? null : BitNot(v),
             UnaryOperator.IsNull => v is null,
@@ -492,19 +511,10 @@ internal sealed partial class ExpressionEvaluator(
 
     private object? EvaluateBinary(BinaryExpression b)
     {
-        // AND/OR use Kleene three-valued logic, and short-circuit: `false AND x` is false and `true OR x`
-        // is true regardless of x — so the right operand (which may be an expensive correlated subquery) is
-        // only evaluated when it can affect the result.
         if (b.Operator is BinaryOperator.And)
-        {
-            bool? l = AsBool(Evaluate(b.Left));
-            return l == false ? false : l & AsBool(Evaluate(b.Right));
-        }
+            return And(b.Left, b.Right);
         if (b.Operator is BinaryOperator.Or)
-        {
-            bool? l = AsBool(Evaluate(b.Left));
-            return l == true ? true : l | AsBool(Evaluate(b.Right));
-        }
+            return Or(b.Left, b.Right);
         // XOR and EQV are Null when either side is; IMP is True whenever its left side is False or its right side
         // is True, and Null otherwise when a side is Null (the VBA truth tables; verified vs ACE).
         if (b.Operator is BinaryOperator.Xor or BinaryOperator.Eqv or BinaryOperator.Imp)
@@ -537,11 +547,9 @@ internal sealed partial class ExpressionEvaluator(
             right = Evaluate(b.Right);
         }
 
-        // '&' treats a single Null as "" but is Null when both sides are (verified vs ACE).
         if (b.Operator == BinaryOperator.Concat)
-            return left is null && right is null
-                ? null
-                : (left is null ? "" : ConcatText(left)) + (right is null ? "" : ConcatText(right));
+            return Concat(left, right);
+
 
         // IS [NOT] DISTINCT FROM is '=' with Null taken as a value, so it is never Null: two Nulls are not
         // distinct, a Null and a value are.
@@ -553,14 +561,8 @@ internal sealed partial class ExpressionEvaluator(
             return distinct == (b.Operator == BinaryOperator.IsDistinctFrom);
         }
 
-        // A Currency plus or less a Double, a Single or text takes the other as a Currency column takes it, first
-        // (verified vs ACE: Currency 0.0001 + Double 0.03125 is 0.0313, where the exact sum rounds to 0.0314, and
-        // 0.0001 + '1.00005' is 1.0001, the text read exactly).
-        if (b.Operator is BinaryOperator.Add or BinaryOperator.Subtract && left is not null && right is not null && IsCurrency(b))
-        {
-            if (left is double or float or string or char) left = AsCurrencyColumn(left);
-            if (right is double or float or string or char) right = AsCurrencyColumn(right);
-        }
+        if (b.Operator is BinaryOperator.Add or BinaryOperator.Subtract)
+            (left, right) = CurrencySumOperands(left, right, IsCurrency(b));
 
         // The arithmetic operators other than '+' read text as a number even when the other side is Null, so text
         // that is not a number, a GUID or a binary value is a type mismatch before Null propagates (verified vs
@@ -572,10 +574,10 @@ internal sealed partial class ExpressionEvaluator(
             right = NumericOperand(right);
         }
 
-        // A pattern written as just '%' is False for Null rather than Null, so it reads as IS NOT NULL (verified vs ACE;
-        // '%%', or a '%' the pattern is computed to, stays Null).
-        if (left is null && b.Operator == BinaryOperator.Like && b.Right is LiteralExpression { Value: "%" })
-            return false;
+        // A pattern written as just '%' is IS NOT NULL, a comparison's -1 or 0 rather than a Like's VBA Boolean, and False
+        // for Null rather than Null (verified vs ACE; '%%', or a '%' the pattern is computed to, stays Null).
+        if (b.Operator == BinaryOperator.Like && b.Right is LiteralExpression { Value: "%" })
+            return Boxed(left is not null);
 
         // `x <> Null`, with the Null written on the right, is `x Is Not Null` (verified vs ACE, for a Yes/No, number,
         // text and date column alike; `Null <> x` and a Null parameter stay Null).
@@ -596,23 +598,14 @@ internal sealed partial class ExpressionEvaluator(
                 if (b.Left is LiteralExpression && left is decimal written) left = JetDecimalConverter.FromDecimal(written);
                 if (b.Right is LiteralExpression && right is decimal writtenRight) right = JetDecimalConverter.FromDecimal(writtenRight);
             }
-            // A Currency beside a Double or Single, or divided, is worked out as a Double, as OLE Automation does
-            // (verified vs ACE: Currency 1.1 * Double 0.1 is 0.11000000000000001, and Currency / 3 a Double).
-            bool divide = b.Operator == BinaryOperator.Divide;
-            if ((divide || right is double or float) && left is decimal money && IsCurrency(b.Left))
-                left = JetDecimalConverter.FromDecimal(money);
-            if ((divide || left is double or float) && right is decimal moneyRight && IsCurrency(b.Right))
-                right = JetDecimalConverter.FromDecimal(moneyRight);
+            (left, right) = CurrencyProductOperands(
+                left, right, b.Operator == BinaryOperator.Divide, IsCurrency(b.Left), IsCurrency(b.Right));
         }
 
         if (b.Operator is BinaryOperator.Equal or BinaryOperator.NotEqual && TruthTest(b, left, right) is bool truth)
             return Boxed(b.Operator == BinaryOperator.Equal ? truth : !truth);
 
-        // A result that is a Currency (NumberTypeOf) is one at every step, not only in the result column: its four
-        // places and its range apply to it where it is worked out, as CCur applies them (verified vs ACE: Currency
-        // 1.2345 * 1.2345 is 1.524, 0.0003 * 1.2345 is 0.0004, and the largest Currency + 1 or * 3 is an
-        // overflow). A Currency with a written decimal is not one, nor one times a Double; one plus or less a Double
-        // is (verified vs ACE: Currency 1.2345 + Double 1.5 is the Currency 2.7345).
+        // A result that is a Currency (NumberTypeOf) is one at every step (CurrencyStep).
         if (b.Operator is BinaryOperator.Add or BinaryOperator.Subtract or BinaryOperator.Multiply)
         {
             object result = b.Operator switch
@@ -621,7 +614,7 @@ internal sealed partial class ExpressionEvaluator(
                 BinaryOperator.Subtract => Arithmetic(left, right, '-'),
                 _ => Arithmetic(left, right, '*'),
             };
-            return result is decimal or double or float && IsCurrency(b) ? ToCurrency(result) : result;
+            return CurrencyStep(result, IsCurrency(b));
         }
 
         return b.Operator switch
@@ -632,7 +625,7 @@ internal sealed partial class ExpressionEvaluator(
             // LIKE reads any other value as the text CStr gives it (verified vs ACE: TRUE LIKE '-1' is True). A binary
             // value becomes text too, so LIKE is case-insensitive over a binary column even though '=' on the same
             // column is byte-wise: `B LIKE 'A%'` matches both 0x4100 ('A') and 0x6100 ('a').
-            BinaryOperator.Like => LikeMatcher.IsMatch(ConcatText(left), ConcatText(right)),
+            BinaryOperator.Like => VbaBoolean.Of(LikeMatcher.IsMatch(ConcatText(left), ConcatText(right))),
             BinaryOperator.Divide => Divide(left, right), // Access '/' is floating division
             BinaryOperator.Modulo => IntegerOp(left, right, '%'),
             BinaryOperator.IntDivide => IntegerOp(left, right, '\\'),
@@ -754,9 +747,9 @@ internal sealed partial class ExpressionEvaluator(
     /// <c>2 = True</c>, <c>'abc' = True</c> and <c>'' = True</c> are all True, while <c>'0' = False</c> is True.
     /// Null for any other comparison.
     /// </summary>
-    private static bool? TruthTest(BinaryExpression b, object left, object right) =>
-        b.Right is LiteralExpression { Value: bool rightLiteral } ? IsTruthy(left) == rightLiteral
-        : b.Left is LiteralExpression { Value: bool leftLiteral } ? IsTruthy(right) == leftLiteral
+    private bool? TruthTest(BinaryExpression b, object left, object right) =>
+        b.Right is LiteralExpression { Value: bool rightLiteral } ? AsBool(left) == rightLiteral
+        : b.Left is LiteralExpression { Value: bool leftLiteral } ? AsBool(right) == leftLiteral
         : null;
 
     /// <summary>The order of a comparison operator's two operands. Two texts compare by collation key, as
@@ -801,12 +794,17 @@ internal sealed partial class ExpressionEvaluator(
     /// that is not written, beside a Large Number (Int64) or date column itself, is 0 to the one and a date to the
     /// other (verified vs ACE). Text a parameter or function gives, or a Double or Single parameter, beside a
     /// Currency column is that Currency first, to four places half to even as <c>CCur</c> rounds (verified vs ACE for
-    /// a parameter, with an index or without; a Decimal column takes it as it is). A Currency value or a Decimal
-    /// parameter beside a binary value compares as text, the number's text against the binary read as UTF-16
-    /// (verified vs ACE, where no index answers). <c>=</c> and the other comparison operators, an IN list's items,
+    /// a parameter, with an index or without; a Decimal column takes it as it is). A Currency value, a number or Boolean
+    /// the statement is passed, or one it computes other than a Large Number (Int64), beside a binary value
+    /// compares as text, the number's text — a Boolean's "-1" or "0" — against the binary read as UTF-16 (verified vs
+    /// ACE, where no index answers: <c>[B] = (1=1)</c> and <c>[B] = CInt(True)</c> find 0x2D003100, <c>[B] = CLng(1)</c>,
+    /// <c>= CDbl(1)</c> and <c>= CLng(1) + 0</c> 0x31000000, <c>[B] = (1=0)</c> what reads as "0", and a Byte, Integer,
+    /// Long, Single, Double or Decimal parameter 1 finds 0x31000000 and 0x3100, and so does a Large Number one, sent as
+    /// OLE DB's Numeric since ACE's OLE DB provider carries no BigInt parameter). <c>=</c> and the other comparison operators, an IN list's items,
     /// BETWEEN's bounds and IS [NOT] DISTINCT FROM compare through here.</summary>
     private int CompareAsKinds(Expression leftOperand, object left, Expression rightOperand, object right)
     {
+        (left, right) = ComparedBooleans(left, right);
         bool currencyOnLeft = CurrencyBeside(left, leftOperand, right, rightOperand);
         if (currencyOnLeft || CurrencyBeside(right, rightOperand, left, leftOperand))
         {
@@ -822,8 +820,10 @@ internal sealed partial class ExpressionEvaluator(
             (left, right) = currencyOnLeft ? (left, given) : (given, right);
         }
         else if ((left is byte[] ? (Number: right, NumberOperand: rightOperand) : (Number: left, NumberOperand: leftOperand))
-            is { Number: decimal } beside && (left is byte[] || right is byte[])
-            && (beside.NumberOperand is ParameterExpression || IsCurrency(beside.NumberOperand)))
+            is var beside && (left is byte[] || right is byte[])
+            && (beside.Number is decimal && IsCurrency(beside.NumberOperand)
+                || IsNumeric(beside.Number)
+                    && (beside.Number is not long && IsComputed(beside.NumberOperand) || beside.NumberOperand is ParameterExpression)))
             (left, right) = (ConcatText(left), ConcatText(right));
 
         // A text column or written text beside a Yes/No column is ACE's type mismatch, whatever the text holds
@@ -853,17 +853,15 @@ internal sealed partial class ExpressionEvaluator(
             object read = column is long ? 0L : AsDateColumn(given);
             (left, right) = columnOnLeft ? (left, read) : (read, right);
         }
-        // A GUID or binary value sorts below any number or Boolean the statement computes or is passed (verified
-        // vs ACE: [G] = CInt(True) and [G] >= (1=1) select nothing, [G] <> ? and [G] < ? every row with a value);
-        // beside a written number it stays Comparable's type mismatch, and so does a Large Number (Int64) the statement
-        // computes, not one it is passed, beside a binary value (verified vs ACE: [B] = [L] + 0 is "Type mismatch in
-        // expression").
-        // Written once with the GUID or binary value first; the order is the other way round when it is on the right.
-        bool keyOnLeft = left is Guid or byte[];
+        // A GUID sorts below any number or Boolean the statement computes or is passed (verified vs ACE: [G] = CInt(True)
+        // and [G] >= (1=1) select nothing, [G] <> ? and [G] < ? every row with a value; one a binary value is beside
+        // compares as text, above); beside a written number it stays Comparable's type mismatch, and so does a Large
+        // Number (Int64) the statement computes beside a binary value (verified vs ACE: [B] = [L] + 0 is "Type mismatch
+        // in expression").
+        // Written once with the GUID first; the order is the other way round when it is on the right.
+        bool keyOnLeft = left is Guid;
         var (key, number, numberOperand) = keyOnLeft ? (left, right, rightOperand) : (right, left, leftOperand);
-        if (key is Guid or byte[] && IsNumeric(number)
-            && !(key is byte[] && number is long && numberOperand is not ParameterExpression)
-            && (numberOperand is ParameterExpression || IsComputed(numberOperand)))
+        if (key is Guid && IsNumeric(number) && (numberOperand is ParameterExpression || IsComputed(numberOperand)))
             return keyOnLeft ? -1 : 1;
         return CompareValues(left, right, Text);
 
@@ -922,7 +920,8 @@ internal sealed partial class ExpressionEvaluator(
     /// <para>A number or Boolean the statement computes or is passed, compared with a GUID or binary column, is
     /// likewise the value storing it there gives: a Long (Int32) a GUID's first four bytes, a number or Boolean its
     /// own bytes, a Currency its eight-byte scaled integer — and one the column refuses finds no row, or is "Data type
-    /// mismatch" as a bound (verified vs ACE, through its index).</para>
+    /// mismatch" as a bound, except bytes too few for a GUID, which are the refusal storing them gives either way
+    /// (verified vs ACE, through its index: <c>[G] = 0.5 + 0.5</c> is refused).</para>
     /// </remarks>
     internal static SeekKey TryGetSeekKey(ColumnDef column, Expression operand, object? value, bool bound, out object? key)
     {
@@ -936,10 +935,8 @@ internal sealed partial class ExpressionEvaluator(
         else if (value is string or char
                 ? columnKind is IndexSelection.TypeKind.Numeric or IndexSelection.TypeKind.Temporal
                     && column.Type != JetDataType.Boolean && NotWritten(operand)
-                // A Byte is left to the comparison as written, which gives ACE's answer for CByte: ACE's CByte is an
-                // Integer (Int16), LibRed's a Byte, so converting it here would store the wrong bytes.
                 : (columnKind is IndexSelection.TypeKind.Binary or IndexSelection.TypeKind.Guid
-                    && IsNumeric(value) && value is not byte && (operand is ParameterExpression || IsComputed(operand)))
+                    && IsNumeric(value) && (operand is ParameterExpression || IsComputed(operand)))
                     || (column.Type == JetDataType.Currency && value is double or float && operand is ParameterExpression))
         {
             try
@@ -947,7 +944,8 @@ internal sealed partial class ExpressionEvaluator(
                 key = columnKind switch
                 {
                     IndexSelection.TypeKind.Temporal => AsDateColumn(value),
-                    IndexSelection.TypeKind.Guid => JetTypeCodec.ToStoredValue(column, column.Type, value),
+                    IndexSelection.TypeKind.Guid => JetTypeCodec.ToStoredValue(column, column.Type,
+                        JetTypeCodec.CurrencyAsStored(column.Type, value, IsCurrency(operand, []))),
                     // Without the zero padding a fixed-length column adds when it stores the value (verified vs ACE).
                     IndexSelection.TypeKind.Binary => JetTypeCodec.AsBinary(JetTypeCodec.NumberFromText(
                             column.Type, JetTypeCodec.CurrencyAsStored(column.Type, value, IsCurrency(operand, []))), currency: false)
@@ -961,8 +959,9 @@ internal sealed partial class ExpressionEvaluator(
                     },
                 };
             }
-            catch (Exception e) when (e is InvalidCastException or FormatException or NotSupportedException
-                or OverflowException or InvalidOperationException)
+            // Bytes too few for a GUID are let through as the refusal (see the remarks).
+            catch (Exception e) when ((e is InvalidCastException or FormatException or NotSupportedException
+                or OverflowException or InvalidOperationException) && !(e is InvalidOperationException && columnKind == IndexSelection.TypeKind.Guid))
             {
                 if (bound)
                     throw new InvalidCastException($"Data type mismatch: '{value}' cannot be a bound of column '{column.Name}'.", e);
@@ -1024,9 +1023,9 @@ internal sealed partial class ExpressionEvaluator(
     /// larger places and precision 28 (1.5 - Currency 3.25 is -1.7500), and Currency with a Double is a
     /// Currency.</item>
     /// <item><c>Sum</c> keeps its argument's places at a precision of 28; <c>Min</c>, <c>Max</c>, <c>First</c> and
-    /// <c>Last</c> keep its type, and so — where ACE makes them Doubles, LibRed keeping the type .NET does — do
-    /// <c>Round</c>, <c>Abs</c>, <c>Int</c> and <c>Fix</c> of a Decimal or Currency, and a choice its Decimal or
-    /// Currency arms'. Any other function, a parameter or anything else is not a Decimal; a function
+    /// <c>Last</c> keep its type, and so do <c>Round</c>, <c>Abs</c>, <c>Int</c> and <c>Fix</c> of a Decimal or Currency
+    /// (verified vs ACE: <c>Round([Price],2) + [Qty]/32</c> is a Currency), and — where ACE makes it a Double, LibRed
+    /// keeping the type .NET does — a choice its Decimal or Currency arms'. Any other function, a parameter or anything else is not a Decimal; a function
     /// returning text or a date counts as text or a date (1.5 / Left('12', 2) is 0.1), as
     /// <paramref name="declaredType"/> says.</item>
     /// </list>
@@ -1034,179 +1033,32 @@ internal sealed partial class ExpressionEvaluator(
     internal static NumberType NumberTypeOf(
         Expression expression, IReadOnlyList<OutputColumn> columns, Func<Expression, Type?> declaredType)
     {
-        NumberType Of(Expression e) => NumberTypeOf(e, columns, declaredType);
-        const int Most = AccessTypeMapper.MaxDecimalPrecision;
-
-        // A choice's arms taken together as + takes them, but for two Decimals past 28 digits, which + makes a Double:
-        // a choice computes nothing, so it is the Decimal of the larger places that holds either arm, its whole digits
-        // cut to fit. A Double arm, or anything else that is not a Decimal or a Currency, leaves the choice to its
-        // declared type.
-        NumberType Chosen(IEnumerable<Expression> arms)
+        return NumberTypeOf(expression, e => e switch
         {
-            NumberType? chosen = null;
-            foreach (Expression arm in arms)
-            {
-                if (arm is LiteralExpression { Value: null }) continue;
-                NumberType type = Of(arm);
-                if (type.Class is NumberClass.Double or NumberClass.Other) return new(NumberClass.Other);
-                if (chosen is not { } before)
-                {
-                    chosen = type;
-                    continue;
-                }
-                NumberType both = Sum(before, type, add: false);
-                int places = Math.Max(before.Places, type.Places);
-                chosen = both.Class == NumberClass.Double ? new(NumberClass.Decimal, places, Most - places) : both;
-            }
-            return chosen is { Class: NumberClass.Decimal or NumberClass.Currency } kept ? kept : new(NumberClass.Other);
-        }
-
-        switch (expression)
-        {
-            case LiteralExpression literal:
-                return literal.Value switch
-                {
-                    decimal written when (written / 1.0000000000000000000000000000m).Scale is var places =>   // trailing zeros dropped
-                        new(NumberClass.Decimal, places, Most - places),
-                    // A whole number too big for a Long is a Decimal to ACE, so Currency * 864000000000 is a Double
-                    // there rather than an overflowing Currency (verified vs ACE); LibRed keeps the value an Int64.
-                    long => new(NumberClass.Decimal, 0, Most),
-                    int or short or byte or bool => new(NumberClass.Whole, Integers: WholeDigits(literal.Value.GetType())),
-                    double or float => new(NumberClass.Double),
-                    string => new(NumberClass.Text, Integers: Most),
-                    DateTime => new(NumberClass.Date, Integers: Most),
-                    _ => new(NumberClass.Other),
-                };
-            case ColumnReference reference:
-                if (OutputColumn.Find(columns, reference) is not { } column)
-                    return new(NumberClass.Other);
-                if (column.Currency)
-                    return new(NumberClass.Currency);
-                if (column.Scale is int scale)
-                    return new(NumberClass.Decimal, scale, (column.Precision ?? Most) - scale);
-                Type? type = column.ClrType;
-                return type == typeof(double) || type == typeof(float) ? new(NumberClass.Double)
-                    : type == typeof(int) || type == typeof(long) || type == typeof(short) || type == typeof(byte)
-                        || type == typeof(bool) ? new(NumberClass.Whole, Integers: WholeDigits(type))
-                    : type == typeof(string) ? new(NumberClass.Text, Integers: Most)
-                    : type == typeof(DateTime) ? new(NumberClass.Date, Integers: Most)
-                    : new(NumberClass.Other);
-            case UnaryExpression { Operator: UnaryOperator.Negate } negation:
-                return Of(negation.Operand);
-            case BinaryExpression { Operator: BinaryOperator.Multiply or BinaryOperator.Divide } product:
-                return Product(Of(product.Left), Of(product.Right), product.Operator == BinaryOperator.Divide);
-            case BinaryExpression { Operator: BinaryOperator.Add or BinaryOperator.Subtract } sum:
-                return Sum(Of(sum.Left), Of(sum.Right), sum.Operator == BinaryOperator.Add);
-            case BinaryExpression { Operator: BinaryOperator.IntDivide or BinaryOperator.Modulo }:
-                return new(NumberClass.Whole, Integers: WholeDigits(typeof(int)));
-            case BinaryExpression { Operator: BinaryOperator.Power }:
-                return new(NumberClass.Double);
-            case FunctionCall function when function.Name.Equals("CCUR", StringComparison.OrdinalIgnoreCase):
-                return new(NumberClass.Currency);
-            case FunctionCall { Arguments: [var argument] } function
-                when function.Name.Equals("SUM", StringComparison.OrdinalIgnoreCase):
-                NumberType summed = Of(argument);
-                return summed.Class == NumberClass.Decimal ? summed with { Integers = Most - summed.Places } : summed;
-            case FunctionCall { Arguments: [var argument] } function
-                when function.Name.ToUpperInvariant() is "MIN" or "MAX" or "FIRST" or "LAST":
-                return Of(argument);
-            // Round, Abs, Int and Fix keep a Decimal's or a Currency's type, as their declared type does
-            // (QueryExecutor.KeptNumberType), where ACE makes them Doubles.
-            case FunctionCall { Arguments: [var kept, ..] } function
-                when function.Name.ToUpperInvariant() is "ROUND" or "ABS" or "INT" or "FIX" or "FLOOR" or "CEILING" or "CEIL"
-                    && Of(kept).Class is NumberClass.Decimal or NumberClass.Currency:
-                return Of(kept);
+            LiteralExpression { Value: null } => new NumberNode.WrittenNull(),
+            LiteralExpression literal => new NumberNode.Known(WrittenNumberType(literal.Value)),
+            ColumnReference reference => new NumberNode.Known(OutputColumn.Find(columns, reference) is { } column
+                ? ColumnNumberType(column.Currency, column.Scale, column.Precision, column.ClrType)
+                : new(NumberClass.Other)),
+            UnaryExpression { Operator: UnaryOperator.Negate } negation => new NumberNode.Negation(negation.Operand),
+            BinaryExpression { Operator: BinaryOperator.Multiply or BinaryOperator.Divide } product =>
+                new NumberNode.Multiplied(product.Left, product.Right, product.Operator == BinaryOperator.Divide),
+            BinaryExpression { Operator: BinaryOperator.Add or BinaryOperator.Subtract } sum =>
+                new NumberNode.Added(sum.Left, sum.Right, sum.Operator == BinaryOperator.Add),
+            BinaryExpression { Operator: BinaryOperator.IntDivide or BinaryOperator.Modulo } =>
+                new NumberNode.Known(new(NumberClass.Whole, Integers: WholeDigits(typeof(int)))),
+            BinaryExpression { Operator: BinaryOperator.Power } => new NumberNode.Known(new(NumberClass.Double)),
             // A choice keeps its Decimal or Currency arms' type beside whole numbers, as its declared type does
             // (QueryExecutor.UnifiedType), where ACE makes it a Double.
-            case CaseExpression @case:
-                return Chosen(QueryExecutor.CaseResults(@case));
-            case FunctionCall function when QueryExecutor.ChoiceArms(function) is { } arms:
-                return Chosen(arms);
-            case FunctionCall { WithinGroup: not null, Arguments: [_, var key] } function
-                when function.Name.Equals("PERCENTILE_DISC", StringComparison.OrdinalIgnoreCase):
-                return Of(key);
-            case FunctionCall function:
-                Type? returns = declaredType(function);
-                return returns == typeof(string) ? new(NumberClass.Text, Integers: Most)
+            CaseExpression @case => new NumberNode.Choice(QueryExecutor.CaseResults(@case)),
+            FunctionCall { WithinGroup: not null, Arguments: [_, var key] } function
+                when function.Name.Equals("PERCENTILE_DISC", StringComparison.OrdinalIgnoreCase) => new NumberNode.Same(key),
+            FunctionCall function => new NumberNode.Function(new(function.Name, function.Arguments), () =>
+                declaredType(function) is var returns && returns == typeof(string) ? new(NumberClass.Text, Integers: Most)
                     : returns == typeof(DateTime) ? new(NumberClass.Date, Integers: Most)
-                    : new(NumberClass.Other);
-            default:
-                return new(NumberClass.Other);
-        }
-    }
-
-    /// <summary>The whole digits a whole number of <paramref name="type"/> counts beside a Decimal: an Integer's or a
-    /// Boolean's five, a Byte's or a Long's ten (verified vs ACE: DECIMAL(4,1) * INTEGER and * BIT are DECIMAL(6,1), *
-    /// BYTE and * LONG DECIMAL(11,1)). A BigInt's nineteen are its own digits: ACE makes a BigInt beside a Decimal a
-    /// BigInt, where LibRed keeps the Decimal .NET gives.</summary>
-    private static int WholeDigits(Type type) =>
-        type == typeof(short) || type == typeof(bool) ? 5 : type == typeof(long) ? 19 : 10;
-
-    private static bool IsWhole(NumberType type) => type.Class is NumberClass.Whole or NumberClass.Text or NumberClass.Date;
-
-    /// <summary>A whole number with a whole number: at least a Long's digits, as ACE works an Integer times an
-    /// Integer out as a Long (verified vs ACE: DECIMAL(10,2) * (INTEGER * INTEGER) is DECIMAL(12,2)).</summary>
-    private static NumberType Whole(NumberType left, NumberType right) =>
-        new(NumberClass.Whole, Integers: Math.Max(WholeDigits(typeof(int)), Math.Max(left.Integers, right.Integers)));
-
-    /// <summary>A Decimal or Currency beside a whole number, a date or text: its own places, the whole digits the
-    /// two count between them, up to a precision of 28 (DECIMAL(4,1) * TEXT is DECIMAL(28,1)).</summary>
-    private static NumberType Beside(NumberType number, NumberType whole) => number.Class != NumberClass.Decimal ? number
-        : number with
-        {
-            Integers = Math.Min(AccessTypeMapper.MaxDecimalPrecision - number.Places, Math.Max(number.Integers, whole.Integers)),
-        };
-
-    /// <summary>Two Decimals: the larger places and the more whole digits, or a Double where they come to more than
-    /// 28 digits.</summary>
-    private static NumberType Decimals(NumberType left, NumberType right)
-    {
-        int places = Math.Max(left.Places, right.Places), integers = Math.Max(left.Integers, right.Integers);
-        return integers + places > AccessTypeMapper.MaxDecimalPrecision
-            ? new(NumberClass.Double)
-            : new(NumberClass.Decimal, places, integers);
-    }
-
-    private static NumberType Product(NumberType left, NumberType right, bool divide)
-    {
-        if (left.Class == NumberClass.Other || right.Class == NumberClass.Other)
-            return new(NumberClass.Other);
-        if (left.Class == NumberClass.Double || right.Class == NumberClass.Double
-            || divide && (left.Class == NumberClass.Currency || right.Class == NumberClass.Currency))
-            return new(NumberClass.Double);
-        if (IsWhole(left) && IsWhole(right))
-            return divide ? new(NumberClass.Double) : Whole(left, right);
-        if (IsWhole(left)) return Beside(right, left);
-        if (IsWhole(right)) return Beside(left, right);
-        if (left.Class == NumberClass.Currency && right.Class == NumberClass.Currency)
-            return new(NumberClass.Currency);
-        if (left.Class == NumberClass.Currency || right.Class == NumberClass.Currency)
-            return new(NumberClass.Double);
-        return Decimals(left, right);
-    }
-
-    private static NumberType Sum(NumberType left, NumberType right, bool add)
-    {
-        if (left.Class is NumberClass.Other or NumberClass.Date || right.Class is NumberClass.Other or NumberClass.Date
-            || add && left.Class == NumberClass.Text && right.Class == NumberClass.Text)
-            return new(NumberClass.Other);
-        if (left.Class == NumberClass.Currency && right.Class == NumberClass.Double
-            || left.Class == NumberClass.Double && right.Class == NumberClass.Currency)
-            return new(NumberClass.Currency);
-        if (left.Class == NumberClass.Double || right.Class == NumberClass.Double)
-            return new(NumberClass.Double);
-        if (IsWhole(left) && IsWhole(right))
-            return Whole(left, right);
-        if (IsWhole(left)) return Beside(right, left);
-        if (IsWhole(right)) return Beside(left, right);
-        if (left.Class == NumberClass.Currency && right.Class == NumberClass.Currency)
-            return new(NumberClass.Currency);
-        if (left.Class == NumberClass.Currency || right.Class == NumberClass.Currency)
-        {
-            int places = Math.Max(4, Math.Max(left.Places, right.Places));
-            return new(NumberClass.Decimal, places, AccessTypeMapper.MaxDecimalPrecision - places);
-        }
-        return Decimals(left, right);
+                    : new(NumberClass.Other)),
+            _ => new NumberNode.Known(new(NumberClass.Other)),
+        });
     }
 
     /// <summary>

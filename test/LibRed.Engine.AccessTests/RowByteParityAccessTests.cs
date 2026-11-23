@@ -39,6 +39,14 @@ public class RowByteParityAccessTests(ITestOutputHelper output) : TempDatabaseTe
         // A BigBinary value stays inline at any size, where VARBINARY stops at 510.
         { "CREATE TABLE W (A LONG, B BIGBINARY)", "INSERT INTO W (A, B) VALUES (1, 0x0102030405)" },
         { "CREATE TABLE W (A LONG, B BIGBINARY)", $"INSERT INTO W (A, B) VALUES (1, 0x{string.Concat(Enumerable.Repeat("0A1B2C", 1000))})" },
+        // A supplied column's default sizes the record's slack — a BigBinary default whole, past its width.
+        { "CREATE TABLE W (ID LONG, V BIGBINARY(10) DEFAULT 'abcdefghij')", "INSERT INTO W (ID, V) VALUES (1, 0x01)" },
+        { "CREATE TABLE W (ID LONG, V BIGBINARY(10) DEFAULT 'abcdefghij', U VARBINARY(30))",
+            "INSERT INTO W (ID, V, U) VALUES (1, 0x01, 0x0102030405060708090A0B0C0D0E0F)" },
+        { "CREATE TABLE W (ID LONG, V BIGBINARY(10) DEFAULT 'abcdefghij', U VARBINARY(30))",
+            "INSERT INTO W (ID, V, U) VALUES (1, 0x01, 0x0102030405060708090A0B0C0D0E0F101112131415161718191A)" },
+        { "CREATE TABLE W (ID LONG, V BIGBINARY(10) DEFAULT 'abcde', U VARBINARY(30))",
+            "INSERT INTO W (ID, V, U) VALUES (1, 0x01, 0x0102030405060708090A0B0C0D0E0F)" },
     };
 
     [Theory]

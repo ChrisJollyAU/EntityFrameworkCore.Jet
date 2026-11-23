@@ -110,6 +110,27 @@ Enumerated over every Access / VBA scalar function [functions.md](../functions.m
 
 **Financial** — all ten: `Pmt` `FV` `PV` `NPer` `Rate` `IPmt` `PPmt` `SLN` `SYD` `DDB`.
 
+### How ACE evaluates it
+
+All measured, each over the same rows as a query (which answers the same, but where noted):
+
+- **Numbers as written.** A whole number a Long holds is a Long, one past it a Decimal, and a number with a point a
+  Decimal of the places written; arithmetic on Longs gives a Long (its type measured in a query, where `VarType(1+1)`
+  is 3), but one past a Long's range is a Double (`[Qty]*1000000000` over 7 is 7000000000), as OLE Automation's
+  arithmetic makes it.
+- **`^`** is left-associative and binds tighter than a minus (`2^3^2` is 64, `- 2^2` is -4), and a minus written
+  directly against a number is part of it (`-2^2` is 4); a sign against the exponent takes the rest (`2^-2^2` is
+  0.0625, `2^+3^2` is 512).
+- **Currency.** A Currency result is one at every step, to four places: `Round([Price],2) + [Qty]/32` over a
+  Currency `Price` is 12.7188, even in a Double result; `Round`, `Abs`, `Int` and `Fix` keep a Currency.
+- **Null.** `Null And False` is False and `Null Or True` True; both stop at the side that decides them, so a guard
+  keeps an error away. `x <> Null` is `x Is Not Null`. `In` with a Null item is False when nothing matches. `Null &
+  Null` is Null, a Null beside a value `""`. Text is read as a number before a Null propagates, so `"abc" * Null` is
+  an error.
+- **Comparisons.** A text column beside a number the expression computes compares as text; beside a written number
+  or `False` it is a type mismatch. `[Qty] = True` compares with -1 (a query tests the truth instead).
+- **The VBA Boolean** — see below.
+
 Everything else is refused, in one of **four** distinct ways — a validator has to reproduce all four:
 
 | Message | Cases |
@@ -403,11 +424,16 @@ is more permissive than ACE**, which refuses such a column outright; whether Lib
 3. ~~**`InStr` and `CDec` fail as a *syntax* error**~~ — **answered**: a syntax error means the wrong arity,
    not an unknown name. See the note above.
 4. ~~**Full value parity with ACE**~~ — **done.** Evaluated values agree with ACE over nulls, the empty
-   string, zeros, negatives, a tiny Currency, a non-ASCII character and pre-epoch times, with one exception.
+   string, zeros, negatives, a tiny Currency, a non-ASCII character and pre-epoch times, except where the
+   expression raises an error: `CDbl` over a Null, an overflow (a -1 that is not a VBA Boolean in a Byte among them),
+   a division by zero, and a type mismatch — text that is not a number read as one (`[A] * [Qty]`, `-[A]`,
+   `"abc" * [Qty]`), and text compared with a number or with `False` (`[A] > 1`, `[A] <> False`).
 
-   The one exception is `CDbl` over a Null. **The VBA conversion functions do not propagate Null, they raise
+   The first is `CDbl` over a Null. **The VBA conversion functions do not propagate Null, they raise
    on it**, so `CDbl(Null)` is an error rather than a Null result — unlike every other whitelisted function,
-   which propagates Null. `CDbl` is the only conversion on the list.
+   which propagates Null. `CDbl` is the only conversion on the list. `IIf` and `And` evaluate only what decides
+   them, so a guard keeps the error away: `IIf(IsNull([Qty]), 0, CDbl([Qty]))` and
+   `([Id]<0) And (CDbl([Qty])>0)` over a Null `Qty` store a value, not error 94 (measured).
 
    The bytes settle what "an error" means on disk, and it is **not** the same as Null: the envelope's leading
    field holds the **VBA error number** (94 "Invalid use of Null", 13 "Type mismatch"), and an error envelope
@@ -431,6 +457,22 @@ is more permissive than ACE**, which refuses such a column outright; whether Lib
 
    **Overflow is one of these errors.** A result past its result type caches VBA error 6 (measured). LibRed
    refuses the row, as above.
+
+   **So is a division by zero** (measured): `[Qty]/0` caches error 11, "Division by zero", over any number but 0,
+   and error 6, "Overflow", over 0 — 0/0 is an overflow, as VBA raises it — while over a Null it is a plain Null.
+   LibRed refuses the row, as above.
+
+   **A VBA Boolean result is stored by its own rule** (measured). `IsNull`, `IsEmpty` and `Like` give VBA's
+   Boolean, which a Text or Memo result stores as `-1` or `0` and a Byte result stores True as **255**; any other
+   -1 — a Long, a comparison, `Not`, a Yes/No column — is an error in a Byte, cached as above. Inside the
+   expression the same Boolean is `True` or `False` to `&`, `Str`, `Len`, `UCase`, `LCase`, `Trim`, `Left`, `Right`,
+   `Mid`, `InStr`, `Choose`/`IIf` passing it on and a `Like` operand, while `Asc` and a comparison with text take it
+   as `-1` or `0`. A comparison's result, `Not`, `And`, `Or` and a Yes/No column are `-1` or `0` everywhere.
+
+   **A `Like` cannot go through OLE DB** (measured): an insert over OLE DB caches Null in a Yes/No result and is
+   refused for a Text one (*"Error evaluating CHECK constraint"*), and OLE DB reads no row of a column whose
+   expression holds a `Like`, whoever wrote it. Through DAO the insert computes the value and the row reads, with the
+   pattern in ANSI-89 (`*`, `?`, `#`).
 
    **`ADD COLUMN` computes the rows already there** (measured). LibRed rewrites each existing row with its result
    in the same transaction as the add, so a row the expression fails on refuses the whole add.

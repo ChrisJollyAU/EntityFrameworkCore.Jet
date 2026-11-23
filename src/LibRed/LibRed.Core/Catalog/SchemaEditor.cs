@@ -2782,7 +2782,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // Assemble via the shared row layout (count + var table + null bitmap identical to a fresh encode), each
         // dead id's bit carried over from the old row's bitmap.
         return RowCodec.AssembleRow(format, newMaxId, newFixed, chunks, newCols, values,
-            priorBitmap: oldLayout.NullBitmap, beneath: buffer);
+            priorBitmap: oldLayout.NullBitmap, beneath: buffer, written: [newTarget.Index]);
     }
 
     /// <summary>Hands the rebuilt indexes back the real-index slots they held, in the order they were rebuilt: the

@@ -283,7 +283,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             {
                 holds = evaluator.Evaluate(parsed);
             }
-            catch (Exception e) when (e is ArithmeticException or InvalidCastException or ArgumentException or InvalidOperationException)
+            catch (Exception e) when (ExpressionEvaluator.IsExpressionError(e))
             {
                 throw new InvalidOperationException($"Error evaluating {name} CHECK constraint. {name}", e);
             }
@@ -723,10 +723,11 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     /// of any relationship whose key it changed. The one place a row is rewritten: a cascaded row is checked
     /// exactly as a directly updated one, and a cascade that changes a key others reference carries on down.
     /// <paramref name="cascaded"/> says a cascade is writing it, which ACE words a refused CHECK or Required column
-    /// differently for.
+    /// differently for. <paramref name="assigned"/> are the columns an UPDATE's SET names; null for a cascade, which
+    /// writes the key columns it changes.
     /// </summary>
     private void UpdateRow(Table table, RowId id, object?[] original, object?[] values,
-        Dictionary<(int Tdef, RowId Id), object?[]>? stillToWrite, bool cascaded)
+        Dictionary<(int Tdef, RowId Id), object?[]>? stillToWrite, bool cascaded, IReadOnlySet<int>? assigned = null)
     {
         // A Null written to a Yes/No column is the False its row stores (verified vs ACE, a required column
         // included), and every rule below sees that — as an inserted row's do, from RowInserter.
@@ -735,15 +736,20 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         var changed = new HashSet<int>();
         for (int i = 0; i < values.Length; i++)
             if (!Equals(original[i], values[i])) changed.Add(i);
-        if (changed.Count == 0)
+        // A column the SET names is written, and held to its declared width, even given the value it already had:
+        // ACE refuses UPDATE T SET V = V where a DEFAULT stored V past its BIGBINARY width (verified).
+        var written = new HashSet<int>(changed);
+        if (assigned is not null) written.UnionWith(assigned);
+        if (written.Count == 0)
         {
             stillToWrite?.Remove((table.Definition.DefinitionPage, id));
             return; // unchanged after all
         }
 
-        // UPDATE must preserve the same Required/NOT NULL invariant as INSERT. Check the complete
-        // post-assignment row before any referential action, row rewrite, or index mutation occurs.
-        EnforceRequired(table.Name, table.Definition.Columns, values, cascaded);
+        // UPDATE holds the columns it writes to the Required/NOT NULL rule INSERT holds a row to, before any referential
+        // action, row rewrite, or index mutation occurs. A Null a column held before it was made NOT NULL stands until the
+        // column is written (verified vs ACE: SET ID = ID passes over it, SET A = A is refused).
+        EnforceRequired(table.Name, [.. table.Definition.Columns.Where(c => written.Contains(c.Index))], values, cascaded);
 
         // A changed primary-key or WITH DISALLOW NULL column must not become Null, the insert rule.
         foreach (IndexDef index in table.Definition.Indexes
@@ -768,7 +774,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
                     index.Name,
                     index.IsPrimaryKey);
 
-        table.Update(id, values, changed);
+        table.Update(id, values, changed, written);
         stillToWrite?.Remove((table.Definition.DefinitionPage, id));
 
         // The updated row must still satisfy every CHECK constraint.
@@ -1321,10 +1327,11 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     /// if it has one. <paramref name="provided"/> is in the order the statement names the columns.</summary>
     /// <remarks>A Text column's default is cut to the column's width, where a value supplied for it is refused
     /// (verified vs ACE: <c>DEFAULT 'abcdefghijklmnopqrstuvwxyz'</c> on a <c>TEXT(20)</c> stores its first 20
-    /// characters, and <c>DEFAULT Now()</c> the first 20 of the date's text). So is a BINARY, VARBINARY or BIGBINARY
-    /// column's, to its bytes, and a DECIMAL default too wide for the column's precision stores Null (both verified
-    /// vs ACE: <c>DEFAULT 1.5</c> on a <c>BINARY(4)</c> stores <c>31 00 2E 00</c>, and <c>DEFAULT 1000</c> on a
-    /// <c>DECIMAL(4,1)</c> Null). A supplied column's default is evaluated
+    /// characters, and <c>DEFAULT Now()</c> the first 20 of the date's text). So is a BINARY or VARBINARY column's, to
+    /// its bytes, and a DECIMAL default too wide for the column's precision stores Null (both verified vs ACE:
+    /// <c>DEFAULT 1.5</c> on a <c>BINARY(4)</c> stores <c>31 00 2E 00</c>, and <c>DEFAULT 1000</c> on a
+    /// <c>DECIMAL(4,1)</c> Null). A BIGBINARY column's is stored whole past its width (verified vs ACE:
+    /// <c>DEFAULT 'abcdefghij'</c> on a <c>BIGBINARY(10)</c> stores all 20 bytes). A supplied column's default is evaluated
     /// too where it can size the record's slack — a variable column's, not a Memo's or OLE's: ACE writes the row
     /// over the record of them all (spec §5).</remarks>
     private object? InsertNewRow(string tableName, Table table, RowDefaults defaults, object?[] values, List<int> provided)
@@ -1346,9 +1353,10 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
 #pragma warning restore CA1031
             value = LibRed.Storage.Types.JetTypeCodec.CurrencyAsStored(column.Type, value, ExpressionEvaluator.IsCurrency(expression, []));
             if (column.Type == JetDataType.Text && value is not null && JetStoreType.MaxLength(column) is int width
-                && LibRed.Storage.Types.VbaText.Of(value) is var text && text.Length > width)
+                && (string)LibRed.Storage.Types.JetTypeCodec.ToStoredValue(column, column.Type, value) is var text
+                && text.Length > width)
                 value = text[..width];
-            if (column.Type is JetDataType.Binary or JetDataType.BigBinary && value is not null
+            if (column.Type == JetDataType.Binary && value is not null
                 && JetStoreType.MaxLength(column) is int byteWidth
                 && (byte[])LibRed.Storage.Types.JetTypeCodec.ToStoredValue(column, column.Type, value) is var bytes
                 && bytes.Length > byteWidth)
@@ -2223,7 +2231,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         CompleteRows(joinRows, tables, targets.Select(t => t.TableIndex));
 
         // Apply SETs to the shared value arrays; snapshot each touched row's original bytes on first touch.
-        var dirty = new Dictionary<(string, RowId), (Table Table, RowId Id, object?[] Original, object?[] Values)>();
+        var dirty = new Dictionary<(string, RowId), (Table Table, RowId Id, object?[] Original, object?[] Values, HashSet<int> Assigned)>();
         // A null-extended side's value array is the joined row's own, so it keys the new row it becomes.
         var newRows = new Dictionary<object?[], (Table Table, List<int> Provided)>(ReferenceEqualityComparer.Instance);
         bool[] currency = targets
@@ -2249,7 +2257,9 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
                 else
                 {
                     var key = (tables[ti].CacheKey, combo[ti].Id);
-                    if (!dirty.ContainsKey(key)) dirty[key] = (TargetTable(tables, ti), combo[ti].Id, (object?[])shared.Clone(), shared);
+                    if (!dirty.TryGetValue(key, out var row))
+                        dirty[key] = row = (TargetTable(tables, ti), combo[ti].Id, (object?[])shared.Clone(), shared, []);
+                    row.Assigned.Add(col.Index);
                 }
                 shared[col.Index] = LibRed.Storage.Types.JetTypeCodec.CurrencyAsStored(col.Type, results[i], currency[i]);
             }
@@ -2262,11 +2272,11 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         // shape that does this. An entry is dropped once its row has been written, after which a cascade
         // reaching it writes the row as usual.
         var stillToWrite = new Dictionary<(int Tdef, RowId Id), object?[]>();
-        foreach (var (table, id, _, values) in dirty.Values)
+        foreach (var (table, id, _, values, _) in dirty.Values)
             stillToWrite[(table.Definition.DefinitionPage, id)] = values;
 
-        foreach (var (table, id, original, values) in dirty.Values)
-            UpdateRow(table, id, original, values, stillToWrite, cascaded: false);
+        foreach (var (table, id, original, values, assigned) in dirty.Values)
+            UpdateRow(table, id, original, values, stillToWrite, cascaded: false, assigned);
 
         var newRowDefaults = new Dictionary<int, RowDefaults>();
         foreach (var (values, (table, provided)) in newRows)

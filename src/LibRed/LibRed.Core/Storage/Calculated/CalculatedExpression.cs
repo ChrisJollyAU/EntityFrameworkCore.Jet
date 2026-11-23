@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 
 namespace LibRed.Storage.Calculated;
 
@@ -337,19 +338,45 @@ internal static class CalculatedExpression
 
     private static CalcNode ParseUnary(List<Token> t, ref int p)
     {
-        if (IsOperator(t, p, "-")) { p++; return new CalcUnary("-", ParseUnary(t, ref p)); }
+        if (IsOperator(t, p, "-") && !IsSignedNumber(t, p)) { p++; return new CalcUnary("-", ParseUnary(t, ref p)); }
         if (IsOperator(t, p, "+")) { p++; return ParseUnary(t, ref p); }
         return ParsePower(t, ref p);
     }
 
-    // Right-associative, and binds tighter than unary minus: -2^2 is -4.
+    // DELIBERATE DUPLICATE (the owner's decision, 2026-11-23; CLAUDE.md "One copy of every function"): ParsePower,
+    // IsSignedNumber and ParseOperand copy LibRed.Sql's AstBuilder.SignedNumber, PowerChain and BuildPower, which
+    // LibRed.Core cannot reference, and project references stay as they are. A change to either is made to both.
+    // Left-associative, and binds tighter than unary minus, as a query's (verified vs ACE: 2^3^2 is 64, - 2^2 is -4 and
+    // 2^-2^2 is 0.0625). A minus written directly against a number that begins with a digit is part of the number
+    // (-2^2 is 4); any other minus is a negation of what follows, the powers included.
     private static CalcNode ParsePower(List<Token> t, ref int p)
     {
-        CalcNode left = ParsePrimary(t, ref p);
-        if (!IsOperator(t, p, "^")) return left;
-        p++;
-        return new CalcBinary("^", left, ParseUnary(t, ref p));
+        CalcNode left = ParseOperand(t, ref p);
+        while (IsOperator(t, p, "^"))
+        {
+            p++;
+            // A sign against the exponent takes the rest, powers included (2^-2^2 is 0.0625, 2^+3^2 is 512).
+            if (IsOperator(t, p, "+") || IsOperator(t, p, "-") && !IsSignedNumber(t, p))
+                return new CalcBinary("^", left, ParseUnary(t, ref p));
+            left = new CalcBinary("^", left, ParseOperand(t, ref p));
+        }
+        return left;
     }
+
+    /// <summary>Whether the minus at <paramref name="p"/> is written directly against a number beginning with a digit.</summary>
+    private static bool IsSignedNumber(List<Token> t, int p) =>
+        p + 1 < t.Count && t[p + 1] is { Kind: TokenKind.Number, AfterSpace: false } number && char.IsAsciiDigit(number.Text[0]);
+
+    private static CalcNode ParseOperand(List<Token> t, ref int p)
+    {
+        if (!IsOperator(t, p, "-") || !IsSignedNumber(t, p))
+            return ParsePrimary(t, ref p);
+        p += 2;
+        return Number("-" + t[p - 1].Text);
+    }
+
+    private static CalcLiteral Number(string text) =>
+        new(text.TrimStart('-').All(char.IsAsciiDigit) ? ParseInteger(text) : ParseNumber(text));
 
     private static CalcNode ParsePrimary(List<Token> t, ref int p)
     {
@@ -360,7 +387,7 @@ internal static class CalculatedExpression
         {
             case TokenKind.Number:
                 p++;
-                return new CalcLiteral(double.Parse(token.Text, CultureInfo.InvariantCulture));
+                return Number(token.Text);
 
             case TokenKind.String:
                 p++;
@@ -407,6 +434,61 @@ internal static class CalculatedExpression
         }
     }
 
+    // DELIBERATE DUPLICATE (the owner's decision, 2026-11-23; CLAUDE.md "One copy of every function"): ParseInteger and
+    // ParseNumber are copies of LibRed.Sql's AstBuilder.ParseInteger and AstBuilder.ParseNumber, which LibRed.Core
+    // cannot reference, and project references stay as they are. A number in a calculated column is typed as a
+    // query's is, so a change to either is made to both.
+    private static object ParseInteger(string text) =>
+        // Box each branch independently: a bare `? i : long.Parse(...)` would infer the
+        // conditional's type as `long` and silently widen the int branch, so every literal
+        // (even `1`) would arrive as a boxed long. Past a Long, ACE reads the literal as a Decimal, and past a
+        // Decimal as a Double (verified: 9223372036854775808 and 10^20 are Decimal, 2^96 a Double).
+        int.TryParse(text, out int i) ? i
+        : long.TryParse(text, CultureInfo.InvariantCulture, out long l) ? l
+        : decimal.TryParse(text, CultureInfo.InvariantCulture, out decimal m) ? m
+        : (object)double.Parse(text, CultureInfo.InvariantCulture);
+
+    /// <summary>A number written with a decimal point or an exponent, as ACE reads it (verified vs ACE, over OLE DB):
+    /// a whole number a Long holds is a Long (<c>3.0</c>, <c>11.0</c>, <c>1E5</c>, <c>2.0E1</c>); a number a Decimal holds
+    /// exactly is a Decimal of the digits written (<c>1.50</c>, <c>15E-1</c>, <c>1E-28</c>, <c>3E9</c>, <c>7.9E28</c>,
+    /// and <c>2147483648.0</c>, past a Long); and anything else is a Double — a Decimal's 29th place (<c>1.5E-28</c>),
+    /// past its range (<c>1E29</c>), and a number written with a point and no exponent whose whole part ends in a zero
+    /// (<c>10.0</c>, <c>20.</c>, <c>1000.0</c>, <c>-10.0</c>, <c>2147483650.0</c>, while <c>105.0</c> is a Long).</summary>
+    private static object ParseNumber(string text)
+    {
+        // The value as mantissa × 10^exponent, the mantissa's trailing zeros moved into the exponent.
+        int e = text.IndexOfAny(['E', 'e']);
+        string digits = e < 0 ? text : text[..e];
+        int exponent = e < 0 ? 0 : int.Parse(text[(e + 1)..], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+        int point = digits.IndexOf('.', StringComparison.Ordinal);
+        if (point >= 0)
+        {
+            exponent -= digits.Length - point - 1;
+            digits = digits.Remove(point, 1);
+        }
+        var mantissa = BigInteger.Parse(digits, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+        while (!mantissa.IsZero && mantissa % 10 == 0)
+        {
+            mantissa /= 10;
+            exponent++;
+        }
+
+        if (mantissa.IsZero) return 0;
+        var largest = new BigInteger(decimal.MaxValue);
+        if (exponent >= 0)
+        {
+            // Written with a point and no exponent, trailing zeros before the point make it a Double.
+            if (point >= 0 && e < 0 && exponent > 0) return double.Parse(text, CultureInfo.InvariantCulture);
+            BigInteger whole = exponent <= 28 ? mantissa * BigInteger.Pow(10, exponent) : largest + 1;
+            if (whole >= int.MinValue && whole <= int.MaxValue) return (int)whole;
+            if (BigInteger.Abs(whole) > largest) return double.Parse(text, CultureInfo.InvariantCulture);
+        }
+        else if (-exponent > 28 || BigInteger.Abs(mantissa) > largest)
+            return double.Parse(text, CultureInfo.InvariantCulture);
+        return decimal.Parse(text, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint | NumberStyles.AllowExponent,
+            CultureInfo.InvariantCulture);
+    }
+
     private static DateTime ParseDateLiteral(string text) =>
         DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime value)
             ? value
@@ -439,7 +521,7 @@ internal static class CalculatedExpression
 
     private enum TokenKind { Number, String, Date, Bracketed, Identifier, Keyword, Operator, Punctuation }
 
-    private readonly record struct Token(TokenKind Kind, string Text);
+    private readonly record struct Token(TokenKind Kind, string Text, bool AfterSpace = false);
 
     private static readonly string[] Keywords = ["And", "Or", "Not", "Is", "Null", "Like", "In", "True", "False"];
 
@@ -447,10 +529,11 @@ internal static class CalculatedExpression
     {
         var tokens = new List<Token>();
         int i = 0;
+        bool spaced = false;
         while (i < text.Length)
         {
             char c = text[i];
-            if (char.IsWhiteSpace(c)) { i++; continue; }
+            if (char.IsWhiteSpace(c)) { i++; spaced = true; continue; }
 
             if (c == '[')
             {
@@ -526,6 +609,8 @@ internal static class CalculatedExpression
                 i++;
             }
             else throw new CalculatedExpressionException($"Unexpected character '{c}' in expression.");
+            tokens[^1] = tokens[^1] with { AfterSpace = spaced };
+            spaced = false;
         }
         return tokens;
     }
@@ -533,4 +618,5 @@ internal static class CalculatedExpression
 
 /// <summary>A calculated-column expression LibRed cannot parse, or cannot evaluate the way ACE would.
 /// Never thrown for a value: a row that fails to evaluate must not be written at all.</summary>
-public sealed class CalculatedExpressionException(string message) : InvalidOperationException(message);
+public sealed class CalculatedExpressionException(string message, Exception? innerException = null)
+    : InvalidOperationException(message, innerException);

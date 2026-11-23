@@ -39,8 +39,10 @@ Flags (byte `0x03` masked with `0xC0`; its low six bits belong to the length):
 > oversized record gets, and `CompactDatabase` does not repair such a row: it drops the value.
 >
 > **The tag is minted per write of the chain**, not per write of the row: inserting stamps both copies,
-> rewriting the value writes a new chain and a fresh stamp in both, updating another column of the same row
-> leaves it untouched, and a value that shrinks to the single-page form drops both to zero. The check also
+> rewriting the value writes a new chain and a fresh stamp in both — setting it to the value it already holds
+> (`SET M = M`) included, which rewrites a 3000-character memo's chain in the same pages and slots with a new
+stamp (verified) — updating another column
+> of the same row leaves it untouched, and a value that shrinks to the single-page form drops both to zero. The check also
 > fires only when the long value is **materialised** — ACE will happily `UPDATE` another column of a row
 > whose stamp disagrees, and refuse the moment anything reads the memo.
 >

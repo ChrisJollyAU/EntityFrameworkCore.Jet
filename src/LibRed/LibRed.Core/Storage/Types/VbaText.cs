@@ -180,10 +180,11 @@ public static class VbaText
     /// </summary>
     public static string FloatingText(double value, int digits, NumberFormatInfo? format = null)
     {
-        if (value == 0) return "0";
+        format ??= CultureInfo.CurrentCulture.NumberFormat;
+        // A negative zero keeps its sign (verified vs ACE: -[Qty]^2 over 0 is "-0").
+        if (value == 0) return double.IsNegative(value) ? format.NegativeSign + "0" : "0";
         if (!double.IsFinite(value)) return value.ToString(CultureInfo.InvariantCulture);
 
-        format ??= CultureInfo.CurrentCulture.NumberFormat;
         string scientific = value.ToString("E" + (digits - 1), CultureInfo.InvariantCulture);  // -d.dddE+ddd
         int mark = scientific.IndexOf('E');
         int exponent = int.Parse(scientific[(mark + 1)..], CultureInfo.InvariantCulture);

@@ -1,5 +1,6 @@
 using EntityFrameworkCore.Jet.Data;
 using LibRed.Catalog;
+using LibRed.Storage.Types;
 using System.Globalization;
 using Operators = LibRed.Storage.Types.ExpressionFunctions<LibRed.Storage.Calculated.CalcNode>;
 
@@ -13,7 +14,8 @@ namespace LibRed.Storage.Calculated;
 /// throws rather than guessing — a wrong cached value is invisible, because neither engine re-derives it on
 /// read (page-02b §3.4a).</para>
 /// <para><b>Null semantics are the point.</b> Access propagates Null through arithmetic and comparison but
-/// <b>not</b> through <c>&amp;</c>, which treats Null as the empty string. That asymmetry is the whole
+/// <b>not</b> through <c>&amp;</c>, which treats Null beside a value as the empty string (<c>Null &amp; Null</c> is
+/// still Null). That asymmetry is the whole
 /// mechanism behind the idiom MSDN uses to introduce the feature —
 /// <c>[First] &amp; " " &amp; ([Middle] + " ") &amp; [Last]</c> — where <c>+</c> makes the parenthesised
 /// group Null when there is no middle initial and <c>&amp;</c> then drops it, so no double space appears.
@@ -21,56 +23,119 @@ namespace LibRed.Storage.Calculated;
 /// </remarks>
 internal static class CalculatedEvaluator
 {
-    /// <summary>Evaluates <paramref name="node"/>; <paramref name="value"/> resolves a column by name, and
+    /// <summary>Evaluates <paramref name="node"/>; <paramref name="value"/> resolves a column's value by name,
     /// <paramref name="databaseCollation"/> is the database's collation, which text compares in and an InStr that names
-    /// no comparison compares under; without one such an expression is refused.</summary>
-    public static object? Evaluate(CalcNode node, Func<string, object?> value, Collation? databaseCollation) => node switch
+    /// no comparison compares under (without one such an expression is refused), and <paramref name="definition"/>
+    /// resolves a column's definition by name, which its type is taken from (<see cref="IsCurrency"/>).</summary>
+    public static object? Evaluate(CalcNode node, Func<string, object?> value, Collation? databaseCollation,
+        Func<string, ColumnDef?> definition) => node switch
     {
         CalcLiteral l => l.Value,
         CalcColumn c => value(c.Name),
-        CalcUnary u => Unary(u, value, databaseCollation),
-        CalcBinary b => Binary(b, value, databaseCollation),
-        CalcIsNull i => Evaluate(i.Operand, value, databaseCollation) is null != i.Negated,
-        CalcIn i => In(i, value, databaseCollation),
-        CalcCall f => Call(f, value, databaseCollation),
+        CalcUnary u => Unary(u, value, databaseCollation, definition),
+        CalcBinary b => Binary(b, value, databaseCollation, definition),
+        CalcIsNull i => Evaluate(i.Operand, value, databaseCollation, definition) is null != i.Negated,
+        CalcIn i => In(i, value, databaseCollation, definition),
+        CalcCall f => Call(f, value, databaseCollation, definition),
         _ => throw new CalculatedExpressionException($"Unsupported expression node {node.GetType().Name}."),
     };
 
-    private static object? Unary(CalcUnary node, Func<string, object?> value, Collation? databaseCollation)
+    /// <summary>Whether ACE takes <paramref name="node"/> to be a Currency (<see cref="Operators.NumberTypeOf"/>, as a
+    /// query's is): a column as its definition (<paramref name="definition"/>) declares it, a function its declared
+    /// type none.</summary>
+    private static bool IsCurrency(CalcNode node, Func<string, ColumnDef?> definition) =>
+        Operators.NumberTypeOf(node, n => n switch
+        {
+            CalcLiteral { Value: null } => new Operators.NumberNode.WrittenNull(),
+            CalcLiteral l => new Operators.NumberNode.Known(Operators.WrittenNumberType(l.Value)),
+            CalcColumn c => new Operators.NumberNode.Known(definition(c.Name) is { } column
+                && JetClrTypeMap.ValueType(column) is var (clrType, currency, scale, precision)
+                ? Operators.ColumnNumberType(currency, scale, precision, clrType)
+                : new(NumberClass.Other)),
+            CalcUnary { Operator: "-" } u => new Operators.NumberNode.Negation(u.Operand),
+            CalcBinary { Operator: "*" or "/" } b => new Operators.NumberNode.Multiplied(b.Left, b.Right, b.Operator == "/"),
+            CalcBinary { Operator: "+" or "-" } b => new Operators.NumberNode.Added(b.Left, b.Right, b.Operator == "+"),
+            CalcBinary { Operator: "^" } => new Operators.NumberNode.Known(new(NumberClass.Double)),
+            CalcCall f => new Operators.NumberNode.Function(new(f.Name, f.Arguments), () => new(NumberClass.Other)),
+            _ => new Operators.NumberNode.Known(new(NumberClass.Other)),
+        }).Class == NumberClass.Currency;
+
+    // DELIBERATE DUPLICATE (the owner's decision, 2026-11-23; CLAUDE.md "One copy of every function"): Unary, Binary, In
+    // and CompareAsKinds dispatch the operators over a CalcNode as ExpressionEvaluator.EvaluateUnary, EvaluateBinary,
+    // EvaluateInList and CompareAsKinds do over the SQL AST, calling the same ExpressionFunctions helpers. They are two
+    // walks because the two trees have different nodes, and kept apart rather than written over a node shape as
+    // NumberTypeOf is. Where they differ, ACE does (each measured vs ACE; this side in CalculatedColumnAccessTests): a
+    // query's `= True` tests the truth where this compares with -1; a query's
+    // written decimal beside a Double result is a Double, outside the expression service a calculated column is always
+    // in; a query's `Like '%'` is Is Not Null; a query's written False beside text counts as computed; and a query's IN
+    // with a Null item is Null where this is False (LibRed's decision for queries). A change to one is made to the other.
+    private static object? Unary(CalcUnary node, Func<string, object?> value, Collation? databaseCollation,
+        Func<string, ColumnDef?> definition)
     {
-        object? operand = Evaluate(node.Operand, value, databaseCollation);
+        object? operand = VbaBoolean.Plain(Evaluate(node.Operand, value, databaseCollation, definition));
         if (operand is null) return null;
         return node.Operator switch
         {
             "-" => Operators.Negate(operand),
-            "Not" => !Operators.IsTruthy(operand),
+            "Not" => new Functions(value, databaseCollation, definition).Not(operand),
             _ => throw new CalculatedExpressionException($"Unsupported unary operator '{node.Operator}'."),
         };
     }
 
-    private static object? Binary(CalcBinary node, Func<string, object?> value, Collation? databaseCollation)
+    private static object? Binary(CalcBinary node, Func<string, object?> value, Collation? databaseCollation,
+        Func<string, ColumnDef?> definition)
     {
-        object? left = Evaluate(node.Left, value, databaseCollation);
-        object? right = Evaluate(node.Right, value, databaseCollation);
+        if (node.Operator is "And")
+            return new Functions(value, databaseCollation, definition).And(node.Left, node.Right);
+        if (node.Operator is "Or")
+            return new Functions(value, databaseCollation, definition).Or(node.Left, node.Right);
 
-        // '&' is the one operator that does NOT propagate Null: it concatenates it as "".
+        object? left = Evaluate(node.Left, value, databaseCollation, definition);
+        object? right = Evaluate(node.Right, value, databaseCollation, definition);
+
         if (node.Operator == "&")
-            return (left is null ? "" : Operators.ConcatText(left)) + (right is null ? "" : Operators.ConcatText(right));
+            return Operators.Concat(left, right);
+
+        // The Currency rules are a query's (ExpressionEvaluator.EvaluateBinary), at the same points.
+        if (node.Operator is "+" or "-")
+            (left, right) = Operators.CurrencySumOperands(left, right, IsCurrency(node, definition));
+
+        // The arithmetic operators other than '+' read text as a number even when the other side is Null (as a query's
+        // do: ExpressionEvaluator.EvaluateBinary).
+        if (node.Operator is "-" or "*" or "/" or "^")
+        {
+            left = Operators.NumericOperand(left);
+            right = Operators.NumericOperand(right);
+        }
+
+        // `x <> Null`, with the Null written on the right, is `x Is Not Null` (as a query's is).
+        if (node.Operator == "<>" && node.Right is CalcLiteral { Value: null })
+            return left is not null;
 
         if (left is null || right is null) return null;
 
+        if (node.Operator is "+" or "-" or "*" or "/")
+            (left, right) = Operators.CurrencyProductOperands(
+                left, right, node.Operator == "/", IsCurrency(node.Left, definition), IsCurrency(node.Right, definition));
+
+        if (node.Operator is "+" or "-" or "*")
+        {
+            object result = node.Operator switch
+            {
+                // '+' concatenates when BOTH sides are text, and adds otherwise — the overload that makes it the
+                // null-propagating sibling of '&'.
+                "+" => Operators.Add(left, right),
+                "-" => Operators.Arithmetic(left, right, '-'),
+                _ => Operators.Arithmetic(left, right, '*'),
+            };
+            return Operators.CurrencyStep(result, IsCurrency(node, definition));
+        }
+
         switch (node.Operator)
         {
-            // '+' concatenates when BOTH sides are text, and adds otherwise — the overload that makes it the
-            // null-propagating sibling of '&'.
-            case "+": return Operators.Add(left, right);
-            case "-": return Operators.Arithmetic(Operators.NumericOperand(left)!, Operators.NumericOperand(right)!, '-');
-            case "*": return Operators.Arithmetic(Operators.NumericOperand(left)!, Operators.NumericOperand(right)!, '*');
-            case "/": return Operators.Divide(Operators.NumericOperand(left)!, Operators.NumericOperand(right)!);
-            case "^": return Operators.Power(Operators.NumericOperand(left)!, Operators.NumericOperand(right)!);
-            case "And": return Operators.IsTruthy(left) && Operators.IsTruthy(right);
-            case "Or": return Operators.IsTruthy(left) || Operators.IsTruthy(right);
-            case "Like": return Types.LikeMatcher.IsMatch(Operators.ConcatText(left), Operators.ConcatText(right), ansi89: true);
+            case "/": return Operators.Divide(left, right);
+            case "^": return Operators.Power(left, right);
+            case "Like": return VbaBoolean.Of(Types.LikeMatcher.IsMatch(Operators.ConcatText(left), Operators.ConcatText(right), ansi89: true));
             case "=":
             case "<>":
             case "<":
@@ -78,7 +143,7 @@ internal static class CalculatedEvaluator
             case "<=":
             case ">=":
                 {
-                    int c = Operators.CompareValues(left, right, TextIn(databaseCollation));
+                    int c = CompareAsKinds(node.Left, left, node.Right, right, databaseCollation);
                     return node.Operator switch
                     {
                         "=" => c == 0,
@@ -94,14 +159,33 @@ internal static class CalculatedEvaluator
         }
     }
 
-    private static bool? In(CalcIn node, Func<string, object?> value, Collation? databaseCollation)
+    /// <summary>Whether an operand is a value the expression computes, rather than a value as it writes one or a column
+    /// (ExpressionEvaluator.IsComputed over a query's operands). Unlike a query's, a written False is not computed
+    /// (measured vs ACE: [A] &lt;&gt; False over text is a type mismatch in a calculated column).</summary>
+    private static bool Computed(CalcNode operand) => operand is not (CalcLiteral or CalcColumn);
+
+    /// <summary>The order of two operands of a comparison or an <c>In</c>, brought to a kind they compare as (as a query's
+    /// are: ExpressionEvaluator.CompareAsKinds): a text column beside a number the expression computes compares as text
+    /// (verified vs ACE: <c>[A] In ([Qty]+0)</c> over 'hello' and 7 is False).</summary>
+    private static int CompareAsKinds(CalcNode leftNode, object left, CalcNode rightNode, object right, Collation? databaseCollation)
     {
-        object? operand = Evaluate(node.Operand, value, databaseCollation);
+        (left, right) = Operators.ComparedBooleans(left, right);
+        if (left is string && leftNode is CalcColumn && Operators.IsNumeric(right) && Computed(rightNode))
+            right = Operators.ConcatText(right);
+        else if (right is string && rightNode is CalcColumn && Operators.IsNumeric(left) && Computed(leftNode))
+            left = Operators.ConcatText(left);
+        return Operators.CompareValues(left, right, TextIn(databaseCollation));
+    }
+
+    private static bool? In(CalcIn node, Func<string, object?> value, Collation? databaseCollation,
+        Func<string, ColumnDef?> definition)
+    {
+        object? operand = Evaluate(node.Operand, value, databaseCollation, definition);
         if (operand is null) return null;
         foreach (CalcNode candidate in node.Values)
         {
-            object? other = Evaluate(candidate, value, databaseCollation);
-            if (other is not null && Operators.CompareValues(operand, other, TextIn(databaseCollation)) == 0) return true;
+            object? other = Evaluate(candidate, value, databaseCollation, definition);
+            if (other is not null && CompareAsKinds(node.Operand, operand, candidate, other, databaseCollation) == 0) return true;
         }
         return false;
     }
@@ -112,7 +196,8 @@ internal static class CalculatedEvaluator
     /// The function itself is LibRed.Engine's, the one <see cref="Types.ExpressionFunctions{TExpression}"/> holds for
     /// queries and calculated columns alike.
     /// </summary>
-    private static object? Call(CalcCall node, Func<string, object?> value, Collation? databaseCollation)
+    private static object? Call(CalcCall node, Func<string, object?> value, Collation? databaseCollation,
+        Func<string, ColumnDef?> definition)
     {
         string name = node.Name;
 
@@ -172,7 +257,7 @@ internal static class CalculatedEvaluator
         // reader then refuses the entire row; LibRed refuses the WRITE instead — a deliberate divergence, so
         // that a row neither engine can read afterwards never reaches the file and no compact-and-repair is
         // needed to get rid of it (page-02e-calculated-columns).
-        if (function == "CDBL" && Evaluate(node.Arguments[0], value, databaseCollation) is null)
+        if (function == "CDBL" && Evaluate(node.Arguments[0], value, databaseCollation, definition) is null)
             throw new CalculatedExpressionException(
                 "CDbl cannot convert Null in a calculated column. Give the column a value, or guard the "
                 + "expression, e.g. IIf(IsNull([x]), 0, CDbl([x])).");
@@ -180,7 +265,7 @@ internal static class CalculatedEvaluator
         // InStr's compare argument does not propagate Null either: ACE caches an error for it, whatever the strings
         // are — Null too — which its own reader then refuses. As with CDbl, LibRed refuses the write (where a query's
         // InStr, which stores nothing, gives Null).
-        if (function == "INSTR" && count == 4 && Evaluate(node.Arguments[3], value, databaseCollation) is null)
+        if (function == "INSTR" && count == 4 && Evaluate(node.Arguments[3], value, databaseCollation, definition) is null)
             throw new CalculatedExpressionException(
                 "InStr's compare argument cannot be Null in a calculated column: ACE caches an error for it.");
 
@@ -191,18 +276,19 @@ internal static class CalculatedEvaluator
                 $"{name} without a compare argument compares under the database's locale, and this row is being "
                 + "encoded outside a database.");
 
-        return new Functions(value, databaseCollation).Function(function, new(name, node.Arguments));
+        return new Functions(value, databaseCollation, definition).Function(function, new(name, node.Arguments));
     }
 
     /// <summary>The functions over a calculated column's expression, its arguments evaluated as the rest of it is.</summary>
-    private sealed class Functions(Func<string, object?> value, Collation? databaseCollation) : Types.ExpressionFunctions<CalcNode>
+    private sealed class Functions(Func<string, object?> value, Collation? databaseCollation,
+        Func<string, ColumnDef?> definition) : Types.ExpressionFunctions<CalcNode>
     {
-        public override object? Evaluate(CalcNode expression) => CalculatedEvaluator.Evaluate(expression, value, databaseCollation);
+        public override object? Evaluate(CalcNode expression) =>
+            CalculatedEvaluator.Evaluate(expression, value, databaseCollation, definition);
 
         protected override JetTextComparer Text => TextIn(databaseCollation);
 
-        // Asked only by TypeName, VarType, DataLength, Power and Rnd, none of which a calculated column may contain.
-        protected override bool IsCurrency(CalcNode expression) => throw new NotSupportedException();
+        protected override bool IsCurrency(CalcNode expression) => CalculatedEvaluator.IsCurrency(expression, definition);
 
         protected override object? EvaluatePower(CalcNode left, CalcNode right) => throw new NotSupportedException();
 
@@ -230,21 +316,21 @@ internal static class CalculatedEvaluator
             return type switch
             {
                 JetDataType.Boolean => Operators.IsTruthy(value),
-                JetDataType.Byte => checked((byte)Math.Round(Operators.Dbl(Operators.ConversionNumber(value)), MidpointRounding.ToEven)),
-                JetDataType.Int16 => checked((short)Math.Round(Operators.Dbl(Operators.ConversionNumber(value)), MidpointRounding.ToEven)),
-                JetDataType.Int32 => checked((int)Math.Round(Operators.Dbl(Operators.ConversionNumber(value)), MidpointRounding.ToEven)),
+                JetDataType.Byte => Operators.AsByte(value),
+                JetDataType.Int16 => (short)Operators.AsInteger(value),
+                JetDataType.Int32 => Operators.AsLong(value),
                 JetDataType.Int64 => checked((long)Math.Round(Operators.Dbl(Operators.ConversionNumber(value)), MidpointRounding.ToEven)),
                 JetDataType.Single => (float)Operators.Dbl(Operators.ConversionNumber(value)),
                 JetDataType.Double => Operators.Dbl(Operators.ConversionNumber(value)),
                 // A Decimal or text as storing it takes it, exactly (verified vs ACE: [N] over a Decimal or text 1.00005 is
                 // 1.0000, where the Double 1.00005 is 1.0001).
-                JetDataType.Currency => Types.JetTypeCodec.CurrencyFromScaled(Types.JetTypeCodec.CurrencyToScaled(
+                JetDataType.Currency => Operators.ToCurrency(
                     value is decimal || value is string s && Types.VbaText.TryTextAsNumber(s) is not null
                         ? Types.JetTypeCodec.NumberFromText(type, value)
-                        : Operators.Dbl(Operators.ConversionNumber(value)),
-                    CultureInfo.InvariantCulture)),
+                        : Operators.Dbl(Operators.ConversionNumber(value))),
                 JetDataType.DateTime => Operators.ToDate(value),
-                JetDataType.Text or JetDataType.Memo => Operators.ConcatText(value),
+                // As a String argument takes it: a VBA Boolean as "-1" or "0" (verified vs ACE).
+                JetDataType.Text or JetDataType.Memo => Operators.StringArgument(value),
                 _ => throw new CalculatedExpressionException($"Cannot store a calculated {type} value."),
             };
         }

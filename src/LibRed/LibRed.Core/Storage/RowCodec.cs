@@ -83,9 +83,11 @@ public sealed class RowCodec(IReadOnlyList<ColumnDef> columns, JetFormatBase for
     /// zeroed at the start: <paramref name="prior"/> is copied in and the row is built over it, and the caller leaves
     /// the row in it once the row is known to fit — so a byte the row does not write and its old record did not reach
     /// holds the last updated record that did (verified vs ACE, UpdateRowBufferProbeTest). Null for none.</param>
+    /// <param name="written">The columns the statement writes, which alone are held to their declared width (see
+    /// <see cref="AssembleRow"/>); null for all.</param>
     internal byte[] Encode(object?[] values, IReadOnlyDictionary<int, byte[]>? preservedCalculated,
         object?[]? logicalValues = null, Layout prior = default, Func<IReadOnlyList<byte[]>, int>? slackOf = null,
-        byte[]? buffer = null)
+        byte[]? buffer = null, IReadOnlyCollection<int>? written = null)
     {
         if (values.Length != _columns.Count)
             throw new ArgumentException($"Expected {_columns.Count} values, got {values.Length}.", nameof(values));
@@ -117,7 +119,7 @@ public sealed class RowCodec(IReadOnlyList<ColumnDef> columns, JetFormatBase for
         }
 
         return AssembleRow(_format, _maxColumnId, fixedRegion, varChunks, _columns, values, prior.NullBitmap,
-            slackOf?.Invoke(varChunks) ?? 0, buffer);
+            slackOf?.Invoke(varChunks) ?? 0, buffer, written);
     }
 
     /// <summary>The fixed region of a row being written over <paramref name="prior"/>: <paramref name="liveLength"/>
@@ -239,16 +241,20 @@ public sealed class RowCodec(IReadOnlyList<ColumnDef> columns, JetFormatBase for
     /// The declared-width check runs HERE rather than in <c>Encode</c>. It used to sit above this call,
     /// which meant the ALTER COLUMN re-lay — the other caller — never got it, and a narrowing retype could
     /// write rows Access refuses. A guard that both paths must pass through belongs on the shared path.
+    /// It holds only the columns the statement writes, <paramref name="written"/> (null for all): a BIGBINARY value
+    /// a row carries past its width from a DEFAULT survives an UPDATE or an ALTER COLUMN of another column, where the
+    /// same value written by the statement — <c>SET V = V</c> included — is refused (verified vs ACE).
     /// </remarks>
     internal static byte[] AssembleRow(JetFormatBase format, int maxColumnId, ReadOnlySpan<byte> fixedRegion,
         IReadOnlyList<byte[]> varChunks, IReadOnlyList<ColumnDef> columns, object?[] values,
-        ReadOnlySpan<byte> priorBitmap = default, int slack = 0, ReadOnlySpan<byte> beneath = default)
+        ReadOnlySpan<byte> priorBitmap = default, int slack = 0, ReadOnlySpan<byte> beneath = default,
+        IReadOnlyCollection<int>? written = null)
     {
         // A calculated column is exempt from the declared-width check: its length field is a constant ACE
         // writes (39 for a value type, 509 for any Text, whatever size was asked for), not a limit — a
         // Text(5) calculated column stores a far longer result and ACE reads it back in full (§3.4a).
         foreach (ColumnDef column in columns)
-            if (!column.IsFixedLength && !column.IsCalculated
+            if (!column.IsFixedLength && !column.IsCalculated && (written is null || written.Contains(column.Index))
                 && column.VariableIndex >= 0 && column.VariableIndex < varChunks.Count)
                 EnsureFitsDeclaredLength(column, varChunks[column.VariableIndex]);
 

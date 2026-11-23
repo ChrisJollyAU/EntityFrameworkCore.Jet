@@ -30,6 +30,9 @@ public class UpdateRowBufferAccessTests
         { "U3", "UPDATE U3 SET Y = TRUE" },                      // every row: each short one takes a longer one's text
         { "U4", "UPDATE U4 SET Y = TRUE WHERE Id = 2" },
         { "U5", "UPDATE U5 SET C1 = 9 WHERE Id IN (2, 4)" },
+        // A column set to the value it holds: the row is written, and passes through the buffer, all the same.
+        { "U6", "UPDATE U6 SET T = T" },
+        { "U7", "UPDATE U7 SET Id = Id WHERE Id IN (2, 4)" },
     };
 
     [Theory]

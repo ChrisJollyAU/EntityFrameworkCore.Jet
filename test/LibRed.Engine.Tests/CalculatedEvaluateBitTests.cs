@@ -65,8 +65,9 @@ public class CalculatedEvaluateBitTests : TempDatabaseTest
     }
 
     // ACE caches a failed expression as its VBA error and then refuses the row on read, but an UPDATE of a column the
-    // expression reads recomputes it — the one repair there is (measured in CalculatedColumnAccessTests). The update
-    // never reads the cached result, so LibRed can make the same repair.
+    // expression reads recomputes it — the one repair there is (measured in CalculatedColumnAccessTests), and setting
+    // that column to the value it holds is enough (measured vs ACE on this table: after SET Qty = Qty, X reads 14). The
+    // update never reads the cached result, so LibRed can make the same repair.
     [Fact]
     public void A_row_whose_result_is_a_cached_error_can_still_be_updated()
     {
@@ -94,6 +95,9 @@ public class CalculatedEvaluateBitTests : TempDatabaseTest
                 var engine = new QueryEngine(db);
                 Assert.ThrowsAny<Exception>(() => engine.ExecuteQuery("SELECT X FROM T").Rows.ToList());
                 Assert.Equal(1, engine.ExecuteNonQuery("UPDATE T SET Price = 2"));
+                Assert.ThrowsAny<Exception>(() => engine.ExecuteQuery("SELECT X FROM T").Rows.ToList());
+                Assert.Equal(1, engine.ExecuteNonQuery("UPDATE T SET Qty = Qty"));
+                Assert.Equal(14, Convert.ToInt32(engine.ExecuteQuery("SELECT X FROM T").Rows.Single()[0]));
                 Assert.Equal(1, engine.ExecuteNonQuery("UPDATE T SET Qty = 9"));
                 Assert.Equal(18, Convert.ToInt32(engine.ExecuteQuery("SELECT X FROM T").Rows.Single()[0]));
             }

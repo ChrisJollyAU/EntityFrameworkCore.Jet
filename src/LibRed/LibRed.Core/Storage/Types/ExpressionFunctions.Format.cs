@@ -105,7 +105,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
 
     /// <summary>The number a value stands for in a number format: a number, a Boolean, a date's serial, or text that
     /// reads as a number or else as a date. Null for other text, which the format leaves as it is.</summary>
-    private static object? FormatNumberOperand(object value) => value switch
+    private static object? FormatNumberOperand(object value) => VbaBoolean.Plain(value)! switch
     {
         string or char => VbaText.TryTextAsNumber(value.ToString()!) is { } number ? number
             : VbaDateText.TryParse(value.ToString()!, CultureInfo.CurrentCulture, out DateTime date) ? date.ToOADate()
@@ -113,7 +113,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
         DateTime date => date.ToOADate(),
         bool b => b ? -1 : 0,
         Guid or byte[] => null,
-        _ => value,
+        var plain => plain,
     };
 
     /// <summary>The date a value stands for in a date format, or null for text that is neither a number nor a date.

@@ -66,6 +66,13 @@ public class CheckConstraintEnforcementAccessTests(ITestOutputHelper output)
     // A backtick name, a 0x literal and an integer literal past a Long, each as ACE evaluates it.
     [InlineData("CREATE TABLE T (S TEXT(10), CONSTRAINT ck CHECK (`S` <> 'x'))", "INSERT INTO T VALUES ('x')", "INSERT INTO T VALUES ('y')")]
     [InlineData("CREATE TABLE T (Qty LONG)", "ALTER TABLE T ADD CONSTRAINT ck CHECK (`Qty` > 0)", "INSERT INTO T VALUES (5)", "INSERT INTO T VALUES (-5)")]
+    // A row added before the CHECK that breaks it is checked when an UPDATE sets a column to the value it holds.
+    [InlineData("CREATE TABLE T (ID LONG, A LONG)", "INSERT INTO T VALUES (1, 5)", "ALTER TABLE T ADD CONSTRAINT ck CHECK (A < 3)", "UPDATE T SET A = A")]
+    [InlineData("CREATE TABLE T (ID LONG, A LONG)", "INSERT INTO T VALUES (1, 5)", "ALTER TABLE T ADD CONSTRAINT ck CHECK (A < 3)", "UPDATE T SET ID = ID")]
+    // The same for a Null in a column made NOT NULL after it was written, if ACE lets the column be made so.
+    [InlineData("CREATE TABLE T (ID LONG, A LONG)", "INSERT INTO T VALUES (1, NULL)", "ALTER TABLE T ALTER COLUMN A LONG NOT NULL", "UPDATE T SET ID = ID")]
+    [InlineData("CREATE TABLE T (ID LONG, A LONG)", "INSERT INTO T VALUES (1, NULL)", "ALTER TABLE T ALTER COLUMN A LONG NOT NULL", "UPDATE T SET A = A")]
+    [InlineData("CREATE TABLE T (ID LONG, A LONG)", "INSERT INTO T VALUES (1, NULL)", "ALTER TABLE T ALTER COLUMN A LONG NOT NULL", "UPDATE T SET ID = 2")]
     [InlineData("CREATE TABLE T (Qty LONG, CONSTRAINT ck CHECK (`Qty` > 0))", "INSERT INTO T VALUES (5)", "INSERT INTO T VALUES (-5)")]
     [InlineData("CREATE TABLE T (A LONG, CONSTRAINT ck CHECK (A > 0x10))", "INSERT INTO T VALUES (5)", "INSERT INTO T VALUES (20)")]
     [InlineData("CREATE TABLE T (A LONG, CONSTRAINT ck CHECK (A < 100000000000000000000))", "INSERT INTO T VALUES (5)")]

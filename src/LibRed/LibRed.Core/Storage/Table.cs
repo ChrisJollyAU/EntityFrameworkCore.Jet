@@ -191,7 +191,9 @@ public sealed class Table
     /// <param name="defaults">The table's all-defaults record, which a statement's row is written over, and
     /// <paramref name="order"/>, the columns the statement names in its own order — together what decides the
     /// record's slack (spec §5). Both null for a row written with no defaults.</param>
-    /// <param name="order">See <paramref name="defaults"/>.</param>
+    /// <param name="order">See <paramref name="defaults"/>. Only these columns are held to their declared width: a
+    /// column the statement does not name holds its default, which a BIGBINARY column stores whole past its width
+    /// (verified vs ACE). Null holds every column to it.</param>
     /// <param name="validate">The caller's own checks of the row, run once its ids are drawn and before anything is
     /// written — so a row they refuse still uses up its AutoNumber, as ACE's does (measured).</param>
     /// <param name="reference">The caller's check of the row's references to other tables' rows, run once the row is
@@ -210,11 +212,13 @@ public sealed class Table
     private bool[] StoredColumns => field ??= DecodeOnly(Definition.Columns.Where(c => !c.IsCalculated).Select(c => c.Index));
 
     /// <summary>Rewrites the row at <paramref name="id"/> in place with new values (row id preserved).
-    /// <paramref name="changedColumns"/> are the columns that actually changed — an unchanged memo/OLE column
-    /// keeps its stored descriptor (no re-materialise), a changed one has its old LVAL pages reclaimed. Every row
-    /// this table object updates is built in one buffer, as ACE builds a statement's (RowCodec's <c>Encode</c>); a
-    /// statement opens its own.</summary>
-    public void Update(RowId id, object?[] values, IReadOnlySet<int> changedColumns)
+    /// <paramref name="changedColumns"/> are the columns that actually changed, which move their index entries. The
+    /// columns written — those, and any in <paramref name="writtenColumns"/>, which the statement sets to the value
+    /// they already had — are held to their declared width, refresh a calculated column that reads them, and have a
+    /// memo/OLE value re-materialised with its old LVAL pages reclaimed; a memo/OLE column not written keeps its stored
+    /// descriptor. Every row this table object updates is built in one buffer, as ACE builds a statement's
+    /// (RowCodec's <c>Encode</c>); a statement opens its own.</summary>
+    public void Update(RowId id, object?[] values, IReadOnlySet<int> changedColumns, IReadOnlySet<int>? writtenColumns = null)
     {
         Write(() =>
         {
@@ -228,7 +232,7 @@ public sealed class Table
                     changed.Add(i);
 
             new RowInserter(Channel, Definition, _databaseCollation).Update(id, values, changed,
-                _updateBuffer ??= new byte[Channel.Format.PageSize]);
+                _updateBuffer ??= new byte[Channel.Format.PageSize], writtenColumns);
             foreach (IndexDef index in Definition.RealIndexes
                 .Where(i => i.Columns.Any(c => changed.Contains(c.Column.Index))))
                 MoveIndexEntry(index, original, values, id);

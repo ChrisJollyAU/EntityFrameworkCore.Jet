@@ -737,12 +737,15 @@ public class WholeFileParityProbeTest(ITestOutputHelper output)
                     output.WriteLine($"ACE placement: {PageGroupProbeTest.Runs(ace)}");
                     output.WriteLine($"LibRed placement: {PageGroupProbeTest.Runs(libred)}");
                 }
-                string outcome = aceError is not null || libredError is not null
+                // Both refusing is a match, as in the run above; the files must then be the same as well.
+                string outcome = aceError is null != libredError is null
                     ? $"ACE: {aceError ?? "ok"} | LibRed: {libredError ?? "ok"}"
                     : pages == 0 ? "identical" : $"{pages} page(s) differ";
                 if (outcome == "identical") same++;
                 outcomes[i] = outcome;
-                summary.AppendLine(CultureInfo.InvariantCulture, $"#{i + 1,-3} {outcome,-22} {Abbreviate(statements[i])}");
+                string refusals = aceError is not null && libredError is not null
+                    ? $" (both refused — ACE: {aceError} | LibRed: {libredError})" : "";
+                summary.AppendLine(CultureInfo.InvariantCulture, $"#{i + 1,-3} {outcome,-22} {Abbreviate(statements[i])}{refusals}");
                 if (pages > 0)
                     details.AppendLine(CultureInfo.InvariantCulture, $"==== #{i + 1} {statements[i]}").Append(report);
 

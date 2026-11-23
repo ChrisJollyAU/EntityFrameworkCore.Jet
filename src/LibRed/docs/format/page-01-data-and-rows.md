@@ -228,7 +228,9 @@ not set the commit slot: it keeps no user slot of its own (§2.2).
   offsets still mark where each value really ends. ACE leaves them in a record written over a longer default
   (verified):
   - an **INSERT** is written over the table's **all-defaults record** — every column's evaluated default, a
-    supplied column's included; a Text default cut to the column's width; a Memo or OLE default no part of it.
+    supplied column's included; a Text default cut to the column's width, a BigBinary one whole past it
+    (`V BIGBINARY(10) DEFAULT 'abcdefghij'` given `0x01` leaves 19 bytes, which a following 15-byte value takes
+    down to 4 — verified); a Memo or OLE default no part of it.
     The statement's values go in **in the order its column list names them** (table order with no list): a value
     shorter than the one it replaces leaves the difference as slack, and a longer one takes slack up before the
     record grows. `T(K, A TEXT DEFAULT 'aaaa', B TEXT DEFAULT 'bbbbbbbb', C TEXT)` given `('x','y','z')` keeps 18
@@ -311,7 +313,11 @@ not set the commit slot: it keeps no user slot of its own (§2.2).
     **bytes** for binary. A `WITH COMPRESSION` text value is counted in characters too, although it stores one
     byte per Latin-1 character — ACE refuses a sixth and an eighth character in a compressed `TEXT(5)`
     (verified), so a limit taken from the stored bytes would admit up to 8. `Memo`/`OLE` are exempt — their
-    inline form is a long-value descriptor whose size is unrelated to `length`.
+    inline form is a long-value descriptor whose size is unrelated to `length`. The bound holds a value the
+    statement **writes** — an `INSERT`'s supplied columns, every column an `UPDATE`'s `SET` names (`SET V = V`
+    included, though the value does not change), an `ALTER COLUMN`'s retyped one — and not one the row carries: a
+    `BIGBINARY` default stored past its width ([page-02c](page-02c-default-values.md)) survives an `UPDATE` of
+    another column and an `ALTER COLUMN` of another (verified).
 - **Booleans** carry **no data** — the value *is* the null-bitmap bit (set = true). Boolean
   columns are never null, and they occupy **no fixed-region bytes**: their descriptor's fixed
   offset is 0 and the fixed offsets of other columns skip over them. (Verified: a Boolean that

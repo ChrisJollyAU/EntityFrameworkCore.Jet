@@ -114,8 +114,15 @@ public class CalculatedColumnSqlAccessTests(ITestOutputHelper output) : TempData
                     .OrderBy(r => Convert.ToInt64(r["ORDINAL_POSITION"], System.Globalization.CultureInfo.InvariantCulture))
                     .Select(r => $"{r["COLUMN_NAME"]}:{((bool)r["IS_NULLABLE"] ? "N" : "R")}"));
 
-            static string ReaderSchema(System.Data.Common.DbConnection c, System.Data.CommandBehavior behavior) =>
-                BooleanValueParityAccessTests.ReaderNullability(c, "SELECT Id, B, L, X FROM T", behavior);
+            // Each column of a reader's schema: its name, and N (AllowDBNull) or R (not).
+            static string ReaderSchema(System.Data.Common.DbConnection c, System.Data.CommandBehavior behavior)
+            {
+                using var command = c.CreateCommand();
+                command.CommandText = "SELECT Id, B, L, X FROM T";
+                using var reader = command.ExecuteReader(behavior);
+                return string.Join(" ", reader.GetSchemaTable()!.Rows.Cast<System.Data.DataRow>()
+                    .Select(row => $"{row["ColumnName"]}:{((bool)row["AllowDBNull"] ? "N" : "R")}"));
+            }
 
             string aceRowset, aceDefault, aceKeyInfo;
             using (var ace = AceTestDatabase.Open(path))

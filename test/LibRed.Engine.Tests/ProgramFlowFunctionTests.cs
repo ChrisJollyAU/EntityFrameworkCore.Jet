@@ -133,7 +133,7 @@ public class ProgramFlowFunctionTests(ProgramFlowFunctionTests.Database database
     [InlineData("TRUE", "Boolean", 11)]
     [InlineData("YN", "Boolean", 11)]
     [InlineData("BT", "Byte", 17)]
-    [InlineData("CBYTE(1)", "Byte", 17)]
+    [InlineData("CBYTE(1)", "Integer", 2)]
     [InlineData("CINT(1)", "Integer", 2)]
     [InlineData("1", "Long", 3)]
     [InlineData("Id", "Long", 3)]

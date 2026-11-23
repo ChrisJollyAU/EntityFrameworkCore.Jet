@@ -1,5 +1,6 @@
 using LibRed.Catalog;
 using LibRed.Storage.Calculated;
+using LibRed.Storage.Types;
 using Xunit;
 
 namespace LibRed.Core.Tests;
@@ -19,17 +20,24 @@ public class CalculatedEvaluatorTests
             CalculatedExpression.Parse(expression),
             name => values.TryGetValue(name, out object? v) ? v
                 : throw new CalculatedExpressionException($"No column '{name}'."),
-            databaseCollation: Collation.GeneralLegacy);
+            databaseCollation: Collation.GeneralLegacy, definition: _ => null);
     }
 
+    // Written whole numbers are Longs, and so is their arithmetic, as ACE types it (measured: VarType(1+1) and
+    // VarType(2*3+1) are 3, in CalculatedExpressionQueryAccessTests).
     [Theory]
-    [InlineData("1+1", 2.0)]
-    [InlineData("2*3+1", 7.0)]
-    [InlineData("1+2*3", 7.0)]
-    [InlineData("(1+2)*3", 9.0)]
+    [InlineData("1+1", 2)]
+    [InlineData("2*3+1", 7)]
+    [InlineData("1+2*3", 7)]
+    [InlineData("(1+2)*3", 9)]
+    public void Evaluates_whole_number_arithmetic(string expression, int expected)
+        => Assert.Equal(expected, Assert.IsType<int>(Eval(expression)));
+
+    [Theory]
     [InlineData("2^3", 8.0)]
-    [InlineData("-2^2", -4.0)]          // ^ binds tighter than unary minus, as in VBA
-    [InlineData("2^3^2", 512.0)]        // right-associative
+    [InlineData("-2^2", 4.0)]           // a minus written against a number is part of it (measured vs ACE)
+    [InlineData("- 2^2", -4.0)]         // ^ binds tighter than any other unary minus (measured vs ACE)
+    [InlineData("2^3^2", 64.0)]         // left-associative (measured vs ACE)
     [InlineData("10/4", 2.5)]
     public void Evaluates_arithmetic(string expression, double expected)
         => Assert.Equal(expected, Assert.IsType<double>(Eval(expression)));
@@ -89,7 +97,7 @@ public class CalculatedEvaluatorTests
 
         Assert.Equal(7.0, Eval("CDbl([A])", ("A", 7)));                          // still works over a value
         Assert.Null(Eval("Abs([A])", ("A", null)));                              // neighbours unaffected
-        Assert.Equal(0.0, Eval("IIf(IsNull([A]), 0, CDbl([A]))", ("A", null)));  // the documented guard
+        Assert.Equal(0, Eval("IIf(IsNull([A]), 0, CDbl([A]))", ("A", null)));    // the documented guard, a Long 0 (measured)
     }
 
     // IIf, Choose and IsNull are the exceptions: they must see the Null rather than become it.
@@ -98,7 +106,9 @@ public class CalculatedEvaluatorTests
     {
         Assert.Equal("none", Eval("IIf(IsNull([A]), \"none\", [A])", ("A", null)));
         Assert.Equal("here", Eval("IIf(IsNull([A]), \"none\", [A])", ("A", "here")));
-        Assert.Equal(true, Eval("IsNull([A])", ("A", null)));
+        // A VBA Boolean, which & writes as "True" (measured vs ACE), where a comparison's is -1.
+        Assert.Same(VbaBoolean.True, Eval("IsNull([A])", ("A", null)));
+        Assert.Same(VbaBoolean.True, Eval("IsNull([A] & [A])", ("A", null)));   // Null & Null is Null
         Assert.Equal("b", Eval("Choose(2, \"a\", \"b\")"));
         Assert.Null(Eval("Choose(9, \"a\", \"b\")"));
     }
@@ -129,6 +139,48 @@ public class CalculatedEvaluatorTests
     [InlineData("String(3, \"x\")", "xxx")]
     public void Evaluates_string_functions(string expression, string expected)
         => Assert.Equal(expected, Eval(expression));
+
+    // The values ACE stores for these, measured in CalculatedColumnAccessTests.Computes_the_same_values_as_ace_across_the_matrix
+    // (and as queries in CalculatedExpressionQueryAccessTests); pinned here too, so the cross-platform suite holds them.
+    [Theory]
+    [InlineData("String(3,65)", "AAA")]                 // a number is a character code
+    [InlineData("Choose(1.6,\"a\",\"b\")", "a")]           // the index is truncated
+    [InlineData("[A] & [A]", "hellohello")]
+    [InlineData("(-[Q]^2) & \"\"", "-0")]                // a negative zero keeps its sign as text
+    [InlineData("Str(-[Q]^2)", "-0")]
+    [InlineData("([Q] > 1) & \"\"", "0")]                // a comparison is -1 or 0 as text
+    public void Answers_as_ace_does(string expression, string expected)
+        => Assert.Equal(expected, Eval(expression, ("A", "hello"), ("Q", 0)));
+
+    [Theory]
+    [InlineData("[Q] And False", false)]                 // Null And False is False
+    [InlineData("[Q] Or True", true)]                    // Null Or True is True
+    [InlineData("[Q] <> Null", false)]                   // `x <> Null` written so is `x Is Not Null`
+    public void Treats_null_as_ace_does(string expression, bool? expected)
+        => Assert.Equal(expected, Eval(expression, ("A", null), ("Q", null)));
+
+    // And short-circuits, so a guard keeps CDbl away from the Null: False And … is False (measured vs ACE).
+    [Fact]
+    public void And_does_not_evaluate_what_cannot_change_it()
+        => Assert.Equal(false, Eval("(1<0) And (CDbl([Q])>0)", ("Q", null)));
+
+    [Theory]
+    [InlineData("[Q] And 2", 7, -1)]                     // And and Not are logical, not bitwise, stored in a Long
+    [InlineData("Not [Q]", 7, 0)]
+    public void Treats_and_and_not_as_logical(string expression, int q, int expected)
+        => Assert.Equal(expected, CalculatedEvaluator.Coerce(Eval(expression, ("Q", q)), JetDataType.Int32));
+
+    [Fact]
+    public void Compares_a_text_column_with_a_computed_number_as_text()
+        => Assert.Equal(false, Eval("[A] = [Q]+0", ("A", "hello"), ("Q", 7)));
+
+    [Theory]
+    [InlineData("\"abc\" * [Q]", typeof(InvalidCastException))]     // text is read as a number before a Null propagates
+    [InlineData("[A] <> False", typeof(InvalidCastException))]      // text beside a written False is a type mismatch
+    [InlineData("[Q]/0", typeof(DivideByZeroException))]           // a division by zero
+    public void Raises_what_ace_caches_as_an_error(string expression, Type error)
+        => Assert.Throws(error,
+            () => Eval(expression, ("A", "hello"), ("Q", expression.Contains("abc", StringComparison.Ordinal) ? null : 7)));
 
     // Access requires every argument of these two even though VBA makes some optional, and reports a
     // missing one as a SYNTAX error rather than a policy refusal. LibRed has to refuse the same shapes,
@@ -203,14 +255,20 @@ public class CalculatedEvaluatorTests
     [InlineData("2 > 1 And 1 < 2", true)]
     [InlineData("2 > 1 Or 1 > 2", true)]
     [InlineData("Not 2 > 1", false)]
-    [InlineData("\"abc\" Like \"a*\"", true)]
-    [InlineData("\"abc\" Like \"a?c\"", true)]
-    [InlineData("\"a1c\" Like \"a#c\"", true)]
-    [InlineData("\"abc\" Like \"b*\"", false)]
     [InlineData("2 In (1, 2, 3)", true)]
     [InlineData("9 In (1, 2, 3)", false)]
     public void Evaluates_predicates(string expression, bool expected)
         => Assert.Equal(expected, Eval(expression));
+
+    // Like gives a VBA Boolean, which & writes as "True" or "False" (measured vs ACE through DAO), where a comparison's
+    // is -1 or 0.
+    [Theory]
+    [InlineData("\"abc\" Like \"a*\"", true)]
+    [InlineData("\"abc\" Like \"a?c\"", true)]
+    [InlineData("\"a1c\" Like \"a#c\"", true)]
+    [InlineData("\"abc\" Like \"b*\"", false)]
+    public void Evaluates_like(string expression, bool expected)
+        => Assert.Same(VbaBoolean.Of(expected), Eval(expression));
 
     [Fact]
     public void Evaluates_is_null()
@@ -234,8 +292,8 @@ public class CalculatedEvaluatorTests
     [Fact]
     public void IsEmpty_is_always_false_for_a_column()
     {
-        Assert.Equal(false, Eval("IsEmpty([A])", ("A", "hello")));
-        Assert.Equal(false, Eval("IsEmpty([A])", ("A", null)));
+        Assert.Same(VbaBoolean.False, Eval("IsEmpty([A])", ("A", "hello")));
+        Assert.Same(VbaBoolean.False, Eval("IsEmpty([A])", ("A", null)));
     }
 
     // Access's Expression Builder offers the '$' name variants and its designer accepts them, but ACE then
@@ -353,4 +411,42 @@ public class CalculatedEvaluatorTests
     [Fact]
     public void Coercion_keeps_null_as_null()
         => Assert.Null(CalculatedEvaluator.Coerce(null, JetDataType.Int32));
+
+    // A VBA Boolean stored (measured vs ACE): as text "-1" or "0", in a Byte 255 for True — where a comparison's
+    // Boolean is an overflow there — and as -1 or 0 otherwise.
+    [Fact]
+    public void Stores_a_vba_boolean_as_ace_does()
+    {
+        Assert.Equal("-1", CalculatedEvaluator.Coerce(VbaBoolean.True, JetDataType.Text));
+        Assert.Equal("0", CalculatedEvaluator.Coerce(VbaBoolean.False, JetDataType.Memo));
+        Assert.Equal((byte)255, CalculatedEvaluator.Coerce(VbaBoolean.True, JetDataType.Byte));
+        Assert.Throws<CalculatedExpressionException>(() => CalculatedEvaluator.Coerce(true, JetDataType.Byte));
+        Assert.Equal((short)-1, CalculatedEvaluator.Coerce(VbaBoolean.True, JetDataType.Int16));
+        Assert.Equal(-1.0, CalculatedEvaluator.Coerce(VbaBoolean.True, JetDataType.Double));
+        Assert.Equal(true, CalculatedEvaluator.Coerce(VbaBoolean.True, JetDataType.Boolean));
+    }
+
+    // A VBA Boolean as each path takes it (measured vs ACE, as a query and as a calculated column): a Variant written
+    // as text is "False", a String argument and a comparison with text "0", arithmetic 0. [A] is "hello", so IsNull([A])
+    // is False.
+    [Theory]
+    [InlineData("IsNull([A]) & \"\"", "False")]
+    [InlineData("Str(IsNull([A]))", "False")]
+    [InlineData("Len(IsNull([A])) & \"\"", "5")]
+    [InlineData("UCase(IsNull([A]))", "FALSE")]
+    [InlineData("Mid(IsNull([A]),2,2)", "al")]
+    [InlineData("InStr(1,\"x0False\",IsNull([A])) & \"\"", "3")]
+    [InlineData("Choose(1,IsNull([A])) & \"\"", "False")]
+    [InlineData("IIf([Q]>0, 5, IsNull([A])) & \"\"", "False")]
+    [InlineData("Asc(IsNull([A])) & \"\"", "48")]
+    [InlineData("(IsNull([A]) = \"0\") & \"\"", "-1")]
+    [InlineData("(IsNull([A]) > \"\") & \"\"", "-1")]
+    [InlineData("(IsNull([A]) In (\"0\")) & \"\"", "-1")]
+    [InlineData("(IsNull([A]) - 1) & \"\"", "-1")]
+    [InlineData("(-IsNull([A])) & \"\"", "0")]
+    [InlineData("(Not IsNull([A])) & \"\"", "-1")]
+    [InlineData("([A] Like \"h*\") & \"\"", "True")]
+    [InlineData("IIf(IsNull([A]) Like \"F*\",\"y\",\"n\")", "y")]
+    public void Takes_a_vba_boolean_as_ace_does(string expression, string expected)
+        => Assert.Equal(expected, Eval(expression, ("A", "hello"), ("Q", 0)));
 }

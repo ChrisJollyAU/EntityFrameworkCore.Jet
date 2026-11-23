@@ -208,6 +208,8 @@ variable-length**, and its slot holds a fixed envelope around the result ACE las
 > | `[Qty]/3` over Null (propagates) | all 23 bytes zero — a zero-length payload, i.e. Null |
 > | `CDbl([Qty])/3` over Null | starts `5E 00 00 00`, 39 bytes — **94**, VBA "Invalid use of Null" |
 > | `CDbl([A])` over `'hello'` | starts `0D 00 00 00`, 39 bytes — **13**, VBA "Type mismatch" |
+> | `[Qty]/0` over 7 | starts `0B 00 00 00`, 39 bytes — **11**, VBA "Division by zero" |
+> | `[Qty]/0` over 0 | starts `06 00 00 00`, 39 bytes — **6**, VBA "Overflow" (0/0, as VBA raises it) |
 >
 > So the leading field is the VBA runtime error number. **An error envelope fills the column's declared
 > length** — 39 bytes, the constant every value-type result declares (below), whatever the result type and

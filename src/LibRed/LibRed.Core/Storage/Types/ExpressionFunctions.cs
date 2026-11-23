@@ -72,8 +72,10 @@ internal abstract partial class ExpressionFunctions<TExpression>
             // through: a Variant keeps its own type while an expression uses it, and the executor writes it out as
             // text where ACE does (QueryExecutor.Variance).
             "CCUR" => DecimalArgument(f, ToCurrency),
-            "CBOOL" => Convert1(f, v => VbaBool(v)),
-            "CBYTE" => Convert1(f, v => Convert.ToByte(ConversionNumber(v), CultureInfo.InvariantCulture)),
+            "CBOOL" => Convert1(f, v => VbaBoolean.Of(VbaBool(v))),
+            // A Byte's range, an Integer's type (verified vs ACE: VarType(CByte(1)) is 2, and CByte(1) stores 01 00 in a
+            // binary column and is a type mismatch in a GUID one).
+            "CBYTE" => Convert1(f, v => (short)AsByte(v)),
             "CINT" => Convert1(f, v => (short)AsInteger(v)),
             "CLNG" => Convert1(f, v => AsLong(v)),
             // CLngLng is VBA's LongLong conversion, which the Jet Expression Service does not have (verified: ACE
@@ -91,7 +93,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
             "CVAR" => Evaluate(f.Arguments[0]),
 
             // VBA/Access string functions (verified vs ACE). A value that is not text is read as CStr writes it
-            // (ConcatText): True is "-1", a date in the regional format, a GUID braced, and a binary value as
+            // (ConcatText): True is "-1" and a VBA Boolean "True", a date in the regional format, a GUID braced, and a binary value as
             // UTF-16 text, so Len(0x4100) is 1 where LenB is 2. Positions are 1-based and read as the conversion
             // functions read numbers; a Null argument gives Null. StrComp compares in the database sort order unless
             // a compare argument of 0 asks for a binary comparison; InStr, InStrRev and Replace search as TextFold
@@ -137,7 +139,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
             // date or text that reads as one; a number is a type mismatch. IsDate is true for exactly those.
             "DATEVALUE" => Convert1(f, v => DateValueArgument(v).Date),
             "TIMEVALUE" => Convert1(f, v => DateTime.FromOADate(0).Add(DateValueArgument(v).TimeOfDay)),
-            "ISDATE" => TryDateText(Evaluate(f.Arguments[0]), out _),
+            "ISDATE" => VbaBoolean.Of(TryDateText(Evaluate(f.Arguments[0]), out _)),
             // Jet VBA math functions (double precision). SQR = sqrt, ATN = atan, LOG = natural log.
             // ACE's Tan is its Sin over its Cos, which differs from a direct tangent in the last digit.
             "SIN" => UnaryDouble(f, Trigonometric(Math.Sin)),
@@ -186,10 +188,10 @@ internal abstract partial class ExpressionFunctions<TExpression>
             "CHR" => Convert1(f, v => AnsiCharacter(InRange(AsLong(v), 0, 255)).ToString()),
             "SPACE" => Convert1(f, v => new string(' ', Count(v))),
             "STRING" => StringOf(f),                         // String(count, char) → char repeated count times
-            "STRREVERSE" => Convert1(f, v => new string(ConcatText(v).Reverse().ToArray())),
+            "STRREVERSE" => Convert1(f, v => new string(StringArgument(v).Reverse().ToArray())),
             "STRCOMP" => StrComp(f),                         // -1/0/1 (case-insensitive, Access "Compare Database")
             "STR" => Convert1(f, VbaStr),                    // number → text with a leading space when non-negative
-            "VAL" => Convert1(f, v => VbaVal(ConcatText(v))),
+            "VAL" => Convert1(f, v => VbaVal(StringArgument(v))),
             "HEX" => Convert1(f, v => RadixText(v, 16)),
             "OCT" => Convert1(f, v => RadixText(v, 8)),
             "INSTRREV" => InstrRev(f),                       // last occurrence, 1-based (0 if none)
@@ -203,10 +205,10 @@ internal abstract partial class ExpressionFunctions<TExpression>
             // Predicates / type inspection. IsError is always false — LibRed has no error-value type — but its argument
             // is still evaluated, so an error in it is raised (verified vs ACE: IsError(1/0) fails). IsEmpty, IsMissing
             // and IsObject are always false too, Null included: no query value is Empty, a missing argument or an
-            // object (verified vs ACE). ISNULL returns a Boolean (ACE reports it as -1/0); all print as a boolean here.
-            "ISNULL" => Evaluate(f.Arguments[0]) is null,
-            "ISNUMERIC" => IsNumericValue(Evaluate(f.Arguments[0])),
-            "ISERROR" or "ISEMPTY" or "ISMISSING" or "ISOBJECT" => IsError(f),
+            // object (verified vs ACE). Each is a VBA Boolean (VbaBoolean), as ACE gives it.
+            "ISNULL" => VbaBoolean.Of(Evaluate(f.Arguments[0]) is null),
+            "ISNUMERIC" => VbaBoolean.Of(IsNumericValue(Evaluate(f.Arguments[0]))),
+            "ISERROR" or "ISEMPTY" or "ISMISSING" or "ISOBJECT" => VbaBoolean.Of(IsError(f)),
             // IMEStatus() is the input-method mode, and ACE answers 0 (vbIMENoOp), a Long (verified).
             "IMESTATUS" => 0,
             "TYPENAME" => TypeNameOf(Evaluate(f.Arguments[0]), f.Arguments[0]),
@@ -387,20 +389,31 @@ internal abstract partial class ExpressionFunctions<TExpression>
 
     private static char AnsiCharacter(int code) => Ansi.GetString([(byte)code])[0];
 
-    /// <summary>The first character of a value as text; an empty text is an invalid procedure call.</summary>
+    /// <summary>The first character of a value as a String argument takes it (<see cref="StringArgument"/>); an empty
+    /// text is an invalid procedure call.</summary>
     private static string FirstCharacter(object v)
     {
-        string text = ConcatText(v);
+        string text = StringArgument(v);
         return text.Length > 0
             ? text[..1]
             : throw new ArgumentException("Invalid procedure call: the text is empty.");
     }
 
-    /// <summary>A value read as CInt reads it: half to even, and past an Integer is an overflow.</summary>
-    private static int AsInteger(object v) => Convert.ToInt16(ConversionNumber(v), CultureInfo.InvariantCulture);
+    /// <summary>A value read as CByte reads it, and as a Byte stores it: as <see cref="AsInteger"/> reads one, past a Byte
+    /// an overflow, and a VBA Boolean True 255 where any other -1 overflows (verified vs ACE: <c>CByte(IsNull(Null))</c>
+    /// and a calculated Byte column over <c>IsNull</c> or <c>Like</c> are 255).</summary>
+    internal static byte AsByte(object v) =>
+        v is VbaBoolean b ? (byte)(b.Value ? 255 : 0) : Convert.ToByte(Dbl(ConversionNumber(v)));
 
-    /// <summary>A value read as CLng reads it: half to even, and past a Long is an overflow.</summary>
-    private static int AsLong(object v) => Int(ConversionNumber(v));
+    /// <summary>A value read as CInt reads it, and as an Integer stores it: through a Double, half to even, and past an
+    /// Integer an overflow (verified vs ACE: <c>CInt(0.5000000000000000000000000001)</c> and an Integer calculated column
+    /// over it are 0, as the Double 0.5 rounds).</summary>
+    internal static int AsInteger(object v) => Convert.ToInt16(Dbl(ConversionNumber(v)));
+
+    /// <summary>A value read as CLng reads it, and as a Long stores it: as <see cref="AsInteger"/> reads one, past a Long
+    /// an overflow (verified vs ACE: <c>CLng(2.5000000000000000000000000001)</c> and a Long calculated column over it are
+    /// 2).</summary>
+    internal static int AsLong(object v) => Convert.ToInt32(Dbl(ConversionNumber(v)));
 
     /// <summary>A value read as CLngLng reads it: as CLng, half to even, and past an Int64 an overflow. Text that
     /// reads as a number is read exactly, not through a Double, so '9223372036854775807' loses no digit.</summary>
@@ -518,7 +531,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
         object? s2v = Evaluate(f.Arguments[1]);
         if (s1v is null || s2v is null)
             throw new InvalidOperationException("Data type mismatch in criteria expression: InStrRev() argument is null.");
-        string s1 = ConcatText(s1v), s2 = ConcatText(s2v);
+        string s1 = StringArgument(s1v), s2 = StringArgument(s2v);
 
         if (CountArgument(f, 2, least: -1, absent: -1) is not { } given)
             return null;
@@ -547,7 +560,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// Access <c>Str(number)</c>: the number read as the conversion functions read it and written as
     /// <see cref="VbaText.Str"/> writes it. A date is written as CStr writes it.
     /// </summary>
-    private static string VbaStr(object v) => v is DateTime date ? ConcatText(date) : VbaText.Str(NumericOperand(v)!);
+    private static string VbaStr(object v) => v is DateTime or VbaBoolean ? ConcatText(v) : VbaText.Str(NumericOperand(v)!);
 
     /// <summary>
     /// Access <c>Val(string)</c> (verified vs ACE): the number at the start of the text, as a Double, or 0. Spaces,
@@ -617,7 +630,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// <summary>VBA <c>TypeName(value)</c> — the Access type name of the value's type (e.g. an Int32 literal → "Long").
     /// A Boolean is "Boolean" and a Byte "Byte", as LibRed holds them; ACE reports both as integers. Currency and
     /// Decimal share <see cref="decimal"/>, so which one a value is comes from its <paramref name="expression"/>.</summary>
-    private string TypeNameOf(object? v, TExpression expression) => v switch
+    private string TypeNameOf(object? v, TExpression expression) => VbaBoolean.Plain(v) switch
     {
         decimal when IsCurrency(expression) => "Currency",
         decimal => "Decimal",
@@ -634,12 +647,12 @@ internal abstract partial class ExpressionFunctions<TExpression>
         // A binary column reports as String, not Byte[] — ACE's expression service sees the value as a
         // UTF-16 string (VarType 8 = VT_BSTR), so TypeName must say so even though LibRed holds a byte[].
         byte[] or Guid or char => "String",
-        _ => v.GetType().Name,
+        var other => other.GetType().Name,
     };
 
     /// <summary>VBA <c>VarType(value)</c> — the Access variant type code (vbLong=3, vbString=8, …), with the same
     /// mapping as <see cref="TypeNameOf"/>.</summary>
-    private int VarTypeOf(object? v, TExpression expression) => v switch
+    private int VarTypeOf(object? v, TExpression expression) => VbaBoolean.Plain(v) switch
     {
         decimal when IsCurrency(expression) => 6, // vbCurrency
         decimal => 14,      // vbDecimal
@@ -859,7 +872,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// Decimal 17 — its sign byte and 16-byte magnitude. A Boolean is stored as a bit of the row's null bitmap and so
     /// takes no byte of its own; it counts 1, as SQL Server counts a <c>bit</c>.
     /// </summary>
-    private static int DataLength(object value, bool currency) => value switch
+    private static int DataLength(object value, bool currency) => VbaBoolean.Plain(value) switch
     {
         string s => checked(s.Length * 2),
         char => 2,
@@ -1138,7 +1151,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
             return null;
         places = Math.Min(places, 28);
 
-        return value switch
+        return VbaBoolean.Plain(value)! switch
         {
             decimal m => decimal.Round(m, places, MidpointRounding.ToEven),
             double d => RoundDouble(d, places),
@@ -1255,7 +1268,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// <summary>Access <c>CCur</c>: the value to four places, half to even — a Double or Single from its exact binary
     /// value, as storing it in a Currency column takes it (<see cref="JetTypeCodec.CurrencyToScaled(object, IFormatProvider)"/>);
     /// past a Currency is an overflow.</summary>
-    protected static decimal ToCurrency(object number) =>
+    internal static decimal ToCurrency(object number) =>
         JetTypeCodec.CurrencyFromScaled(JetTypeCodec.CurrencyToScaled(number, CultureInfo.InvariantCulture));
 
     /// <summary>A date, or text that reads as one (<see cref="VbaDateText"/>); a number or Null is not.</summary>
@@ -1342,7 +1355,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
         // changes, only ones that error start returning NULL.
         if (sv is null || findv is null || replv is null)
             return null;
-        string s = ConcatText(sv), find = ConcatText(findv), repl = ConcatText(replv);
+        string s = StringArgument(sv), find = StringArgument(findv), repl = StringArgument(replv);
 
         if (CountArgument(f, 3, least: 1, absent: 1) is not { } start
             || CountArgument(f, 4, least: -1, absent: -1) is not { } count
@@ -1671,7 +1684,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// 0.4, 0.5, '0.4' and a date at 06:00 on 1899-12-30 are False, 0.6 and 1E+20 are True). Text that is not a
     /// number is True, as <see cref="IsTruthy"/> has it.
     /// </summary>
-    protected static bool IifCondition(object value) => value switch
+    protected static bool IifCondition(object value) => VbaBoolean.Plain(value)! switch
     {
         bool b => b,
         string or char => !(VbaText.TryTextAsNumber(value.ToString()!) is { } number && Math.Round(number, MidpointRounding.ToEven) == 0),
@@ -1680,7 +1693,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
         _ => !IsNumeric(value) || Math.Round(Dbl(value), MidpointRounding.ToEven) != 0,
     };
 
-    internal static bool IsTruthy(object value) => value switch
+    internal static bool IsTruthy(object value) => VbaBoolean.Plain(value)! switch
     {
         bool b => b,
         string s => !ReadsAsZero(s),
@@ -1707,6 +1720,43 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// overflow.</summary>
     protected static decimal AsCurrencyColumn(object value) =>
         ToCurrency(JetTypeCodec.NumberFromText(JetDataType.Currency, value));
+
+    /// <summary>The operands of a <c>+</c> or <c>-</c> whose result is a Currency (<paramref name="currency"/>), before
+    /// anything else reads them. A Currency plus or less a Double, a Single or text takes the other as a Currency column
+    /// takes it, first (verified vs ACE: Currency 0.0001 + Double 0.03125 is 0.0313, where the exact sum rounds to
+    /// 0.0314, and 0.0001 + '1.00005' is 1.0001, the text read exactly).</summary>
+    internal static (object? Left, object? Right) CurrencySumOperands(object? left, object? right, bool currency)
+    {
+        if (left is not null && right is not null && currency)
+        {
+            if (left is double or float or string or char) left = AsCurrencyColumn(left);
+            if (right is double or float or string or char) right = AsCurrencyColumn(right);
+        }
+        return (left, right);
+    }
+
+    /// <summary>The operands, neither Null, of a <c>+</c>, <c>-</c>, <c>*</c> or <c>/</c> (<paramref name="divide"/>
+    /// for <c>/</c>), a side's flag saying it is a Currency. A Currency beside a Double or Single, or divided, is worked
+    /// out as a Double, as OLE Automation does (verified vs ACE: Currency 1.1 * Double 0.1 is 0.11000000000000001, and
+    /// Currency / 3 a Double).</summary>
+    internal static (object Left, object Right) CurrencyProductOperands(
+        object left, object right, bool divide, bool leftCurrency, bool rightCurrency)
+    {
+        if ((divide || right is double or float) && left is decimal money && leftCurrency)
+            left = JetDecimalConverter.FromDecimal(money);
+        if ((divide || left is double or float) && right is decimal moneyRight && rightCurrency)
+            right = JetDecimalConverter.FromDecimal(moneyRight);
+        return (left, right);
+    }
+
+    /// <summary>The result of a <c>+</c>, <c>-</c> or <c>*</c>, a Currency where the operation's result is one
+    /// (<paramref name="currency"/>). A result that is a Currency is one at every step, not only in the result column:
+    /// its four places and its range apply to it where it is worked out, as CCur applies them (verified vs ACE: Currency
+    /// 1.2345 * 1.2345 is 1.524, 0.0003 * 1.2345 is 0.0004, and the largest Currency + 1 or * 3 is an overflow). A
+    /// Currency with a written decimal is not one, nor one times a Double; one plus or less a Double is (verified vs
+    /// ACE: Currency 1.2345 + Double 1.5 is the Currency 2.7345).</summary>
+    internal static object CurrencyStep(object result, bool currency) =>
+        result is decimal or double or float && currency ? ToCurrency(result) : result;
 
     /// <summary>Text compared with a date column, read as storing it in the column reads it — with an index or
     /// without. Text that is not a date is a type mismatch.</summary>
@@ -1773,7 +1823,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// Byte or a Long, 64 for an Int64. Anything else is first read as a whole number, as <c>\</c> reads it: text as a
     /// number, a date as its serial, then rounded half to even, and it must fit a Long.
     /// </summary>
-    private static (long Bits, int Width) BitOperand(object v) => v switch
+    private static (long Bits, int Width) BitOperand(object v) => VbaBoolean.Plain(v)! switch
     {
         bool b => (b ? 0xFFFF : 0, 16),
         short s => ((ushort)s, 16),
@@ -1817,6 +1867,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// </summary>
     internal static (object Left, object Right) Comparable(object left, object right)
     {
+        (left, right) = ComparedBooleans(left, right);
         if (left is char leftChar) left = leftChar.ToString();
         if (right is char rightChar) right = rightChar.ToString();
         bool leftText = left is string, rightText = right is string;
@@ -1842,16 +1893,51 @@ internal abstract partial class ExpressionFunctions<TExpression>
         return Compare(l, r, text);
     }
 
-    /// <summary>A value as a condition — for <c>NOT</c>, <c>AND</c>, <c>OR</c>, <c>XOR</c>, <c>EQV</c>, <c>IMP</c> and a
-    /// <c>WHERE</c>: False when it reads as 0, True otherwise, Null when Null (verified vs ACE: <c>'0'</c> is False,
-    /// <c>'abc'</c>, <c>''</c>, a date, a GUID and a binary value are True).</summary>
-    internal static bool? AsBool(object? v) => v is null ? null : IsTruthy(v);
+    /// <summary>Whether <paramref name="e"/> is an error an expression raised — a division by zero, an overflow, an
+    /// invalid procedure call, a type mismatch — which a statement reports as that expression's error.</summary>
+    internal static bool IsExpressionError(Exception e) =>
+        e is ArithmeticException or InvalidCastException or ArgumentException or InvalidOperationException;
+
+    // '&' treats a single Null as "" but is Null when both sides are (verified vs ACE).
+    internal static string? Concat(object? left, object? right) =>
+        left is null && right is null
+            ? null
+            : (left is null ? "" : ConcatText(left)) + (right is null ? "" : ConcatText(right));
+
+    /// <summary><c>NOT</c>: the value's truth negated (<see cref="AsBool"/>), so a -1/0 integer Boolean is negated
+    /// too; Null when Null.</summary>
+    internal bool? Not(object? v) => AsBool(v) is bool b ? !b : null;
+
+    // AND/OR use Kleene three-valued logic, and short-circuit: `false AND x` is false and `true OR x`
+    // is true regardless of x — so the right operand (which may be an expensive correlated subquery) is
+    // only evaluated when it can affect the result.
+    internal object? And(TExpression left, TExpression right)
+    {
+        bool? l = AsBool(Evaluate(left));
+        return l == false ? false : l & AsBool(Evaluate(right));
+    }
+
+    internal object? Or(TExpression left, TExpression right)
+    {
+        bool? l = AsBool(Evaluate(left));
+        return l == true ? true : l | AsBool(Evaluate(right));
+    }
+
+    /// <summary>A value as a condition — for <c>NOT</c>, <c>AND</c>, <c>OR</c>, <c>XOR</c>, <c>EQV</c>, <c>IMP</c>, a
+    /// <c>WHERE</c> and <c>= True</c> or <c>= False</c>: False when it reads as 0, True otherwise, Null when Null (verified
+    /// vs ACE: <c>'0'</c> is False, <c>'abc'</c>, <c>''</c> and a date are True). A binary value or a GUID is False when it
+    /// equals the text "0", a False beside text, in the database's collation, so a GUID never is (verified vs ACE: 0x30,
+    /// 0x3000, 0x30000000, 0x00003000, 0x30002000 and 0x10FF, which is a full-width zero, are False; 0x30003000,
+    /// 0x00000000, 0x0000 and 0x3000200000000000 are True). IIf's condition is not this one (<see cref="IifCondition"/>).</summary>
+    internal bool? AsBool(object? v) => v is null ? null : v is Guid or byte[] ? CompareValues(v, "0", Text) != 0 : IsTruthy(v);
 
     /// <summary><c>+ - *</c> with C# widest-operand type promotion, so the result CLR type matches what EF
     /// expects (int+int→int, …): decimal &gt; double &gt; single &gt; long &gt; int. (Contract: like
     /// <c>Enumerable</c> arithmetic — LibRed emits the operand type, not an ACE-widened one.) A result past its type's range is an Overflow
     /// error, Double and Single alike — a Single result is not widened to a Double as ACE widens it, because the result
-    /// keeps its operand type.</summary>
+    /// keeps its operand type. A Long past its range is a Double instead, as OLE Automation's arithmetic makes it
+    /// (verified vs ACE: <c>VarType([Qty]*1000000000)</c> and <c>VarType(2147483647*2)</c> are 5, Double, and so in a
+    /// calculated column); where a result column is a Long, storing it there is the overflow.</summary>
     internal static object Arithmetic(object left, object right, char op)
     {
         // Date/time arithmetic operates on the OLE Automation serial (days since 1899-12-30; the fractional
@@ -1873,13 +1959,17 @@ internal abstract partial class ExpressionFunctions<TExpression>
                 _ => Finite(a * b),
             };
         }
-        // A result past its type is an error, not a wrapped or infinite value (verified vs ACE: 2147483647 + 1,
-        // 2147483647 * 2, -2147483647 - 2 and 1E300 * 1E300 all fail).
+        // A result past its type is an error, not a wrapped or infinite value (verified vs ACE: 1E300 * 1E300 fails, and
+        // as result values 2147483647 + 1, 2147483647 * 2 and -2147483647 - 2, whose Long result column cannot hold them).
         if (left is decimal || right is decimal) { decimal a = ArithmeticDecimal(left), b = ArithmeticDecimal(right); return op == '+' ? a + b : op == '-' ? a - b : a * b; }
         if (left is double || right is double) { double a = Dbl(left), b = Dbl(right); return Finite(op == '+' ? a + b : op == '-' ? a - b : a * b); }
         if (left is float || right is float) { float a = (float)Dbl(left), b = (float)Dbl(right); return Finite(op == '+' ? a + b : op == '-' ? a - b : a * b); }
         if (left is long or ulong || right is long or ulong) { long a = Lng(left), b = Lng(right); return checked(op == '+' ? a + b : op == '-' ? a - b : a * b); }
-        int x = Int(left), y = Int(right); return checked(op == '+' ? x + y : op == '-' ? x - y : x * y);
+        int x = Int(left), y = Int(right);
+        long whole = op == '+' ? (long)x + y : op == '-' ? (long)x - y : (long)x * y;
+        if (whole is >= int.MinValue and <= int.MaxValue)
+            return (int)whole;
+        return (double)whole;
     }
 
     /// <summary>
@@ -2000,18 +2090,36 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// <summary>An arithmetic operand: text read as a number (<see cref="VbaText.TextAsNumber"/>); a GUID or binary value
     /// is a type mismatch; anything else, Null included, as it is. A <see cref="char"/> (a parameter can carry one)
     /// is one character of text.</summary>
-    internal static object? NumericOperand(object? v) => v switch
+    internal static object? NumericOperand(object? v) => VbaBoolean.Plain(v) switch
     {
         VbaEmpty => (short)0,
         string s => VbaText.TextAsNumber(s),
         char c => VbaText.TextAsNumber(c.ToString()),
         Guid or byte[] => throw new InvalidCastException("Type mismatch: a GUID or binary value is not a number."),
-        _ => v,
+        var plain => plain,
     };
 
     /// <summary>A value as <c>&amp;</c> (and <c>+</c> between two texts) writes it: as CStr writes it
-    /// (<see cref="VbaText.Of"/>), and VBA's Empty as "".</summary>
-    internal static string ConcatText(object v) => v is VbaEmpty ? "" : VbaText.Of(v);
+    /// (<see cref="VbaText.Of"/>), VBA's Empty as "", and a VBA Boolean as "True" or "False".</summary>
+    internal static string ConcatText(object v) => v switch
+    {
+        VbaEmpty => "",
+        VbaBoolean b => b.Value ? "True" : "False",
+        _ => VbaText.Of(v),
+    };
+
+    /// <summary>A value as a function taking a String reads it (verified vs ACE: Asc, AscW, AscB, Val, Replace,
+    /// StrReverse and InStrRev): as <see cref="ConcatText"/> writes it, but a VBA Boolean as "-1" or "0".</summary>
+    internal static string StringArgument(object v) => ConcatText(VbaBoolean.Plain(v)!);
+
+    /// <summary>The two sides of a comparison with a VBA Boolean taken out: beside text it is the text "-1" or "0"
+    /// (verified vs ACE: <c>IsNull(x) = '-1'</c> holds where <c>= 'True'</c> does not, and <c>&gt; ''</c> always), and
+    /// anywhere else the Boolean it is.</summary>
+    internal static (object Left, object Right) ComparedBooleans(object left, object right) =>
+        (Compared(left, right), Compared(right, left));
+
+    private static object Compared(object side, object other) =>
+        side is VbaBoolean b ? other is string or char ? StringArgument(b) : b.Value : side;
 
     protected static readonly DateTime OaEpoch = new(1899, 12, 30);
 
@@ -2023,11 +2131,11 @@ internal abstract partial class ExpressionFunctions<TExpression>
         : Dbl(ConversionNumber(v)) != 0;
 
     // Jet's boolean convention (true = -1, false = 0) so a bool matches the numeric column it is stored in.
-    protected static object Numeric(object v) => v switch
+    protected static object Numeric(object v) => VbaBoolean.Plain(v)! switch
     {
         bool b => b ? -1 : 0,
         VbaEmpty => (short)0,
-        _ => v,
+        var plain => plain,
     };
     protected static decimal Dec(object v) => v switch
     {
@@ -2045,6 +2153,8 @@ internal abstract partial class ExpressionFunctions<TExpression>
 
     internal static int Compare(object left, object right, JetTextComparer text)
     {
+        // Already done where Comparable came first; NullIf, Greatest and Least compare here directly.
+        (left, right) = ComparedBooleans(left, right);
         // Empty is "" beside text and 0 beside anything else, as VBA compares it.
         if (left is VbaEmpty) left = right is string ? "" : (short)0;
         if (right is VbaEmpty) right = left is string ? "" : (short)0;
@@ -2127,5 +2237,5 @@ internal abstract partial class ExpressionFunctions<TExpression>
     // a boolean predicate (e.g. IS NOT NULL) must compare equal to that stored value. The comparison
     // coercions (Dec/Dbl) use Jet's convention (false = 0, true = -1) so a bool matches the numeric value
     // it is stored as.
-    internal static bool IsNumeric(object v) => v is bool || JetTypeCodec.IsNumber(v);
+    internal static bool IsNumeric(object v) => VbaBoolean.Plain(v) is bool || JetTypeCodec.IsNumber(v);
 }

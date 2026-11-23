@@ -318,14 +318,25 @@ internal static class IndexSelection
         return changed ? QueryPlanner.CombineAnd(written) : predicate;
 
         // NOT (a <> b) is a = b — but for a written Null b, beside which a <> b is a Is Not Null (ExpressionEvaluator).
-        static Expression Plain(Expression e) =>
-            e is UnaryExpression
+        // And a column that is not true — a <> True, NOT (a = True), NOT a — is a = False, which an index seeks as it
+        // seeks a = False (verified vs ACE on an indexed binary column, where all four find only the row holding the
+        // bytes 0x0000; on an indexed number, date, text or Yes/No column the four select the same rows, which
+        // YesNoComparisonAccessTests asks).
+        static Expression Plain(Expression e) => e switch
+        {
+            UnaryExpression
             {
                 Operator: UnaryOperator.Not,
                 Operand: BinaryExpression { Operator: BinaryOperator.NotEqual, Right: not LiteralExpression { Value: null } } unequal,
-            }
-                ? unequal with { Operator = BinaryOperator.Equal }
-                : e;
+            } => unequal with { Operator = BinaryOperator.Equal },
+            BinaryExpression { Operator: BinaryOperator.NotEqual, Right: LiteralExpression { Value: true } } notTrue =>
+                notTrue with { Operator = BinaryOperator.Equal, Right = new LiteralExpression(false) },
+            UnaryExpression { Operator: UnaryOperator.Not, Operand: BinaryExpression { Operator: BinaryOperator.Equal, Right: LiteralExpression { Value: true } } isTrue } =>
+                isTrue with { Right = new LiteralExpression(false) },
+            UnaryExpression { Operator: UnaryOperator.Not, Operand: ColumnReference column } =>
+                new BinaryExpression(BinaryOperator.Equal, column, new LiteralExpression(false)),
+            _ => e,
+        };
 
         bool Indexed(Expression e) => e is BinaryExpression { Operator: BinaryOperator.And or BinaryOperator.Or } b
             ? Indexed(b.Left) && Indexed(b.Right)
@@ -830,7 +841,7 @@ internal static class IndexSelection
             bool yesNoLeft = lc.Column.Type == JetDataType.Boolean;
             JetDataType beside = (yesNoLeft ? rc : lc).Column.Type;
             bool yesNo = yesNoLeft != (rc.Column.Type == JetDataType.Boolean) && Classify(beside) is not null
-                && ExpressionEvaluator.ComparedByTruth(Schema.JetClrTypeMap.ToClrType(beside), beside == JetDataType.Currency);
+                && ExpressionEvaluator.ComparedByTruth(JetClrTypeMap.ToClrType(beside), beside == JetDataType.Currency);
             if (!singleDouble && !yesNo)
                 return conjunct;
             if (yesNo)

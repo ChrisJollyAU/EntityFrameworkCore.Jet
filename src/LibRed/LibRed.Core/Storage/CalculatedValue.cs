@@ -58,12 +58,30 @@ internal static class CalculatedValue
                 $"Error evaluating calculated column '{column.Name}': its descriptor lacks the flag that lets the "
                 + "expression be evaluated.");
 
-        object? result = Calculated.CalculatedEvaluator.Evaluate(
-            Calculated.CalculatedExpression.ParseCached(text),
-            name => Lookup(column, columns, values, name),
-            databaseCollation);
+        // An expression that raises an error — a division by zero, an overflow, an invalid procedure call, a type
+        // mismatch — is cached by ACE as that VBA error in a value result, after which its own reader refuses the row;
+        // for a Text or Memo result ACE refuses the write. LibRed refuses the write either way, as for CDbl(Null)
+        // (page-02e-calculated-columns).
+        try
+        {
+            object? result = Calculated.CalculatedEvaluator.Evaluate(
+                Calculated.CalculatedExpression.ParseCached(text),
+                name =>
+                {
+                    int index = Lookup(column, columns, name).Index;
+                    return index < values.Length ? values[index] : null;
+                },
+                databaseCollation,
+                name => Lookup(column, columns, name));
 
-        return Calculated.CalculatedEvaluator.Coerce(result, StoredType(column, 0));
+            return Calculated.CalculatedEvaluator.Coerce(result, StoredType(column, 0));
+        }
+        catch (Exception e) when (Types.ExpressionFunctions<Calculated.CalcNode>.IsExpressionError(e)
+            && e is not Calculated.CalculatedExpressionException)
+        {
+            throw new Calculated.CalculatedExpressionException(
+                $"Error evaluating calculated column '{column.Name}': {e.Message}", e);
+        }
     }
 
     /// <summary>The <see cref="ColumnDef.Index"/> of every column the expression reads. An UPDATE recomputes
@@ -82,11 +100,13 @@ internal static class CalculatedValue
         return indexes;
     }
 
-    private static object? Lookup(ColumnDef column, IReadOnlyList<ColumnDef> columns, object?[] values, string name)
+    /// <summary>The column of <paramref name="columns"/> the expression of <paramref name="column"/> names
+    /// <paramref name="name"/>.</summary>
+    private static ColumnDef Lookup(ColumnDef column, IReadOnlyList<ColumnDef> columns, string name)
     {
         foreach (ColumnDef candidate in columns)
             if (string.Equals(candidate.Name, name, StringComparison.OrdinalIgnoreCase))
-                return candidate.Index < values.Length ? values[candidate.Index] : null;
+                return candidate;
 
         throw new Calculated.CalculatedExpressionException(
             $"Calculated column '{column.Name}' refers to '{name}', which this table does not have.");

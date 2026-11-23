@@ -110,13 +110,18 @@ cannot be smuggled past it: a column-ref default written to `LvProp` opens clean
   column's width** rather than refused: `DEFAULT 'abcdefghijklmnopqrstuvwxyz'` on a `TEXT(20)` stores its first 20
   characters, and `DEFAULT Now()` the first 20 of the date's text, where the same value supplied by an `INSERT` is
   refused (verified, on `TEXT` and `CHAR` alike).
-- A `BINARY`, `VARBINARY` or `BIGBINARY` default is cut to the column's width the same way (verified):
+- A `BINARY` or `VARBINARY` default is cut to the column's width the same way (verified):
   - `DEFAULT 1.5` on a `BINARY(4)` or `VARBINARY(4)` stores `31 00 2E 00`;
   - `'abc'` on a `BINARY(4)` stores `61 00 62 00`;
-  - `CCur(1)` on a `BINARY(4)` stores `10 27 00 00`;
-  - `'abcdefghij'` on a `BIGBINARY(10)` stores its first 10 bytes.
+  - `CCur(1)` on a `BINARY(4)` stores `10 27 00 00`.
 
-  A `LONGBINARY` default is stored whole.
+  A `BIGBINARY` default is stored whole, past its width: `'abcdefghij'` on a `BIGBINARY(10)` stores all 20 bytes, by
+  `CREATE TABLE`, `ADD COLUMN` and `ALTER COLUMN … SET DEFAULT` alike, where the same value supplied by an `INSERT`
+  or `UPDATE` is refused (verified). The row keeps it, and ACE reads all 20 bytes back: an `UPDATE` of another
+  column, an `ALTER COLUMN` of another column, an `ALTER COLUMN` of this one to `BIGBINARY(10)`, `BIGBINARY(20)` or
+  `LONGBINARY`, and an `ADD COLUMN` leave the 20 bytes as they are, while `UPDATE … SET V = V`, an `INSERT … SELECT`
+  of the value and an `ALTER COLUMN` to `BIGBINARY(15)`, `BINARY(10)` or `VARBINARY(10)` are refused
+  ([page-01 §3](page-01-data-and-rows.md)). A `LONGBINARY` default is stored whole too.
 - A `DECIMAL` default too wide for the column's precision stores Null, and the insert succeeds (verified):
   - on a `DECIMAL(4,1)`, `1000`, `70000`, `3000000000`, `#1/1/2000#`, `Now()` and `12345.67` store Null;
   - `999.9`, `-999.9`, `1.5` and `'12.5'` are stored, and `999.95` stores `999.9`.

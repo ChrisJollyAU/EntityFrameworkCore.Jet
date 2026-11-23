@@ -493,10 +493,11 @@ internal sealed class PageAllocator
 
     /// <summary>
     /// Sizes the released-pages map for <paramref name="pages"/> the way ACE's close does, before they are merged.
-    /// An inline record that already covers them is left alone. Otherwise it is lengthened, keeping its start
-    /// page, to the shortest that covers the highest page — the header, then the bitmap in whole growth steps —
-    /// as long as its holder keeps <see cref="JetFormatBase.UsageMapHolderReserve"/> bytes free. When that is too
-    /// long, the window moves instead: the start becomes the lowest page released rounded down to a byte, and the
+    /// An inline record that already covers them is left alone. Otherwise, when its window reaches the lowest page
+    /// released, it is lengthened, keeping its start page, to the shortest that covers the highest page — the
+    /// header, then the bitmap in whole growth steps — as long as its holder keeps
+    /// <see cref="JetFormatBase.UsageMapHolderReserve"/> bytes free. When it does not, or that is too long, the
+    /// window moves instead: the start becomes the lowest page released rounded down to a byte, and the
     /// record is sized from there. When even that is too long, the record is grown at its old start to cover the
     /// highest released page it can reach, the released pages it covers are marked in it, and it is converted to
     /// reference form: a bitmap page is allocated for each range holding a released page, in range order, and a
@@ -533,7 +534,10 @@ internal sealed class PageAllocator
         int growth = format.UsageMapInlineGrowthSize;
         int longest = Math.Max(released.Slot.Length, headerSize + (room - headerSize) / growth * growth);
 
-        if (lowest >= start && Covering(start) <= longest)
+        // Lengthened only when its window already reaches the lowest page released; past it, the window moves
+        // (verified vs ACE: pages 664-669 released into a 69-byte record at page 0 move it to 664, where pages
+        // below 512 released with pages near 1968 lengthen it to 253 bytes).
+        if (lowest >= start && lowest < start + (released.Slot.Length - headerSize) * 8 && Covering(start) <= longest)
         {
             LayMapRecord(released, UsageMap.NewInlineRecord(format, start, Covering(start) - headerSize));
             return;

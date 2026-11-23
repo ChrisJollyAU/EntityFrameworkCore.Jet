@@ -62,10 +62,18 @@ The JES surface. Every function in the VBA library is accounted for: it is here,
 `CBool` `CByte` `CInt` `CLng` `CSng` `CDbl` `CCur` `CStr` `CDate` `CVDate` `CVar`
 
 - A **Boolean** converts as VARIANT_BOOL, so True is **-1**, not 1: `CInt`/`CLng`/`CSng`/`CDbl`/`CCur` all give
-  -1, and `CByte` overflows because a byte cannot hold it.
+  -1, and `CByte` overflows because a byte cannot hold it — except over a VBA Boolean (the next point), whose
+  True `CByte` makes 255.
+- `CByte` keeps a Byte's range but gives an **Integer**: `VarType(CByte(1))` is 2, `TypeName` "Integer", and stored
+  in a binary column it is two bytes, `01 00`. Its result column is still declared a Byte. Negating it or adding
+  two of them gives a Long where ACE keeps an Integer (VarType 3 against 2), as for `CInt`: whole-number arithmetic
+  takes C#'s result types.
 - `CStr` renders a Double at **15 significant digits** and a Single at **7** (the OA/VB convention, not .NET's
-  shortest round-trippable form), and a Boolean as `"-1"` — the Jet Expression Service's answer, where the VBA
-  runtime proper would say `"True"`.
+  shortest round-trippable form). A comparison's Boolean, `Not`'s, and a Yes/No column's are `"-1"` or `"0"`; the
+  VBA Boolean that `IsNull`, `IsEmpty`, `IsError`, `IsMissing`, `IsObject`, `IsNumeric`, `IsDate`, `CBool` and `Like`
+  give is `"True"` or `"False"`, there and wherever a Variant is written as text (`&`, `Str`, `Format`, `Len`, `UCase`,
+  `Left`, `Mid`, `InStr`, `StrComp` …). A function taking a String (`Asc`, `Val`, `Replace`, `StrReverse`,
+  `InStrRev`) and a comparison with text read even that one as `"-1"` or `"0"` (verified vs ACE).
 - `CBool` accepts a numeric string (`"-1"`) and a non-integral number.
 - `CCur` rounds to 4 decimal places, half to even, and is ACE's route to a decimal. A Double or Single is taken at
   its exact binary value, not its 15 (or 7) significant digits: `CCur(0.00005)` is 0.0001, `CCur(2.00005)` is
@@ -121,6 +129,11 @@ by `&`: `Nz(Null) + 2` is 2, `Nz(Null) & 'x'` is `'x'`, `Len(Nz(Null))` is 0 and
 `Abs`, `Int`, `Fix` and `Round` keep their operand's type; `Int` and `Fix` of a date give a date. `Sgn` is a
 Long (Int32) where ACE's is an Integer (Int16); the rest are Doubles. An argument outside a function's domain (`Sqr(-1)`, `Log(0)`) is an invalid
 procedure call, and a result past a Double an overflow.
+
+Arithmetic on Longs past a Long's range is a Double, as OLE Automation's arithmetic makes it (verified vs ACE:
+`VarType(2147483647*2)` is 5, and so in a calculated column); a query's result column of the Longs' type cannot hold
+it, so `SELECT 2147483647*2` is an overflow. A negative zero is written `-0` as text — `&`, `Str`, `CStr`, `Format` and a
+Text column alike (verified vs ACE: `-[Qty]^2` over 0).
 
 ### String
 
@@ -186,6 +199,8 @@ are locale-dependent by design. `Partition` gives a `"lower:upper"` range-bucket
 - `IIf` — only the branch taken is evaluated.
 - `Choose` — 1-based; an index out of range gives Null.
 - `Switch` — the first true condition's value; the arguments come in pairs.
+- `x Like '%'`, the pattern written as just `%`, is `x Is Not Null` in a query: a comparison's -1 or 0, False for
+  Null, not a `Like`'s VBA Boolean (verified vs ACE).
 
 ### Inspection
 
