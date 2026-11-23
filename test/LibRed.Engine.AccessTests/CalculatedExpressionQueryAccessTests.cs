@@ -107,6 +107,8 @@ public class CalculatedExpressionQueryAccessTests(ITestOutputHelper output) : Te
         // arithmetic takes C#'s types, an Integer a Long — ExpressionFunctions.Arithmetic and Negate.)
         "SELECT VarType(CByte([Qty])), TypeName(CByte([Qty])) FROM O", "SELECT VarType(Max(CByte([Qty]))), Max(CByte([Qty])) & '' FROM O",
         "SELECT VarType(CByte([Qty]) * 1.5), (CByte([Qty]) * 1.5) & '' FROM O",
+        // StrConv gives text.
+        "SELECT StrConv([A], 1), StrConv([A], 3) FROM G ORDER BY Id",
         // A VBA Boolean as a grouping key and an ordering key is the plain number.
         "SELECT IsNull(A) & '' FROM G GROUP BY IsNull(A) ORDER BY IsNull(A)",
         "SELECT IsNull(A) & '', Id FROM G ORDER BY IsNull(A), Id",

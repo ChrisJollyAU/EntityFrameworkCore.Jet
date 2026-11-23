@@ -588,6 +588,8 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
     // at all, so LibRed must never author one. These are the four refusal shapes ACE has.
     [Theory]
     [InlineData("CInt([Qty])", "cannot be used")]          // policy whitelist -- only CDbl converts
+    [InlineData("StrConv([A], 1)", "cannot be used")]      // refused by policy in full form too (page-02e)
+    [InlineData("TypeName([Qty])", "cannot be used")]
     [InlineData("Now()+0", "cannot be used")]              // volatile
     [InlineData("Left$([A], 2)", "'$'")]                   // accepted by the designer, unpopulatable
     [InlineData("[C]*2", "refers to itself")]
