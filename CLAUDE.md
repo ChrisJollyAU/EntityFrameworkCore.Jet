@@ -403,6 +403,19 @@ refuses to write — and then calls the shared function. A function change is ma
 nowhere else; adding function logic to either evaluator, or a second copy anywhere, is a hard failure. A
 `PostToolUse` hook reminds on every edit to either evaluator.
 
+Two things are kept twice **deliberately**, by the owner's decision (2026-11-23), and are marked `DELIBERATE
+DUPLICATE` at both sites — a review does not flag them, but a change to one is made to the other:
+- **The operator dispatch.** Each evaluator walks its own tree (`EvaluateBinary`/`EvaluateUnary`/`EvaluateInList`/
+  `CompareAsKinds` over the SQL AST, `Binary`/`Unary`/`In`/`CompareAsKinds` over `CalcNode`) and calls the shared
+  operator and value helpers in `ExpressionFunctions` (`Concat`, `And`, `Or`, `Not`, `Add`, `Arithmetic`,
+  `CompareValues`, `ComparedBooleans`, the Currency steps …). The order of those calls, and the text-column-beside-a-
+  computed-number rule, are written in both; the helpers are not. Where the two differ, ACE does, and the measured
+  differences are listed at `CalculatedEvaluator.Unary`.
+- **Number literal typing and the signed-number rule.** `CalculatedExpression.ParseInteger`/`ParseNumber` copy
+  `AstBuilder`'s in LibRed.Sql, and `CalculatedExpression.ParsePower`/`IsSignedNumber`/`ParseOperand` copy its
+  `SignedNumber`/`PowerChain`/`BuildPower` (a minus written against a digit is part of the number; `^` is
+  left-associative), since LibRed.Core cannot reference LibRed.Sql — project references stay as they are.
+
 **Never change a test because a change makes it fail.** A failing test is evidence against the change, not a test
 to update. For every failing test, measure what ACE itself produces for that exact query, on that test's own schema
 and data — not a similar expression, another table, or a function ACE does not have. If ACE agrees with the test,
