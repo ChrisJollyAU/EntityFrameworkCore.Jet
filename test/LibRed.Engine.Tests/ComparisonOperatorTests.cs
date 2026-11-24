@@ -106,12 +106,24 @@ public class ComparisonOperatorTests(ComparisonOperatorTests.Database database)
     public void Text_against_a_number_compares_as_the_number_it_reads_as(string expression, bool expected) =>
         Assert.Equal(expected, Scalar(expression));
 
+    // Text beside a number the statement computes, a written False among them, compares with the number's text
+    // (measured against ACE 2010 and Microsoft 365 alike).
+    [Theory]
+    [InlineData("'abc' > FALSE", true)]
+    [InlineData("'abc' > (1=0)", true)]
+    [InlineData("'abc' > CInt(False)", true)]
+    [InlineData("'abc' > 0 + 0", true)]
+    [InlineData("'abc' > CLng(1) + 0", true)]
+    [InlineData("'5.0' = CLng(5) + 0", false)]
+    public void Text_against_a_number_the_statement_computes_compares_as_the_numbers_text(string expression, bool expected) =>
+        Assert.Equal(expected, Scalar(expression));
+
     [Theory]
     [InlineData("UCASE('abc') = 1")]
     [InlineData("LEFT('abc', 3) = 1")]
     [InlineData("'abc' = 1")]
     [InlineData("'' = 0")]
-    [InlineData("'abc' > FALSE")]
+    [InlineData("'abc' > TRUE")]
     [InlineData("D > '2020-01-01'")]
     [InlineData("1 = G")]
     [InlineData("B < N")]

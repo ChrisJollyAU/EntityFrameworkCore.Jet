@@ -151,7 +151,8 @@ push a 250-column GUID table that ACE creates without complaint past the declare
 > outright ("Type name is invalid"), and `Double` (5) is the trap: it succeeds quietly for small values and
 > overflows near ±2⁶³. EFCore.Jet's `JetLongTypeMapping.ConfigureParameter` forces OLE DB 131 / ODBC 7 for its
 > own `long` parameters for the same defect, though that mapping targets a `decimal(20,0)` column rather than a
-> real `0x13` one.
+> real `0x13` one. Every binding through OLE DB, ODBC and DAO, on Microsoft 365 and ACE 2010, is tabulated in
+> [`docs/int64-values.md`](../../../../docs/int64-values.md).
 
 **New-type format versions — the two are NOT the same version**, which is the natural assumption and is
 wrong. **`BIGINT` (Large Number)** requires the **ACE 16 / Access 2016** format (`0x05`); **`DATETIME2`
@@ -301,8 +302,13 @@ Points verified against ACE that aren't obvious from that page:
 - **Text stored into a number or Yes/No column is read as VBA reads text as a number** (verified; `INSERT` and
   `ALTER COLUMN` alike): in the regional decimal and group separators and currency symbol, with a sign before or
   after, brackets for negative, and `&H`/`&O` and `e`/`d` exponents — `'$5'`, `'(5)'`, `'5-'`, `'1,000'`, `'&H10'`
-  and `'1d2'` all store as numbers (`VbaText.TextAsNumber`). Text that is not a number is refused, `'True'` and
-  `'Yes'` into a Yes/No column included.
+  and `'1d2'` all store as numbers (`VbaText.TextAsNumber`). A value written into a Large Number or a Decimal column
+  (`INSERT`, `UPDATE`, a `DEFAULT`) reads exactly, not through a Double (verified: `'9007199254740993'` stores
+  unrounded into a `BIGINT` and a `DECIMAL(20,0)`, `'9223372036854775807'` whole, and `'2.5000000000000001'` 3 and
+  `'9007199254740993.4'` 9007199254740993 into a `BIGINT`). `ALTER COLUMN` to `BIGINT` reads a whole number exactly
+  but a fraction through a Double (verified: `'9007199254740993'` converts whole, `'9007199254740993.4'` to
+  9007199254740994, `'2.5000000000000001'` to 2). Text that is not a number is refused, `'True'` and `'Yes'` into a
+  Yes/No column included.
 - **A date stored into a number or Yes/No column is its OLE Automation serial, and a number stored into a date
   column is the date at that serial** (verified, on `INSERT`, `ALTER COLUMN` and as a column default): `Time()` at 20:58 stores
   0.874 into a `DOUBLE`, 1 into a `LONG` and True into a Yes/No; `Now()` into a `LONG` stores the day number; 0
@@ -330,9 +336,13 @@ Points verified against ACE that aren't obvious from that page:
   (`{00000001-0002-0003-0004-000000000005}` stores `01 00 00 00 02 00 03 00 00 04 00 00 00 00 00 05`) — on
   `INSERT`, `INSERT … SELECT`, `UPDATE` and `ALTER COLUMN` alike, text wider than the column being refused (verified).
 - **A Long or a Byte stored into a GUID column is the GUID's first four bytes** (verified: 1 stores
-  `{00000001-0000-0000-0000-000000000000}`, -1 `{FFFFFFFF-0000-…}`), and **text that is not a GUID stores the zero
-  GUID**. **A Decimal, a Large Number and a binary value are their bytes as a binary column stores them, which are
-  the GUID when there are sixteen** (verified: the Decimal 1.234567 stores `{002E0031-0032-0033-3400-350036003700}`,
+  `{00000001-0000-0000-0000-000000000000}`, -1 `{FFFFFFFF-0000-…}`). **Text that is not a GUID depends on the
+  engine** — on `INSERT`, `UPDATE`, `INSERT … SELECT`, `ALTER COLUMN` and a DEFAULT alike (verified): the Microsoft 365
+  runtime stores the zero GUID; ACE 2010 and the ACE 2016 redistributable store sixteen bytes of uninitialised memory —
+  address-shaped (`54 78 5A 0B 59 CF FF 79 00 00 00 00 00 00 23 1A` from an x86 process), different on every write,
+  and stored in the row itself, so every later read returns them. LibRed stores the zero GUID. **A Decimal, a Large
+  Number and a binary value are their bytes as a binary column stores them, which are the GUID when there are
+  sixteen** (verified: the Decimal 1.234567 stores `{002E0031-0032-0033-3400-350036003700}`,
   and a `BINARY(16)` retyped to GUID keeps its bytes); fewer are refused, ACE reporting that the field is too small
   (1.5, a `BIGINT` 1). An Int16 — a Boolean among them — a Single, a Double and a Currency are refused as a data type
   mismatch. All of

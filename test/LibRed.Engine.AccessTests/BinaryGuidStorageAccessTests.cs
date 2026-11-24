@@ -1,5 +1,6 @@
 using System.Data.OleDb;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace LibRed.Engine.Tests;
@@ -9,7 +10,8 @@ namespace LibRed.Engine.Tests;
 // A number stored into a binary column is its own bytes — an Int16 two, so True is FFFF; an Int32 and a Byte four; a
 // Single four; a Double, a date and a Currency eight — text its UTF-16 bytes, cut to a fixed column's width, and a
 // BIGINT the bytes of its text. A whole number stored into a GUID column is its first four bytes, text that is not a
-// GUID the zero GUID, and bytes too few for a GUID are refused. A DEFAULT is converted to its column's type when it is
+// GUID the zero GUID on the Microsoft 365 runtime and sixteen bytes of uninitialised memory on ACE 2010 and 2016 (so
+// there only a GUID), and bytes too few for a GUID are refused. A DEFAULT is converted to its column's type when it is
 // declared, and one the column cannot take refuses the statement there — CREATE TABLE, ADD COLUMN and ALTER COLUMN SET
 // DEFAULT alike.
 //
@@ -76,7 +78,7 @@ public class BinaryGuidStorageAccessTests : TempDatabaseTest
             $"CREATE TABLE T (ID LONG, V {target})", $"INSERT INTO T (ID, V) VALUES (1, {value})",
             "INSERT INTO T (ID) VALUES (2)", $"UPDATE T SET V = {value} WHERE ID = 2",
         ];
-        Assert.Equal(Describe(statements, AceRun), Describe(statements, LibRedRun));
+        AssertStoredAsAce(statements);
     }
 
     // A column's value read into the column: by INSERT ... SELECT, by UPDATE through a join and by ALTER COLUMN.
@@ -106,7 +108,7 @@ public class BinaryGuidStorageAccessTests : TempDatabaseTest
             $"CREATE TABLE S (ID LONG, X {column})", $"INSERT INTO S VALUES (1, {seed})",
             $"CREATE TABLE T (ID LONG, V {target})", "INSERT INTO T (ID, V) SELECT ID, X FROM S",
         ];
-        Assert.Equal(Describe(statements, AceRun), Describe(statements, LibRedRun));
+        AssertStoredAsAce(statements);
     }
 
     [Theory]
@@ -118,7 +120,7 @@ public class BinaryGuidStorageAccessTests : TempDatabaseTest
             $"CREATE TABLE S (ID LONG, X {column})", $"INSERT INTO S VALUES (1, {seed})",
             $"CREATE TABLE T (ID LONG, V {target})", "INSERT INTO T (ID) VALUES (1)", "UPDATE T INNER JOIN S ON T.ID = S.ID SET T.V = S.X",
         ];
-        Assert.Equal(Describe(statements, AceRun), Describe(statements, LibRedRun));
+        AssertStoredAsAce(statements);
     }
 
     // A column of another type retyped into one.
@@ -136,6 +138,9 @@ public class BinaryGuidStorageAccessTests : TempDatabaseTest
         { "GUID", "BYTE", "1" }, { "GUID", "SHORT", "-1" }, { "GUID", "SINGLE", "1" }, { "GUID", "DOUBLE", "1" }, { "GUID", "TEXT(10)", "'1'" },
         { "BIGBINARY(10)", "TEXT(10)", "'abcdefghij'" },
         { "GUID", "DECIMAL(18,6)", "1.234567" }, { "GUID", "BINARY(16)", "0x0100000002000300000400000000000F" },
+        // Text holding a whole number past a Double's 2^53, or a fraction, retyped to a Large Number.
+        { "BIGINT", "TEXT(30)", "'9007199254740993'" }, { "BIGINT", "TEXT(30)", "'9223372036854775807'" },
+        { "BIGINT", "TEXT(30)", "'2.5000000000000001'" }, { "BIGINT", "TEXT(30)", "'9007199254740993.4'" },
     };
 
     [Theory]
@@ -143,8 +148,13 @@ public class BinaryGuidStorageAccessTests : TempDatabaseTest
     [MemberData(nameof(Retyped))]
     public void A_column_retyped_to_a_binary_or_GUID_column_is_stored_as_ACE_stores_it(string target, string column, string seed)
     {
+        if (target == "BIGINT")
+            Assert.SkipUnless(
+                AceTestDatabase.SupportsColumnType(Path.Combine(AppContext.BaseDirectory, "Data", "Northwind.accdb"), "BIGINT"),
+                AceTestDatabase.UnsupportedColumnTypeReason("BIGINT"));
+
         string[] statements = [$"CREATE TABLE T (ID LONG, V {column})", $"INSERT INTO T VALUES (1, {seed})", $"ALTER TABLE T ALTER COLUMN V {target}"];
-        Assert.Equal(Describe(statements, AceRun), Describe(statements, LibRedRun));
+        AssertStoredAsAce(statements);
     }
 
     // A value computed over a column's, selected into the column.
@@ -177,7 +187,7 @@ public class BinaryGuidStorageAccessTests : TempDatabaseTest
             $"CREATE TABLE S (ID LONG, X {column})", $"INSERT INTO S VALUES (1, {seed})",
             $"CREATE TABLE T (ID LONG, V {target})", $"INSERT INTO T (ID, V) SELECT ID, {value} FROM S",
         ];
-        Assert.Equal(Describe(statements, AceRun), Describe(statements, LibRedRun));
+        AssertStoredAsAce(statements);
     }
 
     // A Currency read through a derived table.
@@ -195,7 +205,7 @@ public class BinaryGuidStorageAccessTests : TempDatabaseTest
             $"CREATE TABLE T (ID LONG, V {target})", "INSERT INTO T (ID) VALUES (1)",
             "UPDATE T INNER JOIN (SELECT ID, C FROM CS) AS D ON T.ID = D.ID SET T.V = D.C",
         ];
-        Assert.Equal(Describe(statements, AceRun), Describe(statements, LibRedRun));
+        AssertStoredAsAce(statements);
     }
 
     // A Large Number (BIGINT) stored into a binary column is the bytes of its text, and into a GUID column those
@@ -229,7 +239,7 @@ public class BinaryGuidStorageAccessTests : TempDatabaseTest
                     "INSERT INTO T (ID) VALUES (1)", "UPDATE T INNER JOIN S ON T.ID = S.ID SET T.V = S.X"],
                 ["CREATE TABLE T (ID LONG, V BIGINT)", $"INSERT INTO T VALUES (1, {seed})", $"ALTER TABLE T ALTER COLUMN V {target}"],
             ])
-            Assert.Equal(Describe(statements, AceRun), Describe(statements, LibRedRun));
+            AssertStoredAsAce(statements);
     }
 
     // A DEFAULT, by CREATE TABLE, ADD COLUMN and ALTER COLUMN SET DEFAULT.
@@ -276,19 +286,27 @@ public class BinaryGuidStorageAccessTests : TempDatabaseTest
         { "YESNO", "32767" }, { "YESNO", "32768" }, { "YESNO", "-32768" }, { "YESNO", "-32769" }, { "YESNO", "70000" }, { "YESNO", "3000000000" },
         { "YESNO", "#1/1/2000#" }, { "YESNO", "CDbl(70000)" }, { "YESNO", "CLng(70000)" }, { "YESNO", "1.5" }, { "YESNO", "12345.67" },
         { "YESNO", "'5'" }, { "YESNO", "'abc'" }, { "YESNO", "Now()" },
+        // Text holding a whole number past a Double's 2^53, or a fraction, as a Large Number's DEFAULT.
+        { "BIGINT", "'9007199254740993'" }, { "BIGINT", "'9223372036854775807'" }, { "BIGINT", "'2.5000000000000001'" },
+        { "BIGINT", "'9007199254740993.4'" },
     };
 
     [Theory]
     [MemberData(nameof(Defaults))]
     public void A_DEFAULT_is_converted_cut_nulled_or_refused_as_ACE_does_it(string type, string value)
     {
+        if (type == "BIGINT")
+            Assert.SkipUnless(
+                AceTestDatabase.SupportsColumnType(Path.Combine(AppContext.BaseDirectory, "Data", "Northwind.accdb"), "BIGINT"),
+                AceTestDatabase.UnsupportedColumnTypeReason("BIGINT"));
+
         foreach (string[] statements in (string[][])
             [
                 [$"CREATE TABLE T (ID LONG, V {type} DEFAULT {value})", "INSERT INTO T (ID) VALUES (1)"],
                 ["CREATE TABLE T (ID LONG)", $"ALTER TABLE T ADD COLUMN V {type} DEFAULT {value}", "INSERT INTO T (ID) VALUES (1)"],
                 [$"CREATE TABLE T (ID LONG, V {type})", $"ALTER TABLE T ALTER COLUMN V SET DEFAULT {value}", "INSERT INTO T (ID) VALUES (1)"],
             ])
-            Assert.Equal(Describe(statements, AceRun), Describe(statements, LibRedRun));
+            AssertStoredAsAce(statements);
     }
 
     // A BigBinary DEFAULT wider than its column is stored whole; what then becomes of the row it was written into, when
@@ -311,7 +329,7 @@ public class BinaryGuidStorageAccessTests : TempDatabaseTest
     public void A_BigBinary_DEFAULT_past_its_width_is_kept_whole_as_ACE_keeps_it(string then)
     {
         string[] statements = ["CREATE TABLE T (ID LONG, V BIGBINARY(10) DEFAULT 'abcdefghij')", "INSERT INTO T (ID) VALUES (1)", then];
-        Assert.Equal(Describe(statements, AceRun), Describe(statements, LibRedRun));
+        AssertStoredAsAce(statements);
     }
 
     // Retyping a column to Yes/No does not check its values as a Yes/No DEFAULT is checked.
@@ -321,7 +339,7 @@ public class BinaryGuidStorageAccessTests : TempDatabaseTest
     public void A_column_retyped_to_YesNo_keeps_a_value_its_DEFAULT_would_refuse(string type, string value)
     {
         string[] statements = [$"CREATE TABLE T (ID LONG, V {type})", $"INSERT INTO T VALUES (1, {value})", "ALTER TABLE T ALTER COLUMN V YESNO"];
-        Assert.Equal(Describe(statements, AceRun), Describe(statements, LibRedRun));
+        AssertStoredAsAce(statements);
     }
 
     // The words of ACE's own refusal, which the comparisons above reduce to a bare refusal: a GUID column refuses bytes
@@ -454,6 +472,32 @@ public class BinaryGuidStorageAccessTests : TempDatabaseTest
         try { outcome.Add(Rows(engine.ExecuteQuery("SELECT * FROM T ORDER BY ID").Rows)); }
         catch (Exception e) when (IsLibRedRefusal(e)) { outcome.Add("refused"); }
         return string.Join(" | ", outcome);
+    }
+
+    private const string ZeroGuid = "Guid:00000000-0000-0000-0000-000000000000";
+
+    // Whether this ACE stores the zero GUID for text that is not a GUID, as the Microsoft 365 runtime does, or sixteen
+    // bytes of uninitialised memory, as ACE 2010 and the 2016 redistributable do; asked once, by the same run the cases make.
+    private static readonly Lazy<bool> AceStoresZeroGuidForText = new(() =>
+        Describe(["CREATE TABLE T (ID LONG, V GUID)", "INSERT INTO T (ID, V) VALUES (1, 'ab')"], AceRun).EndsWith(ZeroGuid, StringComparison.Ordinal));
+
+    /// <summary>The statements through ACE and through LibRed, which must agree. On an ACE that stores uninitialised
+    /// memory for text that is not a GUID, a value LibRed stores as the zero GUID need only be a GUID through ACE —
+    /// where the statements write such text, and nowhere else.</summary>
+    private static void AssertStoredAsAce(string[] statements)
+    {
+        string ace = Describe(statements, AceRun), libred = Describe(statements, LibRedRun);
+        if (!AceStoresZeroGuidForText.Value && statements.Any(s => Regex.IsMatch(s, @"'(?!\{)[^']*'")))
+        {
+            string[] aceParts = Regex.Split(ace, "( \\| | |,)"), libredParts = Regex.Split(libred, "( \\| | |,)");
+            if (aceParts.Length == libredParts.Length)
+            {
+                for (int i = 0; i < aceParts.Length; i++)
+                    if (libredParts[i] == ZeroGuid && aceParts[i].StartsWith("Guid:", StringComparison.Ordinal)) aceParts[i] = ZeroGuid;
+                ace = string.Concat(aceParts);
+            }
+        }
+        Assert.Equal(ace, libred);
     }
 
     private static bool IsLibRedRefusal(Exception e) =>

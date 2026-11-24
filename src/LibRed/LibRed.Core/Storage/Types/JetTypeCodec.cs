@@ -519,7 +519,8 @@ public static class JetTypeCodec
     /// <see cref="LibRed.Storage.RowCodec.IsTruthy"/> before it gets here.</item>
     /// <item>For a number column, text is the number VBA reads (<see cref="VbaText.TextAsNumber"/>; verified vs ACE, on
     /// INSERT and ALTER COLUMN alike: '$5', '(5)', '5-', '1,000', '&amp;H10' and '1d2' store as numbers, in the regional
-    /// separators and currency symbol) — exactly, for a Currency or Decimal column, where a Decimal holds it — and a
+    /// separators and currency symbol) — exactly, for a Currency, Decimal or Large Number column, where a Decimal holds it
+    /// (verified vs ACE: '9223372036854775807' stores whole into a BIGINT, '9007199254740993' unrounded) — and a
     /// date its OLE Automation serial (verified vs ACE: <c>Time()</c> at 20:58 into a LONG stores 1, into a DOUBLE its
     /// day fraction).</item>
     /// </list>
@@ -537,7 +538,7 @@ public static class JetTypeCodec
         if (value is not (string or char))
             return value;
         string text = value.ToString()!;
-        return type is JetDataType.Currency or JetDataType.FixedPoint && VbaText.TextAsDecimal(text) is decimal exact
+        return type is JetDataType.Currency or JetDataType.FixedPoint or JetDataType.Int64 && VbaText.TextAsDecimal(text) is decimal exact
             ? exact
             : VbaText.TextAsNumber(text);
     }

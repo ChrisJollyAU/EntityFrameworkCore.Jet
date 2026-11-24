@@ -51,8 +51,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
     {
         return name switch
         {
-            "IIF" => Evaluate(f.Arguments[0]) is { } condition && IifCondition(condition) ? Evaluate(f.Arguments[1])
-                : f.Arguments.Count == 3 ? Evaluate(f.Arguments[2]) : null,
+            "IIF" => IifArm(f.Arguments) is { } arm ? Evaluate(arm) : null,
             "CHOOSE" => Choose(f),
             "SWITCH" => Switch(f),
             "NULLIF" => NullIf(f),
@@ -1679,6 +1678,12 @@ internal abstract partial class ExpressionFunctions<TExpression>
         };
     }
 
+    /// <summary>The arm an IIf over <paramref name="arguments"/> takes, or null for a two-argument IIf whose condition
+    /// does not hold.</summary>
+    internal TExpression? IifArm(IReadOnlyList<TExpression> arguments) =>
+        Evaluate(arguments[0]) is { } condition && IifCondition(condition) ? arguments[1]
+            : arguments.Count == 3 ? arguments[2] : default;
+
     /// <summary>
     /// IIf's condition, which unlike the others is rounded to a whole number first, half to even (verified vs ACE:
     /// 0.4, 0.5, '0.4' and a date at 06:00 on 1899-12-30 are False, 0.6 and 1E+20 are True). Text that is not a
@@ -1857,8 +1862,9 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// The two sides of a comparison, brought to a kind they compare as (verified vs ACE, except as noted).
     /// <list type="bullet">
     /// <item>Text against a number, Boolean or date: the text reads as a number (<see cref="VbaText.TextAsNumber"/>), a type
-    /// mismatch when it is not one. ACE does this for text a function returns; for a text literal or column it
-    /// raises a type mismatch instead, which LibRed does not, as SQL Server compares them numerically too.</item>
+    /// mismatch when it is not one — exactly, against a Decimal (verified vs ACE: '9007199254740993' finds that row of a
+    /// DECIMAL(20,0) column and not 9007199254740992's). ACE does this for text a function returns; for a text literal
+    /// or column it raises a type mismatch instead, which LibRed does not, as SQL Server compares them numerically too.</item>
     /// <item>A date against a number: its serial.</item>
     /// <item>A GUID or binary value against text: both as text (a GUID braced upper case, binary as UTF-16). A GUID
     /// against binary: the GUID's sixteen bytes, as a binary column stores it, against the binary's (verified vs ACE,
@@ -1882,7 +1888,8 @@ internal abstract partial class ExpressionFunctions<TExpression>
                 : throw new InvalidCastException("Type mismatch: a GUID or binary value cannot be compared with a number or date.");
         if (leftText == rightText)
             return left is DateTime ^ right is DateTime ? (Serial(left), Serial(right)) : (left, right);
-        return (leftText ? VbaText.TextAsNumber((string)left) : Serial(left), rightText ? VbaText.TextAsNumber((string)right) : Serial(right));
+        return (leftText ? JetTypeCodec.NumberFromText(right is decimal ? JetDataType.FixedPoint : JetDataType.Double, left) : Serial(left),
+            rightText ? JetTypeCodec.NumberFromText(left is decimal ? JetDataType.FixedPoint : JetDataType.Double, right) : Serial(right));
     }
 
     /// <summary>The order of two values once <see cref="Comparable"/> has brought them to a common kind, text in

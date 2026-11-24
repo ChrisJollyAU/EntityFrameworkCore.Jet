@@ -68,7 +68,10 @@ internal static class CalculatedEvaluator
     // query's `= True` tests the truth where this compares with -1; a query's
     // written decimal beside a Double result is a Double, outside the expression service a calculated column is always
     // in; a query's `Like '%'` is Is Not Null; a query's written False beside text counts as computed; and a query's IN
-    // with a Null item is Null where this is False (LibRed's decision for queries). A change to one is made to the other.
+    // with a Null item is Null where this is False (LibRed's decision for queries); a query's bare number column and
+    // IIf compare with text as numbers, where here a column is computed and an IIf takes the kind of the arm it
+    // chooses; and a written number beside written text, which a query compares as numbers, is here an error ACE
+    // caches (see CompareAsKinds). A change to one is made to the other.
     private static object? Unary(CalcUnary node, Func<string, object?> value, Collation? databaseCollation,
         Func<string, ColumnDef?> definition)
     {
@@ -143,7 +146,7 @@ internal static class CalculatedEvaluator
             case "<=":
             case ">=":
                 {
-                    int c = CompareAsKinds(node.Left, left, node.Right, right, databaseCollation);
+                    int c = CompareAsKinds(node.Left, left, node.Right, right, value, databaseCollation, definition);
                     return node.Operator switch
                     {
                         "=" => c == 0,
@@ -159,22 +162,46 @@ internal static class CalculatedEvaluator
         }
     }
 
-    /// <summary>Whether an operand is a value the expression computes, rather than a value as it writes one or a column
-    /// (ExpressionEvaluator.IsComputed over a query's operands). Unlike a query's, a written False is not computed
-    /// (measured vs ACE: [A] &lt;&gt; False over text is a type mismatch in a calculated column).</summary>
-    private static bool Computed(CalcNode operand) => operand is not (CalcLiteral or CalcColumn);
+    /// <summary>Whether an operand's value is one the expression writes: a literal, or the arm an <c>IIf</c> takes when
+    /// that arm is written (measured vs ACE: an IIf takes the kind of the arm it chooses, row by row). Anything else — a
+    /// column among them, unlike a query's (ExpressionEvaluator.IsComputed) — the expression computes; and unlike a
+    /// query's, a written False is written (measured vs ACE: [A] &lt;&gt; False over text is a type mismatch here).</summary>
+    private static bool Written(CalcNode operand, Func<string, object?> value, Collation? databaseCollation,
+        Func<string, ColumnDef?> definition) => operand switch
+        {
+            CalcLiteral => true,
+            CalcCall call when call.Name.Equals("IIf", StringComparison.OrdinalIgnoreCase) => Written(
+                new Functions(value, databaseCollation, definition).IifArm(call.Arguments)!,
+                value, databaseCollation, definition),
+            _ => false,
+        };
 
     /// <summary>The order of two operands of a comparison or an <c>In</c>, brought to a kind they compare as (as a query's
-    /// are: ExpressionEvaluator.CompareAsKinds): a text column beside a number the expression computes compares as text
-    /// (verified vs ACE: <c>[A] In ([Qty]+0)</c> over 'hello' and 7 is False).</summary>
-    private static int CompareAsKinds(CalcNode leftNode, object left, CalcNode rightNode, object right, Collation? databaseCollation)
+    /// are: ExpressionEvaluator.CompareAsKinds). Text beside a number the expression computes, a column's included,
+    /// compares as text (verified vs ACE: <c>[A] In ([Qty]+0)</c> over 'hello' and 7 is False, <c>[Qty]+10 &gt; "9"</c>
+    /// False, and <c>[Qty] = [Qty] &amp; ".0"</c> False). A written number beside text the expression computes, or a
+    /// text column, compares as the number the text reads as (<c>IIf([Qty]&gt;=0,[Qty],0) = [Qty] &amp; ".0"</c> is True
+    /// for a Null Qty); beside written text it is a type mismatch ACE caches as an error, which its own reader then
+    /// refuses — so LibRed refuses the write (<c>IIf([Qty]&gt;=0,0,1) = "0.0"</c>).</summary>
+    private static int CompareAsKinds(CalcNode leftNode, object left, CalcNode rightNode, object right,
+        Func<string, object?> value, Collation? databaseCollation, Func<string, ColumnDef?> definition)
     {
         (left, right) = Operators.ComparedBooleans(left, right);
-        if (left is string && leftNode is CalcColumn && Operators.IsNumeric(right) && Computed(rightNode))
-            right = Operators.ConcatText(right);
-        else if (right is string && rightNode is CalcColumn && Operators.IsNumeric(left) && Computed(leftNode))
-            left = Operators.ConcatText(left);
+        if (left is string && Operators.IsNumeric(right))
+            right = WrittenBesideText(rightNode, leftNode) ? right : Operators.ConcatText(right);
+        else if (right is string && Operators.IsNumeric(left))
+            left = WrittenBesideText(leftNode, rightNode) ? left : Operators.ConcatText(left);
         return Operators.CompareValues(left, right, TextIn(databaseCollation));
+
+        bool WrittenBesideText(CalcNode number, CalcNode text)
+        {
+            if (!Written(number, value, databaseCollation, definition)) return false;
+            if (Written(text, value, databaseCollation, definition))
+                throw new CalculatedExpressionException(
+                    "A number and text both written in the expression compare as a type mismatch, which ACE caches "
+                    + "as an error its own reader refuses.");
+            return true;
+        }
     }
 
     private static bool? In(CalcIn node, Func<string, object?> value, Collation? databaseCollation,
@@ -185,7 +212,7 @@ internal static class CalculatedEvaluator
         foreach (CalcNode candidate in node.Values)
         {
             object? other = Evaluate(candidate, value, databaseCollation, definition);
-            if (other is not null && CompareAsKinds(node.Operand, operand, candidate, other, databaseCollation) == 0) return true;
+            if (other is not null && CompareAsKinds(node.Operand, operand, candidate, other, value, databaseCollation, definition) == 0) return true;
         }
         return false;
     }

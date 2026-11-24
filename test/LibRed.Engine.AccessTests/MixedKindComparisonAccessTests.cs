@@ -186,6 +186,20 @@ public class MixedKindComparisonAccessTests(ITestOutputHelper output) : TempData
             Matches(table, ["SELECT ID FROM T WHERE V = @p & '' ORDER BY ID", "SELECT ID FROM T WHERE V = '' & @p ORDER BY ID"], "1");
         if (type == "DATETIME")
             Matches(table, ["SELECT ID FROM T WHERE V > @p ORDER BY ID"], "12/31/1899");
+        // Text beside a number the statement computes from the column compares as text, the number as its text: a
+        // parameter, a function's result and a literal alike.
+        if (type != "DATETIME")
+            foreach (string text in (string[])["1.0", "01", "1", "9", "-1"])
+            {
+                Matches(table, [.. ((string[])["=", "<", ">"]).SelectMany(op => ((string[])["@p", "Trim(@p)", "@p & ''"])
+                    .Select(rhs => $"SELECT ID FROM T WHERE V + 0 {op} {rhs} ORDER BY ID"))], text);
+                Matches(table, [.. ((string[])["=", "<", ">"]).Select(op => $"SELECT ID FROM T WHERE V + 0 {op} '{text}' ORDER BY ID")]);
+                // An aggregate and an IIf are taken as the column is; arithmetic over them, and other functions, are computed.
+                Matches(table, ["SELECT ID FROM T WHERE IIF(V > 0, V, 0) = @p ORDER BY ID", "SELECT ID FROM T WHERE IIF(V > 0, 5, 0) = @p ORDER BY ID",
+                    "SELECT ID FROM T WHERE IIF(V > 0, V, 0) + 0 = @p ORDER BY ID", "SELECT ID FROM T WHERE Abs(V) = @p ORDER BY ID",
+                    "SELECT ID FROM T WHERE @p = V + 0 ORDER BY ID", "SELECT MAX(ID) FROM T GROUP BY V HAVING MAX(V) = @p ORDER BY MAX(ID)",
+                    "SELECT MAX(ID) FROM T GROUP BY V HAVING SUM(V) + 0 = @p ORDER BY MAX(ID)"], text);
+            }
     }
 
     // The rows an index finds for text it rounds or reads as a date are the rows returned: they are not tested again
@@ -219,7 +233,7 @@ public class MixedKindComparisonAccessTests(ITestOutputHelper output) : TempData
     }
 
     // Text compared with a BIGINT column: an index takes it as the column stores it; without one it reads as 0, whatever
-    // it holds, and an expression over the column reads it as the number it is.
+    // it holds, and an expression over the column compares with it as text.
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -236,6 +250,17 @@ public class MixedKindComparisonAccessTests(ITestOutputHelper output) : TempData
             "SELECT ID FROM T WHERE V = '' & @p ORDER BY ID", "SELECT ID FROM T WHERE V + 0 = @p ORDER BY ID",
             "SELECT ID, IIF(V = @p, 'T', 'F') FROM T ORDER BY ID"], "1");
         Matches(table, ["SELECT ID FROM T WHERE V = CStr(1) ORDER BY ID"]);
+
+        // Past a Double's 2^53, text beside an expression over the column compares as text, so it loses no digit: a
+        // parameter, a function's result and a literal alike.
+        string[] wide = Table("ID LONG PRIMARY KEY, V BIGINT", indexed, ["9007199254740992", "9007199254740993", "9223372036854775807", "5"]);
+        foreach (string text in (string[])["9007199254740993", "9223372036854775807"])
+            Matches(wide, ["SELECT ID FROM T WHERE V + 0 = @p ORDER BY ID", "SELECT ID FROM T WHERE V + 0 < @p ORDER BY ID",
+                "SELECT ID FROM T WHERE V * 1 = Trim(@p) ORDER BY ID"], text);
+        Matches(wide, ["SELECT ID FROM T WHERE V + 0 = '9007199254740993' ORDER BY ID"]);
+        // As text, so text equal as a number but not as text finds nothing.
+        foreach (string text in (string[])["9007199254740993.0", "09007199254740993"])
+            Matches(wide, ["SELECT ID FROM T WHERE V + 0 = @p ORDER BY ID", "SELECT ID FROM T WHERE V + 0 > @p ORDER BY ID"], text);
     }
 
     // A text or Double parameter compared with a CURRENCY column is rounded to a Currency's four places first, with an

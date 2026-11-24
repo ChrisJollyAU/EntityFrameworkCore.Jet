@@ -2951,7 +2951,12 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // A Yes/No retyped to BYTE takes the low byte of its -1, as a write of True does, where a number past a
         // byte's range is refused (verified vs ACE: Yes/No True becomes 255, a SHORT -1 fails the ALTER).
         bool yesNo = value is bool;
-        value = Storage.Types.JetTypeCodec.NumberFromText(type, Storage.Types.JetTypeCodec.CurrencyAsStored(type, value, currency));
+        // Text retyped to a Large Number is read exactly when it is a whole number and through a Double when it has a
+        // fraction, where a written value reads both exactly (verified vs ACE: '9007199254740993' converts whole,
+        // '9007199254740993.4' to 9007199254740994 and '2.5000000000000001' to 2).
+        JetDataType readAs = type == JetDataType.Int64 && value is string text
+            && Storage.Types.VbaText.TextAsDecimal(text) is decimal exact && exact != decimal.Truncate(exact) ? JetDataType.Double : type;
+        value = Storage.Types.JetTypeCodec.NumberFromText(readAs, Storage.Types.JetTypeCodec.CurrencyAsStored(type, value, currency));
         return type switch
         {
             JetDataType.Boolean => Storage.RowCodec.IsTruthy(value),

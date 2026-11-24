@@ -723,9 +723,7 @@ internal sealed partial class ExpressionEvaluator(
                     return TimeSpan.FromTicks(checked((long)Math.Round(span.Ticks * factor)));
                 }
             case FunctionCall call when call.Name.Equals("IIF", StringComparison.OrdinalIgnoreCase):
-                return Evaluate(call.Arguments[0]) is { } condition && IifCondition(condition)
-                    ? SpanOf(call.Arguments[1])
-                    : call.Arguments.Count == 3 ? SpanOf(call.Arguments[2]) : null;
+                return IifArm(call.Arguments) is { } arm ? SpanOf(arm) : null;
             case FunctionCall coalesce:
                 foreach (Expression argument in coalesce.Arguments)
                     if (SpanOf(argument) is { } first)
@@ -788,9 +786,12 @@ internal sealed partial class ExpressionEvaluator(
 
     /// <summary>The order of two values once <see cref="Comparable"/> has brought them to a common kind. A parameter
     /// compared with text takes the text's type (verified vs ACE: a numeric parameter against a text column compares
-    /// as text, so <c>[S] &gt; ?</c> with 100 counts 'abc' and '11'). So does any number or Boolean beside a text
-    /// column that is not a written number (verified vs ACE: <c>[S] = CInt(True)</c> and <c>[S] = (1=1)</c> find
-    /// '-1', <c>[S] &gt; CInt(0)</c> every text sorting after '0'), where a written one is ACE's type mismatch. Text
+    /// as text, so <c>[S] &gt; ?</c> with 100 counts 'abc' and '11'). So does a number or Boolean the statement
+    /// computes beside any text — a text column, a literal, a parameter or a function's result alike (verified vs ACE:
+    /// <c>[S] = CInt(True)</c> and <c>[S] = (1=1)</c> find '-1', <c>[S] &gt; CInt(0)</c> every text sorting after '0',
+    /// and over a number column holding 5 and 10, <c>[L] + 0 = '5.0'</c> finds nothing and <c>[L] + 0 &lt; '9'</c>
+    /// both, a parameter, <c>Trim(?)</c> and <c>? &amp; ''</c> as the literal), where a written one beside a text column
+    /// is ACE's type mismatch. Text
     /// that is not written, beside a Large Number (Int64) or date column itself, is 0 to the one and a date to the
     /// other (verified vs ACE). Text a parameter or function gives, or a Double or Single parameter, beside a
     /// Currency column is that Currency first, to four places half to even as <c>CCur</c> rounds (verified vs ACE for
@@ -833,11 +834,9 @@ internal sealed partial class ExpressionEvaluator(
         if (yesNo is bool && yesNoOperand is ColumnReference && text is string && textOperand is ColumnReference or LiteralExpression)
             throw new InvalidCastException("Type mismatch in expression: text cannot be compared with a Yes/No column.");
         bool textOnRight = right is string;
-        var (textSide, textSideOperand, other, otherOperand) = textOnRight
-            ? (right, rightOperand, left, leftOperand) : (left, leftOperand, right, rightOperand);
+        var (textSide, other, otherOperand) = textOnRight ? (right, left, leftOperand) : (left, right, rightOperand);
         if (textSide is string && other is not string
-            && (otherOperand is ParameterExpression
-                || (textSideOperand is ColumnReference && IsNumeric(other) && IsComputed(otherOperand))))
+            && (otherOperand is ParameterExpression || (IsNumeric(other) && IsComputed(otherOperand))))
         {
             object converted = ConcatText(other);
             (left, right) = textOnRight ? (converted, right) : (left, converted);
@@ -877,9 +876,14 @@ internal sealed partial class ExpressionEvaluator(
     /// <summary>Whether an operand is a value the statement computes, rather than a number as it writes one —
     /// <c>1</c>, <c>-1.5</c>, <c>True</c> — or another column. <c>False</c> counts as computed: beside a text
     /// column ACE takes it as a computed 0 (verified: <c>[S] &lt; False</c> answers where <c>[S] &lt; True</c> and
-    /// <c>[S] &lt; 0</c> are a type mismatch, as a number column beside it is).</summary>
+    /// <c>[S] &lt; 0</c> are a type mismatch, as a number column beside it is). An aggregate and an IIf are taken as a
+    /// column is, whatever they hold (verified vs ACE: a parameter '5.0' finds <c>MAX(V)</c>, <c>MAX(V + 0)</c>,
+    /// <c>SUM(V)</c>, <c>IIF(V &gt; 0, V, 0)</c> and <c>IIF(V &gt; 0, 5, 0)</c> holding 5, where it finds <c>V + 0</c>,
+    /// <c>Abs(V)</c>, <c>CLng(V)</c>, <c>Switch(V &gt; 0, V)</c>, <c>Choose(1, V)</c> and <c>SUM(V) + 0</c> nowhere).</summary>
     internal static bool IsComputed(Expression operand) =>
-        operand is not (LiteralExpression { Value: not false } or ColumnReference or ParameterExpression);
+        operand is not (LiteralExpression { Value: not false } or ColumnReference or ParameterExpression)
+        && !(operand is FunctionCall call
+            && (Planning.QueryPlanner.IsAggregate(call.Name) || call.Name.Equals("IIF", StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>Whether an operand is a value the statement does not write: a parameter, a function's result, or an
     /// expression holding either.</summary>

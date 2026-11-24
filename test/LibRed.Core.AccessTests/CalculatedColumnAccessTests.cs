@@ -1487,6 +1487,15 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
         ("PDecInt",   DbInteger,  0, "0.5000000000000000000000000001+[Qty]*0"),   // a Decimal just past a half, stored
         ("PDecLng",   DbLong,     0, "2.5000000000000000000000000001+[Qty]*0"),
         ("PTxtEq",    DbBoolean,  0, "[A] = [Qty]+0"),
+        ("PNumTxtEq", DbBoolean,  0, "[Qty]+0 = [Qty] & \".0\""),   // a computed number beside computed text
+        ("PNumTxtGt", DbBoolean,  0, "[Qty]+10 > \"9\""),           // beside written text: "17" < "9"
+        ("PNumTxtLt", DbBoolean,  0, "[Qty]+0 < \"05\""),
+        ("PIifTxtEq", DbBoolean,  0, "IIf([Qty]>=0,[Qty],0) = [Qty] & \".0\""),   // whether an IIf is taken as a column
+        ("PColTxtEq", DbBoolean,  0, "[Qty] = [Qty] & \".0\""),                  // a bare column beside computed text
+        ("PIifLitTx", DbBoolean,  0, "IIf([Qty]>=0,0,1) = \"0.0\""),              // an IIf returning a written number
+        ("PIifSumTx", DbBoolean,  0, "IIf([Qty]>=0,[Qty]+0,0) = [Qty] & \".0\""), // an IIf returning arithmetic
+        ("PIifColWr", DbBoolean,  0, "IIf([Qty]>=0,[Qty],0) = \"7.0\""),          // an IIf returning the column, written text
+        ("PColColTx", DbBoolean,  0, "[A] = [Qty]"),                            // a number column beside a text column
         ("PCurEqTxt", DbBoolean,  0, "[Price] = Left(\"1.00005\",7)"),
     ];
 
@@ -1611,7 +1620,8 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
             // unreadable case shows up rather than being absorbed into this one. A division by zero is the same:
             // ACE caches the error for every row with a value, 0/0 included, and a Null over 0 is Null. So are text that
             // is not a number read as one (PMulText, PNegText, PTextNull), text compared with a number or False
-            // (PCmpText, PNeFalse), and a -1 that is not a VBA Boolean stored in a Byte (PByteM1, PByteCmp, PByteNot,
+            // (PCmpText, PNeFalse), a written number beside written text (PIifLitTx, and PIifColWr where its IIf takes
+            // the written arm), and a -1 that is not a VBA Boolean stored in a Byte (PByteM1, PByteCmp, PByteNot,
             // PYnByte).
             Assert.Equal([
                 "PCDbl row 4", "PDiv0 row 1", "PDiv0 row 2", "PDiv0 row 3", "PDiv0 row 5",
@@ -1623,6 +1633,8 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
                 "PTextNull row 1", "PTextNull row 2", "PTextNull row 3", "PTextNull row 4", "PTextNull row 5",
                 "PNeFalse row 1", "PNeFalse row 2", "PNeFalse row 3", "PNeFalse row 5",
                 "PAtMinus row 1", "PAtMinus row 2", "PAtMinus row 3", "PAtMinus row 5",
+                "PIifLitTx row 1", "PIifLitTx row 2", "PIifLitTx row 3", "PIifLitTx row 4", "PIifLitTx row 5",
+                "PIifColWr row 3", "PIifColWr row 4",
             ], aceCannotReadItself);
             // What ACE refuses to write, a Text result whose expression raises an error, pinned the same way: Choose past
             // its arms over Null, and a Boolean plus text that is not a number.

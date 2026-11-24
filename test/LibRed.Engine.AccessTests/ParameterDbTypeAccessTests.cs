@@ -67,6 +67,11 @@ public class ParameterDbTypeAccessTests : TempDatabaseTest
                     data.Add(type, false, value, null);
             foreach (object value in (object[])[true, (short)-1, 1, (byte)1, 1f, 1d, "1", "True", new Guid("00000001-0002-0003-0004-000000000005")])
                 data.Add("GUID", false, value, null);
+            // Text holding a whole number past a Double's 2^53, into a Large Number or a Decimal wide enough: read exactly.
+            foreach (string type in (string[])["BIGINT", "DECIMAL(20,0)"])
+                foreach (string value in (string[])["9007199254740993", "9223372036854775807", "-9223372036854775808",
+                             "2.5", "2.5000000000000001", "0.5000000000000000000000000001", "9007199254740993.4"])
+                    data.Add(type, false, value, null);
             return data;
         }
     }
@@ -77,6 +82,11 @@ public class ParameterDbTypeAccessTests : TempDatabaseTest
     [MemberData(nameof(Written))]
     public void A_parameter_written_under_a_DbType_is_stored_as_ACE_stores_it(string type, bool indexed, object? value, DbType? declared)
     {
+        if (type == "BIGINT")
+            Assert.SkipUnless(
+                AceTestDatabase.SupportsColumnType(Path.Combine(AppContext.BaseDirectory, "Data", "Northwind.accdb"), "BIGINT"),
+                AceTestDatabase.UnsupportedColumnTypeReason("BIGINT"));
+
         string[] setup = [$"CREATE TABLE T (ID LONG PRIMARY KEY, V {type})", .. indexed ? (string[])["CREATE INDEX IX_T ON T (V)"] : [],
             "INSERT INTO T (ID) VALUES (2)"];
         string[] bound = ["INSERT INTO T (ID, V) VALUES (1, @p)", "UPDATE T SET V = @p WHERE ID = 2", "UPDATE T SET V = @p WHERE ID = 1"];
@@ -167,6 +177,13 @@ public class ParameterDbTypeAccessTests : TempDatabaseTest
             foreach (object value in (object[])[(short)1, 1, 1L, 1f, 1d, true, false])
                 data.Add("VARBINARY(8)", false, value, null);
             data.Add("VARBINARY(8)", true, 1L, null);
+            // Text against a Decimal holding 2^53 and 2^53 + 1, through an index and not: the text is read exactly.
+            foreach (bool indexed in (bool[])[false, true])
+                foreach (string value in (string[])["9007199254740993", "9007199254740992", "9223372036854775807"])
+                {
+                    data.Add("DECIMAL(20,0)", indexed, value, null);
+                    data.Add("BIGINT", indexed, value, null);
+                }
             return data;
         }
     }
@@ -189,6 +206,7 @@ public class ParameterDbTypeAccessTests : TempDatabaseTest
             "VARBINARY(8)" => ["0x01", "0x0100", "0x01000000", "0x31000000", "0x3100", "0x2D003100", "0x30000000", "NULL"],
             "BINARY(8)" => ["0x1027000000000000", "0x3100000000000000"],
             "GUID" => ["{guid {00000001-0000-0000-0000-000000000000}}", "{guid {0000FFFF-0000-0000-0000-000000000000}}", "NULL"],
+            "DECIMAL(20,0)" or "BIGINT" => ["9007199254740992", "9007199254740993", "9223372036854775807", "-9223372036854775808", "NULL"],
             _ => ["-1", "1", "0", "NULL", "2"],
         };
         string[] setup =

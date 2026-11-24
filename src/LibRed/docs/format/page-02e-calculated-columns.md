@@ -127,8 +127,14 @@ All measured, each over the same rows as a query (which answers the same, but wh
   keeps an error away. `x <> Null` is `x Is Not Null`. `In` with a Null item is False when nothing matches. `Null &
   Null` is Null, a Null beside a value `""`. Text is read as a number before a Null propagates, so `"abc" * Null` is
   an error.
-- **Comparisons.** A text column beside a number the expression computes compares as text; beside a written number
-  or `False` it is a type mismatch. `[Qty] = True` compares with -1 (a query tests the truth instead).
+- **Comparisons.** Text beside a number the expression computes — a number column included (`[A] = [Qty]`,
+  `[Qty] = [Qty] & ".0"` are False for 7) — compares as text. A written number or `False` beside a text column or
+  computed text compares as the number the text reads as, so text that is not a number is a type mismatch
+  (`[A] > 1` over `'hello'`); beside written text it is always a type mismatch (`IIf([Qty]>=0,0,1) = "0.0"`). An
+  `IIf` takes the kind of the arm it chooses, row by row: `IIf([Qty]>=0,[Qty],0) = [Qty] & ".0"` compares as text,
+  except for a Null Qty, whose written `0` compares as a number and is True. Each type mismatch is an error cached
+  as below. `[Qty] = True` compares with -1 (a query tests the truth instead). Measured on ACE 2010 and Microsoft 365
+  alike.
 - **The VBA Boolean** — see below.
 
 Everything else is refused, in one of **four** distinct ways — a validator has to reproduce all four:
@@ -427,7 +433,8 @@ is more permissive than ACE**, which refuses such a column outright; whether Lib
    string, zeros, negatives, a tiny Currency, a non-ASCII character and pre-epoch times, except where the
    expression raises an error: `CDbl` over a Null, an overflow (a -1 that is not a VBA Boolean in a Byte among them),
    a division by zero, and a type mismatch — text that is not a number read as one (`[A] * [Qty]`, `-[A]`,
-   `"abc" * [Qty]`), and text compared with a number or with `False` (`[A] > 1`, `[A] <> False`).
+   `"abc" * [Qty]`), and text compared with a written number or with `False` (`[A] > 1`, `[A] <> False`,
+   `IIf([Qty]>=0,0,1) = "0.0"`).
 
    The first is `CDbl` over a Null. **The VBA conversion functions do not propagate Null, they raise
    on it**, so `CDbl(Null)` is an error rather than a Null result — unlike every other whitelisted function,
