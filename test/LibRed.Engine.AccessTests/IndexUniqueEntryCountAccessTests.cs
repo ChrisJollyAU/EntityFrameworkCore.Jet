@@ -283,18 +283,21 @@ public class IndexUniqueEntryCountAccessTests(ITestOutputHelper output)
         }
     }
 
-    // A UNIQUE IGNORE NULL index given (1, Null) twice: the second row inserted into the index, or the index built
-    // over both rows. Whether each engine accepts or refuses, and what the leaf then holds.
+    // A UNIQUE index, IGNORE NULL or not, given (1, Null) twice: the second row inserted into the index, or the index
+    // built over both rows. ACE accepts both, a key with a Null part being no duplicate, and its leaf holds the same
+    // key twice; LibRed must do the same.
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void A_unique_ignore_null_index_given_a_partly_null_key_twice(bool indexFirst)
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    public void A_unique_index_given_a_partly_null_key_twice(bool indexFirst, bool ignoreNull)
     {
         string northwind = Path.Combine(AppContext.BaseDirectory, "Data", "Northwind.accdb");
         string ace = TemporaryDatabase.CopyPath(northwind, "uniqcount-uign-ace-");
         string libred = TemporaryDatabase.CopyPath(northwind, "uniqcount-uign-lib-");
         string[] rows = ["INSERT INTO T VALUES (1, 1, NULL)", "INSERT INTO T VALUES (2, 1, NULL)"];
-        const string index = "CREATE UNIQUE INDEX ixAB ON T (A, B) WITH IGNORE NULL";
+        string index = "CREATE UNIQUE INDEX ixAB ON T (A, B)" + (ignoreNull ? " WITH IGNORE NULL" : "");
         try
         {
             var outcomes = new List<string>();
@@ -312,6 +315,7 @@ public class IndexUniqueEntryCountAccessTests(ITestOutputHelper output)
             string aceLeaf = Indexed(ace) ? Leaf(ace) : "-", libredLeaf = Indexed(libred) ? Leaf(libred) : "-";
             output.WriteLine($"{(indexFirst ? "index, then rows" : "rows, then index")}\n  {string.Join("\n  ", outcomes)}"
                 + $"\n  ACE    {aceLeaf}   {Statistics(ace, "T")}\n  LibRed {libredLeaf}   {Statistics(libred, "T")}");
+            Assert.All(aceAccepted, Assert.True);
             Assert.Equal(aceAccepted, libredAccepted);
             Assert.Equal(aceLeaf, libredLeaf);
             Assert.Equal(Statistics(ace, "T"), Statistics(libred, "T"));
