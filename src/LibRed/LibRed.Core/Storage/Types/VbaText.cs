@@ -181,7 +181,8 @@ public static class VbaText
     public static string FloatingText(double value, int digits, NumberFormatInfo? format = null)
     {
         format ??= CultureInfo.CurrentCulture.NumberFormat;
-        // A negative zero keeps its sign (verified vs ACE: -[Qty]^2 over 0 is "-0").
+        // A negative zero keeps its sign, as the Microsoft 365 runtime writes it (verified: -[Qty]^2 over 0 is "-0"; ACE
+        // 2010 writes "0").
         if (value == 0) return double.IsNegative(value) ? format.NegativeSign + "0" : "0";
         if (!double.IsFinite(value)) return value.ToString(CultureInfo.InvariantCulture);
 

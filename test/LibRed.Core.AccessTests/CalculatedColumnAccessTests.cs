@@ -1672,7 +1672,9 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
                     }
                     // Nothing else may be refused.
                     if (refused.Contains(row.Id)) mismatches.Add($"{name} [{expression}] row {row.Id}: ACE {ace}, LibRed refused it");
-                    if (ace != libred) mismatches.Add($"{name} [{expression}] row {row.Id}: ACE {ace}, LibRed {libred}");
+                    // LibRed writes a negative zero as Microsoft 365 does, "-0", where ACE 2010 writes "0" (Str " 0").
+                    bool negativeZero = name.StartsWith("PNegZero", StringComparison.Ordinal) && ace is "\"0\"" or "\" 0\"" && libred == "\"-0\"";
+                    if (ace != libred && !negativeZero) mismatches.Add($"{name} [{expression}] row {row.Id}: ACE {ace}, LibRed {libred}");
                 }
             }
 

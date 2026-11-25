@@ -114,7 +114,9 @@ a declaration to something its existing data would violate.
 
 > Scale is treated differently and is **not** refused: excess decimals are coerced, and **ACE truncates toward
 > zero**. `1.23456` into a `DECIMAL(18,4)` stores `1.2345`, `1.99999` stores `1.9999`, `-1.23455` stores
-> `-1.2345` — truncation in every case, over both midpoint parities and both signs.
+> `-1.2345` — truncation in every case, over both midpoint parities and both signs. That is an SQL statement's
+> route; DAO's object model refuses the same values instead, *"Scaling of decimal value resulted in data
+> truncation"* (verified, ACE 2010 and Microsoft 365).
 >
 > LibRed matches it in `JetTypeCodec.EncodeNumeric`, and `IndexKeyCodec.EncodeFixedPoint` **must** quantise
 > identically: the key is the same unscaled integer the row stores, so quantising one differently files a value
@@ -309,14 +311,17 @@ Points verified against ACE that aren't obvious from that page:
   `'9007199254740993.4'` 9007199254740993 into a `BIGINT`). `ALTER COLUMN` to `BIGINT` reads a whole number exactly
   but a fraction through a Double (verified: `'9007199254740993'` converts whole, `'9007199254740993.4'` to
   9007199254740994, `'2.5000000000000001'` to 2). Text that is not a number is refused, `'True'` and `'Yes'` into a
-  Yes/No column included.
+  Yes/No column included. DAO's object model takes `'True'` into a Yes/No column as True (verified, ACE 2010 and
+  Microsoft 365).
 - **A date stored into a number or Yes/No column is its OLE Automation serial, and a number stored into a date
   column is the date at that serial** (verified, on `INSERT`, `ALTER COLUMN` and as a column default): `Time()` at 20:58 stores
   0.874 into a `DOUBLE`, 1 into a `LONG` and True into a Yes/No; `Now()` into a `LONG` stores the day number; 0
   into a `DATETIME` stores 1899-12-30, 1000 stores 1902-09-26, and `True` (-1) 1899-12-29.
 - **A whole-number column rounds half to even**, from a number or text alike (verified: `'2.5'` stores 2, `'3.5'` 4).
   A **Byte keeps the low byte** of that whole number rather than refusing one past its range (verified, on
-  `INSERT`: 256 stores 0, -1 255, 300 44, 255.5 0); `SHORT` and `LONG` refuse one past theirs.
+  `INSERT`: 256 stores 0, -1 255, 300 44, 255.5 0); `SHORT` and `LONG` refuse one past theirs. DAO's object model
+  refuses a Byte past its range too, *"Data type conversion error"*, and rounds a `SHORT` half to even as SQL does
+  (verified, ACE 2010 and Microsoft 365).
 - **A Double or Single stored into a Currency column is its exact binary value × 10000, rounded half to even** —
   not its 15 (or 7) significant digits first (verified, on `INSERT` and `ALTER COLUMN`: the Double 0.00005 stores
   0.0001, 1.00005 1.0001, 2.00005 2.0000, -0.00005 -0.0001; the Single 0.00005 stores 0, 2.00005 2.0001; the ties
@@ -349,7 +354,8 @@ Points verified against ACE that aren't obvious from that page:
   mismatch. All of
   this holds on `INSERT`, `INSERT … SELECT`, `UPDATE` and `ALTER COLUMN` alike.
 - **A Yes/No column stores whether the number rounded half to even is not 0** (verified: 0.5, -0.5 and 0.0001
-  store False; 0.6, 1.5 and 2.5 True). **A Null written to it is stored as False, and is False to everything that
+  store False; 0.6, 1.5 and 2.5 True), on an SQL statement's route, text `'0.5'` included. DAO's object model stores
+  any non-zero number as True without rounding — 0.4, 0.5 and `'0.5'` are True (verified, ACE 2010 and Microsoft 365). **A Null written to it is stored as False, and is False to everything that
   checks the row** (verified): a `NOT NULL` Yes/No accepts it, a unique index refuses a second one as a duplicate
   key, an `IGNORE NULL` index holds its key, and `CHECK (F IS NULL)` refuses it.
 - **Narrowing an existing column is checked against its rows.** `ALTER TABLE … ALTER COLUMN c TEXT(5)` on a

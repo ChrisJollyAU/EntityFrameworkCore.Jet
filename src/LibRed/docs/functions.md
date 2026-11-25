@@ -133,7 +133,9 @@ procedure call, and a result past a Double an overflow.
 Arithmetic on Longs past a Long's range is a Double, as OLE Automation's arithmetic makes it (verified vs ACE:
 `VarType(2147483647*2)` is 5, and so in a calculated column); a query's result column of the Longs' type cannot hold
 it, so `SELECT 2147483647*2` is an overflow. A negative zero is written `-0` as text — `&`, `Str`, `CStr`, `Format` and a
-Text column alike (verified vs ACE: `-[Qty]^2` over 0).
+Text column alike — as the Microsoft 365 runtime writes it (verified: `-[Qty]^2` over 0, `CStr(-CDbl(0))`,
+`CStr(CDbl(0) * -1)`). ACE 2010 writes `"0"` instead, and `Str` `" 0"`; whether the engine version or the bitness
+decides that is not known, and LibRed writes what Microsoft 365 writes.
 
 ### String
 

@@ -116,8 +116,10 @@ Enumerated over every Access / VBA scalar function [functions.md](../functions.m
 
 All measured, each over the same rows as a query (which answers the same, but where noted):
 
-- **Numbers as written.** A whole number a Long holds is a Long, one past it a Decimal, and a number with a point a
-  Decimal of the places written; arithmetic on Longs gives a Long (its type measured in a query, where `VarType(1+1)`
+- **Numbers as written** are typed as a query types them ([functions.md](../functions.md)): a whole number a Long
+  holds is a Long (`3.0` and `1E5` too), one past it a Decimal (`2147483648.0`), a number with places a Decimal of the
+  places written (`1.50`), and a number written with a point whose whole part ends in a zero a Double (`10.0`,
+  `3000000000.0`, where `105.0` is a Long); arithmetic on Longs gives a Long (its type measured in a query, where `VarType(1+1)`
   is 3), but one past a Long's range is a Double (`[Qty]*1000000000` over 7 is 7000000000), as OLE Automation's
   arithmetic makes it.
 - **`^`** is left-associative and binds tighter than a minus (`2^3^2` is 64, `- 2^2` is -4), and a minus written
@@ -377,6 +379,11 @@ same bytes on disk, because an empty string also encodes to nothing, and ACE res
 type: `Left([A],2)` over a Null `[A]` stores an empty payload and reads back `""`, while the same empty
 payload under a `DateTime` result type reads back Null. Reading it as Null in both cases is a silent
 disagreement about a value nothing ever recomputes.
+
+That `""` is what OLE DB reads. **DAO reads a calculated Text's empty payload as Null** — over `[A]` holding `''` and
+over a Null `[A]` alike — while it reads a calculated Memo's as `""`, as OLE DB does (verified, ACE 2010 and Microsoft
+365: `[A]`, `Left([A],2)` and an `IIf` choosing `""`, as Text and as Memo). The bytes are the same either way, so a
+reader can match only one of the two; LibRed reads `""`, as OLE DB does.
 
 **Against the 4060-byte record cap a calculated column is a variable column** (verified at both
 boundaries):

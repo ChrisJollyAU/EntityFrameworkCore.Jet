@@ -325,8 +325,9 @@ not set the commit slot: it keeps no user slot of its own (§2.2).
   offset is 0 and the fixed offsets of other columns skip over them. (Verified: a Boolean that
   follows several fixed columns is still `fixed@0`. A writer must therefore *not* advance the fixed offset for a Boolean column.) On **write**, the value
   reaches the encoder as a bool *or* a number (a `bit` column is commonly inserted as `1`/`-1`/`0`
-  or defaulted from `"0"`), so LibRed coerces it with Access truthiness — **any non-zero number (or
-  bool true) sets the bit**, `0`/false clears it (verified vs Access).
+  or defaulted from `"0"`), so LibRed coerces it as an SQL statement stores it: **the number rounded half to
+  even, not 0, sets the bit** ([data-types.md](data-types.md)). DAO's object model sets it for any non-zero number
+  without rounding, 0.4 and 0.5 included (verified, ACE 2010 and Microsoft 365).
 - Variable offsets are **always 2 bytes** in Jet 4 / ACE, at any row size. There is **no
   jump table** (that is a Jet 3 construct for its 1-byte offsets).
 
