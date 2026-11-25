@@ -296,17 +296,17 @@ public class CalculatedEvaluatorTests
         Assert.Same(VbaBoolean.False, Eval("IsEmpty([A])", ("A", null)));
     }
 
-    // Access's Expression Builder offers the '$' name variants and its designer accepts them, but ACE then
-    // fails every insert into the table. Refusing them matches ACE; writing a value would not.
+    // A '$' name variant computes what its plain name does (measured against ACE 2010 and Microsoft 365 over
+    // 'hello'); over Null, where the plain name gives Null, ACE refuses the insert, so the evaluation raises.
     [Theory]
-    [InlineData("Left$([A], 2)")]
-    [InlineData("Trim$([A])")]
-    [InlineData("UCase$([A])")]
-    [InlineData("Mid$([A], 2, 3)")]
-    public void Refuses_the_dollar_name_variants(string expression)
+    [InlineData("Left$([A], 2)", "he")]
+    [InlineData("Trim$([A])", "hello")]
+    [InlineData("UCase$([A])", "HELLO")]
+    [InlineData("Mid$([A], 2, 2)", "el")]
+    public void Computes_a_dollar_name_variant_as_its_plain_name(string expression, string expected)
     {
-        var ex = Assert.Throws<CalculatedExpressionException>(() => Eval(expression, ("A", "hello")));
-        Assert.Contains("cannot be evaluated in a calculated column", ex.Message);
+        Assert.Equal(expected, Eval(expression, ("A", "hello")));
+        Assert.Throws<InvalidCastException>(() => Eval(expression, ("A", null)));
     }
 
     // Every function on ACE's whitelist is now implemented, so what has to throw is one ACE itself refuses.

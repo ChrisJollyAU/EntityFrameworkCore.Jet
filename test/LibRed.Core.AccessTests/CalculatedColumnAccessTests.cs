@@ -591,7 +591,6 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
     [InlineData("StrConv([A], 1)", "cannot be used")]      // refused by policy in full form too (page-02e)
     [InlineData("TypeName([Qty])", "cannot be used")]
     [InlineData("Now()+0", "cannot be used")]              // volatile
-    [InlineData("Left$([A], 2)", "'$'")]                   // accepted by the designer, unpopulatable
     [InlineData("[C]*2", "refers to itself")]
     [InlineData("[Missing]*2", "refers to another table")]
     public void Refuses_to_author_an_expression_ace_would_reject(string expression, string expected)
@@ -1415,6 +1414,16 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
         ("PCDbl",   DbDouble,   0, "CDbl([Qty])/3"),
         ("PStr",    DbText,    40, "Str([Qty])"),
         ("PLeft",   DbText,    40, "Left([A],2)"),
+        // A '$' form computes what its plain name does, except that ACE refuses the insert where that would be Null.
+        ("PLeftD",  DbText,    40, "Left$([A],2)"),
+        ("PRightD", DbText,    40, "Right$([A],2)"),
+        ("PMidD",   DbText,    40, "Mid$([A],2,2)"),
+        ("PLCaseD", DbText,    40, "LCase$([A])"),
+        ("PUCaseD", DbText,    40, "UCase$([A])"),
+        ("PTrimD",  DbText,    40, "Trim$([A])"),
+        ("PSpaceD", DbText,    40, "Space$(3)"),
+        ("PStrD",   DbText,    40, "Str$([Qty])"),
+        ("PStringD", DbText,   40, "String$(3,[A])"),
         ("PAndF",   DbBoolean,  0, "[Qty] And False"),        // Null And False is False
         ("POrT",    DbBoolean,  0, "[Qty] Or True"),          // Null Or True is True
         ("PAndCut", DbBoolean,  0, "([Id]<0) And (CDbl([Qty])>0)"),   // whether And short-circuits
@@ -1693,9 +1702,12 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
                 "PIifLitTx row 1", "PIifLitTx row 2", "PIifLitTx row 3", "PIifLitTx row 4", "PIifLitTx row 5",
                 "PIifColWr row 3", "PIifColWr row 4",
             ], aceCannotReadItself);
-            // What ACE refuses to write, a Text result whose expression raises an error, pinned the same way: Choose past
-            // its arms over Null, and a Boolean plus text that is not a number.
+            // What ACE refuses to write, a Text result whose expression raises an error, pinned the same way: a '$' form
+            // over Null, String$ of the empty string, Choose past its arms over Null, and a Boolean plus text that is not
+            // a number.
             Assert.Equal([
+                "PLeftD row 4", "PRightD row 4", "PMidD row 4", "PLCaseD row 4", "PUCaseD row 4", "PTrimD row 4",
+                "PStrD row 4", "PStringD row 2", "PStringD row 4",
                 "PChooseQ row 4",
                 "PIsNullPl row 1", "PIsNullPl row 2", "PIsNullPl row 3", "PIsNullPl row 4", "PIsNullPl row 5",
             ], aceRefusesItself);

@@ -46,10 +46,14 @@ internal abstract partial class ExpressionFunctions<TExpression>
     private static readonly char[] TrimmedSpaces = [' ', '　'];
 
     /// <summary>The function <paramref name="name"/> (upper case, any trailing '$' stripped) over the arguments of
-    /// <paramref name="f"/>, whose count the caller has checked.</summary>
+    /// <paramref name="f"/>, whose count the caller has checked. A '$' form returns a String rather than a Variant, so
+    /// it cannot hold Null: where the plain name gives Null, the '$' form raises (verified vs ACE 2010 and Microsoft 365,
+    /// in a query and a calculated column alike: "Invalid use of Null" for Hex$, Oct$, Str$ and String$, "Data type
+    /// mismatch" for the text functions; Format$ gives "" as Format does).</summary>
     internal object? Function(string name, Call f)
     {
-        return name switch
+        bool dollar = f.Name.EndsWith('$');
+        object? result = name switch
         {
             "IIF" => IifArm(f.Arguments) is { } arm ? Evaluate(arm) : null,
             "CHOOSE" => Choose(f),
@@ -125,8 +129,9 @@ internal abstract partial class ExpressionFunctions<TExpression>
             "GETUTCDATE" => OaDate(DateTime.UtcNow.ToOADate()),
             "SYSDATETIME" => DateTime.Now,
             "SYSUTCDATETIME" => DateTime.UtcNow,
-            "DATE" => DateTime.Today,
-            "TIME" => DateTime.FromOADate(0).Add(Clock.TimeOfDay),
+            // Date$ and Time$ are text, in a fixed form whatever the locale (verified vs ACE: "11-25-2026", "20:00:36").
+            "DATE" => dollar ? DateTime.Today.ToString("MM-dd-yyyy", CultureInfo.InvariantCulture) : DateTime.Today,
+            "TIME" => dollar ? Clock.ToString("HH:mm:ss", CultureInfo.InvariantCulture) : DateTime.FromOADate(0).Add(Clock.TimeOfDay),
             "YEAR" => Convert1(f, v => ToDate(v).Year),
             "MONTH" => Convert1(f, v => ToDate(v).Month),
             "DAY" => Convert1(f, v => ToDate(v).Day),
@@ -259,6 +264,11 @@ internal abstract partial class ExpressionFunctions<TExpression>
             "GENGUID" => Guid.NewGuid(),
             _ => throw new NotSupportedException($"Function {f.Name} is not supported."),
         };
+        if (result is null && dollar)
+            throw name is "HEX" or "OCT" or "STR" or "STRING"
+                ? new InvalidOperationException($"Invalid use of Null: {f.Name} cannot return Null.")
+                : new InvalidCastException($"Data type mismatch in criteria expression: {f.Name} cannot return Null.");
+        return result;
     }
 
     /// <summary>Access <c>Choose(index, choice-1, choice-2, …)</c> (verified vs ACE): the choice at the index, read as

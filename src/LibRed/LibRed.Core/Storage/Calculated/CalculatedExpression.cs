@@ -96,13 +96,9 @@ internal static class CalculatedExpression
                     throw new CalculatedExpressionException(
                         $"The expression cannot be saved because it refers to another table: '{c.Name}' is not "
                         + "a column of this one.");
-                // Access's designer offers the '$' name variants and accepts them, but ACE then fails every
-                // insert into the table -- so a column using one can never be populated (§3.4a).
-                case CalcCall f when f.Name.EndsWith('$'):
-                    throw new CalculatedExpressionException(
-                        $"The expression {f.Name} cannot be used in a calculated column: the '$' variants are not "
-                        + $"supported there; use '{f.Name[..^1]}'.");
-                case CalcCall f when !Accepted.Contains(f.Name):
+                // A '$' form is accepted exactly where its plain name is (verified vs ACE: the nine below, and no
+                // other function's '$' form).
+                case CalcCall f when !Accepted.Contains(f.Name.TrimEnd('$')):
                     throw new CalculatedExpressionException(
                         $"The expression {f.Name} cannot be used in a calculated column.");
             }

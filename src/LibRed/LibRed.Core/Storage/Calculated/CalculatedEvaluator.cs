@@ -227,17 +227,7 @@ internal static class CalculatedEvaluator
         Func<string, ColumnDef?> definition)
     {
         string name = node.Name;
-
-        // Access's Expression Builder lists the '$' name variants (Left$, Trim$, UCase$, Mid$ …) and its
-        // designer accepts one in a calculated column — but ACE then fails EVERY insert into that table with
-        // "Error evaluating CHECK constraint", while the plain name works. The column is unusable in Access
-        // itself, so refusing is matching it, not falling short of it.
-        if (name.EndsWith('$'))
-            throw new CalculatedExpressionException(
-                $"'{name}' cannot be evaluated in a calculated column: the '$' variants are not supported there; "
-                + $"use '{name[..^1]}'.");
-
-        string function = name.ToUpperInvariant();
+        string function = name.TrimEnd('$').ToUpperInvariant();
         int count = node.Arguments.Count;
 
         // Mid needs all three arguments in a calculated column, optional in VBA or not; InStr needs three

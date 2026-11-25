@@ -158,12 +158,12 @@ accepted is missing from it. Two entries on it need care.
 which a stored column value never is: ACE returns `False` for a column holding a value *and* for one holding
 Null. It is on the whitelist but can only ever be `False`.
 
-**The `$` name variants are a trap.** The builder offers `LCase$` `Left$` `Mid$` `Right$` `Space$` `Str$`
-`String$` `Trim$` `UCase$`, and the designer **accepts** them — but ACE then fails **every** insert into that
-table with *"Error evaluating CHECK constraint"*, while the plain name works on an otherwise identical
-table. So a `$` variant produces a column that cannot be populated in Access either. This is the same shape
-as indexing a calculated column: accepted at design time, unusable in practice. LibRed refuses them with a
-message pointing at the plain name — that is matching ACE, not falling short of it.
+**A `$` name variant is accepted exactly where its plain name is**: `LCase$` `Left$` `Mid$` `Right$` `Space$`
+`Str$` `String$` `Trim$` `UCase$`, and no other function's `$` form (verified, ACE 2010 and Microsoft 365, every
+VBA function that has one). It computes what the plain name does, except over a Null: a `$` form returns a
+String, which cannot hold Null, so where the plain name stores Null ACE refuses the insert with *"Error
+evaluating CHECK constraint"* — `Left$([A],2)` over a Null `[A]`, where `Left([A],2)` stores Null. Over a value
+or the empty string the two store the same. LibRed refuses the write where ACE refuses the insert.
 
 ### Optional arguments must be supplied — but only for some functions
 

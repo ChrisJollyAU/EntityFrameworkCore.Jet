@@ -225,7 +225,11 @@ an array argument, so have no scalar-SQL form.
 
 - **`$` — string-returning** (`Left$`, `UCase$`, `Chr$`, `Str$`, `Format$`, …): the lexer allows a trailing `$` on
   an identifier and the evaluator strips it before dispatch, so **every** function gains its `$` form and computes
-  the same value. (ACE exposes `$` only for classic functions; the alias is harmless where ACE doesn't.)
+  the same value — except that a String cannot hold Null, so where the plain name gives Null the `$` form raises:
+  *"Invalid use of Null"* for `Hex$` `Oct$` `Str$` `String$`, *"Data type mismatch"* for the text functions
+  (`LCase$` `Left$` `Mid$` `Trim$` …); `Format$` gives `""` as `Format` does. `Date$()` and `Time$()` are text in a
+  fixed form, `"mm-dd-yyyy"` and `"hh:mm:ss"`, whatever the locale (verified vs ACE 2010 and Microsoft 365). (ACE
+  exposes `$` only for classic functions; the alias is harmless where ACE doesn't.)
 - **`B` — byte-based** on the UTF-16 layout (2 bytes/char): `AscB` `LenB` `LeftB` `RightB` `MidB` `InStrB`
   (`LenB('abc')` = 6). `ChrB` is intentionally **absent** (ACE's JES has none either).
 - **`W` — wide / Unicode**: `AscW` (the first character's UTF-16 code unit, signed) · `ChrW` (the character for a

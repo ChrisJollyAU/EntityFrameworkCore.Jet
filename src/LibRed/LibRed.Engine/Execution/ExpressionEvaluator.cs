@@ -318,8 +318,8 @@ internal sealed partial class ExpressionEvaluator(
         if (scope.TryResolveAggregate(f, out object? aggregate))
             return aggregate;
 
-        // VBA "$" variants (Left$, UCase$, Chr$, …) return a String instead of a Variant but compute the same
-        // value in the Jet expression service — so a trailing "$" is stripped and dispatched to the base name.
+        // VBA "$" variants (Left$, UCase$, Chr$, …) return a String instead of a Variant — so a trailing "$" is
+        // stripped and dispatched to the base name, which raises where it would give Null (ExpressionFunctions.Function).
         // Names, FILTER eligibility and arity belong to the AST, not the current row. Validate on the
         // first reached evaluation so lazy branches still defer their errors, then retain only that shape.
 #pragma warning disable IDE0028 // AST calls are keyed by identity, as in the other per-execution caches.
