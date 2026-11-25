@@ -309,7 +309,9 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
                 && KeyEquals(values, ends.ParentColumns, target))
                 continue;
 
-            if (partialNull || !ParentRowExists(ends, target))
+            // The parent's key is found under ACE's lock on the index page holding it, held for the transaction: another
+            // user's DELETE of a parent row on that page is refused until it ends (locking.md §4).
+            if (partialNull || !ParentRowExists(ends, target, referencedKey: true))
             {
                 // ACE refuses the row at the relationship's index, the keys it gave the indexes ahead of it counted.
                 if (!update && table.Definition.Indexes.FirstOrDefault(i => i.Name.Equals(fk.Name, StringComparison.OrdinalIgnoreCase))
@@ -320,11 +322,11 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
                     + $"no matching row in '{fk.ReferencedTable}'.");
             }
 
-            // Inside a transaction, finding the parent now is not enough: reading it writes no page, so the
-            // commit's page-conflict check cannot see the dependency, and a concurrent transaction is free to
-            // delete that parent and commit — each having checked the other's precondition, leaving a child row
-            // referencing nothing. The condition is re-checked when this transaction commits, once per
-            // relationship and key however many rows relied on it.
+            // Where no lock holds the parent — a connection that is no Jet user — finding it now is not enough:
+            // reading it writes no page, so the commit's page-conflict check cannot see the dependency, and a
+            // concurrent transaction is free to delete that parent and commit — each having checked the other's
+            // precondition, leaving a child row referencing nothing. The condition is re-checked when this
+            // transaction commits, once per relationship and key however many rows relied on it.
             DependOnRelationship(fk, target,
                 $"Transaction conflict on foreign key '{fk.Name}': the row in '{fk.ReferencedTable}' that "
                 + $"'{childTable}' was checked against no longer exists.");
@@ -450,16 +452,20 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             Relationship, System.Collections.StructuralComparisons.StructuralEqualityComparer.GetHashCode(Key));
     }
 
-    /// <summary>Whether a parent row holds the key a child row references.</summary>
-    private bool ParentRowExists(RelationshipEnds ends, object?[] key) =>
-        RowsHoldingKey(ends.Parent, ends.ParentColumns, key).Any();
+    /// <summary>Whether a parent row holds the key a child row references; with <paramref name="referencedKey"/>, for
+    /// the child row's own check, found under ACE's lock on the index page holding it (<see cref="RowsHoldingKey"/>).</summary>
+    private bool ParentRowExists(RelationshipEnds ends, object?[] key, bool referencedKey = false) =>
+        RowsHoldingKey(ends.Parent, ends.ParentColumns, key, referencedKey).Any();
 
     /// <summary>The rows of <paramref name="table"/> whose <paramref name="columns"/> hold <paramref name="key"/>
     /// on <see cref="KeyEquals"/>'s terms, read in full: seeked through an index on those columns when the key
     /// can be sought (every value in its column's kind, as a query's <c>column = value</c> seek requires), else
     /// scanned. A relationship's parent side always has one — its referenced columns are a primary or unique
-    /// key — so the check every child INSERT makes, which scanned the whole parent table, is a seek.</summary>
-    private IEnumerable<(RowId Id, object?[] Values)> RowsHoldingKey(Table table, int[] columns, object?[] key)
+    /// key — so the check every child INSERT makes, which scanned the whole parent table, is a seek.
+    /// <paramref name="referencedKey"/>: the key a child row references, whose index page is locked as ACE locks it
+    /// (<see cref="Table.RowsWithKey"/>).</summary>
+    private IEnumerable<(RowId Id, object?[] Values)> RowsHoldingKey(Table table, int[] columns, object?[] key,
+        bool referencedKey = false)
     {
         bool Holds(object?[] values) => KeyEquals(values, columns, key);
 
@@ -476,7 +482,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             }
         }
 
-        return table.RowsWithKey(columns, seekKey, Holds);
+        return table.RowsWithKey(columns, seekKey, Holds, referencedKey);
     }
 
     /// <summary>The enforced relationships for which <paramref name="parentTable"/> is the referenced
@@ -1372,7 +1378,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     private (int Affected, object? LastIdentity, bool Generates) AppendRows(
         string tableName, IReadOnlyList<string> targets, IEnumerable<object?[]> rows)
     {
-        Table table = _database.OpenTable(tableName);
+        Table table = _database.OpenTable(tableName, forWriting: true);   // as ACE opens an INSERT's target: once, for writing
         var columns = table.Definition.Columns;
         RowDefaults defaults = DefaultsOf(table.Definition);
 

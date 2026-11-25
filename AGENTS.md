@@ -360,7 +360,8 @@ parser: the lexer/parser are pre-generated and committed under `LibRed.Sql/Gramm
 
 > **LibRed takes part in Jet's multi-user locking on Windows, and nowhere else.** On a shared (non-exclusive)
 > open on Windows it does what ACE does, as measured against ACE 16 (`src/LibRed/docs/format/locking.md` is the
-> specification): it registers as a Jet user in the `.laccdb`/`.ldb` beside the database; writes its commit slot on
+> specification): it registers as a Jet user in the `.laccdb`/`.ldb` beside the database, and is refused the open
+> while another user bars new connections (connection control); writes its commit slot on
 > page 0 around every batch of page writes; reads the slot table at the start of each statement and drops its
 > cached pages when another user's slot has moved; takes ACE's exclusive page lock when a statement first changes
 > a page (the table's TDEF page first for an INSERT, the global maps' page before reserving pages); and takes
@@ -390,8 +391,7 @@ parser: the lexer/parser are pre-generated and committed under `LibRed.Sql/Gramm
 >   page 1 and lets them go as each statement returns, where ACE does about 500 ms after (and holds page 1 when
 >   the statement freed, grew or converted a map, and the TDEF page after a design change to it); the
 >   connections of one process share a page cache, so one reads another's commit on its next statement where
->   ACE's waits for its 5-second refresh; another connection's DELETE of a parent row beside an uncommitted child
->   INSERT goes ahead and the child's COMMIT is refused, where ACE refuses the DELETE; a refused long-value read fails the whole row, where ACE's fails the long-value column. Read
+>   ACE's waits for its 5-second refresh; a refused long-value read fails the whole row, where ACE's fails the long-value column. Read
 >   `locking.md` and `docs/verification-backlog.md` before relying on any of it — they also list every behaviour
 >   chosen without a measurement.
 > - **Measuring and testing it:** ACE's behaviour is measured from a ProcMon capture decoded by

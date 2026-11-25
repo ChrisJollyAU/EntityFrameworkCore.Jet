@@ -189,6 +189,54 @@ public class PageLockStatementTests
         Assert.Equal("BBBBBBBBBBBB", ValueOf(engine, 1));
     }
 
+    // A child row's foreign-key check takes ACE's shared byte on the parent's index page holding the key, and holds it as
+    // the statement's page locks are held: to COMMIT or ROLLBACK in a transaction, to the statement's end on its own.
+    // Another user's DELETE or INSERT of a parent row there needs the page exclusively, and is refused meanwhile. ACE 16,
+    // CapParent/CapChild (measured): the INSERT and the foreign-key UPDATE take the parent's table-read byte, then their
+    // shared byte on the parent's primary-key index page, held to COMMIT / ROLLBACK; another user's DELETE of either
+    // parent row is refused that page exclusively, 21 attempts, then 3218.
+    [Fact]
+    public void A_child_rows_foreign_key_check_holds_the_parents_index_page_shared_until_the_transaction_ends()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        engine.ExecuteNonQuery("CREATE TABLE P (Id INTEGER PRIMARY KEY)");
+        engine.ExecuteNonQuery("CREATE TABLE C (Id INTEGER PRIMARY KEY, P INTEGER REFERENCES P (Id))");
+        engine.ExecuteNonQuery("INSERT INTO P (Id) VALUES (1)");
+        engine.ExecuteNonQuery("INSERT INTO P (Id) VALUES (2)");
+        int leaf = database.Catalog.FindTable("P")!.Indexes.First(i => i.IsPrimaryKey).RootPage;
+        long libRedsByte = JetLockLayout.SharedByte(JetLockRegion.WriteRead, leaf, database.Channel.UserNumber!.Value);
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        // On its own, for the statement alone.
+        engine.ExecuteNonQuery("INSERT INTO C (Id, P) VALUES (10, 1)");
+        AssertNothingLocked(other, copy.Path);
+
+        foreach (string end in (string[])["COMMIT", "ROLLBACK"])
+        {
+            engine.ExecuteNonQuery("BEGIN TRANSACTION");
+            engine.ExecuteNonQuery("INSERT INTO C (Id, P) VALUES (11, 2)");
+            Assert.False(other.TryLock(libRedsByte, 1));
+            Assert.True(SharedIsFree(other, leaf));        // another reader is not in its way
+            Assert.False(ExclusiveIsFree(other, leaf));    // another user's write of the page is
+            // The connection's own write of the page goes ahead on top of it, and the page is held still.
+            engine.ExecuteNonQuery($"INSERT INTO P (Id) VALUES ({(end == "COMMIT" ? 3 : 4)})");
+            Assert.False(ExclusiveIsFree(other, leaf));
+            engine.ExecuteNonQuery(end);
+            AssertNothingLocked(other, copy.Path);
+            if (end == "COMMIT") engine.ExecuteNonQuery("DELETE FROM C WHERE Id = 11");
+        }
+
+        // A foreign-key UPDATE takes it too.
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        Assert.Equal(1, engine.ExecuteNonQuery("UPDATE C SET P = 2 WHERE Id = 10"));
+        Assert.False(other.TryLock(libRedsByte, 1));
+        engine.ExecuteNonQuery("ROLLBACK");
+        AssertNothingLocked(other, copy.Path);
+    }
+
     // A chained memo is read under the reader's shared byte on the chain's first page, held for the statement and let go
     // when it returns — inside an explicit transaction too (locking.md §4, §5).
     [Fact]

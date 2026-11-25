@@ -232,6 +232,35 @@ public class TableLockStatementTests
         Assert.Equal(new object?[] { 1, "two", null }, Assert.Single(new QueryEngine(fresh).ExecuteQuery("SELECT * FROM T").Rows.ToList()));
     }
 
+    // ACE retries the read byte of a table another user holds for a design change one round for an INSERT, which opens the
+    // table once, for writing, and two for a SELECT, UPDATE or DELETE (measured, ACE 16, beside another user's ALTER TABLE
+    // in an open transaction: an INSERT 21 attempts, about 2.2 s; the others 42, about 4.3 s; each then 3008).
+    [Fact]
+    public void An_INSERT_into_a_table_another_user_holds_for_a_design_change_fails_with_3008_after_one_round()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-tablelock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        int tdef = CreateTable(engine, database, "T");
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        (long offset, long length) = JetLockLayout.ExclusiveRange(JetLockRegion.TableRead, tdef, OtherUser);
+        Assert.True(other.TryLock(offset, length));
+        var wait = Stopwatch.StartNew();
+        var refused = Assert.Throws<InvalidOperationException>(() => engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (2, 'two')"));
+        wait.Stop();
+        Assert.Equal(OpenedExclusively("T"), refused.Message);
+        Assert.InRange(wait.ElapsedMilliseconds, 1900, 3800);
+        other.Unlock(offset, length);
+
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (2, 'two')"));
+        AssertTableFree(other, tdef);
+    }
+
+    private static string OpenedExclusively(string table) =>
+        $"The table '{table}' is already opened exclusively by another user, or it is already open through the user interface and cannot be manipulated programmatically.";
+
     // Two connections of one process are two Jet users, as ACE's are. ACE, this sequence on this table (measured, two
     // OLE DB connections in one process): with A's reader open in its transaction, B's ALTER TABLE is refused with
     // 3211 after about 2.2 s, and A's own CREATE INDEX with 3211 at once; with the reader closed A's CREATE INDEX goes

@@ -373,6 +373,77 @@ public class PageLockAccessTests
         }
     }
 
+    // A child row's foreign-key check holds the shared byte on the parent's index page holding the key until COMMIT, as
+    // ACE's does (measured), so ACE's DELETE of the parent — which writes that page — is refused with 3218 meanwhile, and
+    // after the COMMIT with 3200, the child row found.
+    [Fact]
+    public void LibReds_child_INSERT_in_a_transaction_refuses_ACEs_parent_DELETE_with_3218_and_after_COMMIT_3200()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-pagelock-ace-");
+        try
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(database);
+            CreateParentsAndChildren(engine);
+
+            using OleDbConnection ace = AceTestDatabase.Open(path);
+            Assert.Equal(2, Convert.ToInt32(Scalar(ace, "SELECT COUNT(*) FROM Parents")));
+            engine.ExecuteNonQuery("BEGIN TRANSACTION");
+            engine.ExecuteNonQuery("INSERT INTO Children (Id, ParentId) VALUES (10, 1)");
+
+            var wait = Stopwatch.StartNew();
+            var refused = Assert.Throws<OleDbException>(() => Exec(ace, "DELETE FROM Parents WHERE Id = 1"));
+            wait.Stop();
+            Assert.Equal("3218", refused.Errors[0].SQLState);
+            Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
+
+            engine.ExecuteNonQuery("COMMIT");
+            var related = Assert.Throws<OleDbException>(() => Exec(ace, "DELETE FROM Parents WHERE Id = 1"));
+            Assert.Equal("3200", related.Errors[0].SQLState);
+            Assert.Equal(2, Convert.ToInt32(Scalar(ace, "SELECT COUNT(*) FROM Parents")));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    [Fact]
+    public void ACEs_child_INSERT_in_a_transaction_refuses_LibReds_parent_DELETE_with_3218_and_after_COMMIT_3200()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-pagelock-ace-");
+        try
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(database);
+            CreateParentsAndChildren(engine);
+
+            using OleDbConnection ace = AceTestDatabase.Open(path);
+            using (OleDbTransaction transaction = ace.BeginTransaction())
+            {
+                Exec(ace, "INSERT INTO Children (Id, ParentId) VALUES (10, 1)", transaction);
+
+                var wait = Stopwatch.StartNew();
+                var refused = Assert.Throws<InvalidOperationException>(() => engine.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1"));
+                wait.Stop();
+                Assert.Equal(CurrentlyLocked, refused.Message);
+                Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
+
+                transaction.Commit();
+            }
+
+            var related = Assert.Throws<InvalidOperationException>(() => engine.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1"));
+            Assert.Equal("The record cannot be deleted or changed because table 'Children' includes related records.", related.Message);
+            Assert.Equal(2, Convert.ToInt32(engine.ExecuteQuery("SELECT COUNT(*) FROM Parents").Rows.Single()[0]));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    private static void CreateParentsAndChildren(QueryEngine engine)
+    {
+        engine.ExecuteNonQuery("CREATE TABLE Parents (Id LONG PRIMARY KEY)");
+        engine.ExecuteNonQuery("CREATE TABLE Children (Id LONG PRIMARY KEY, ParentId LONG REFERENCES Parents (Id))");
+        engine.ExecuteNonQuery("INSERT INTO Parents (Id) VALUES (1)");
+        engine.ExecuteNonQuery("INSERT INTO Parents (Id) VALUES (2)");
+    }
+
     // The one page holding the start of a chain written with text no compression shortens.
     private static int ChainFirstPage(string path, char first)
     {

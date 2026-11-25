@@ -1,4 +1,5 @@
 using System.Data.OleDb;
+using System.Runtime.InteropServices;
 using LibRed.IO;
 using Xunit;
 
@@ -94,6 +95,55 @@ public class JetUserRegistrationAccessTests
             Assert.False(File.Exists(lockPath));
         }
         finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // ACE barring new connections — "Jet OLEDB:Connection Control" set to 1 on an open ADO connection, which holds its
+    // group-5 byte (locking.md §3) — refuses LibRed's open with the very error it gives its own second connection, 3734
+    // naming its record; set back to 2, LibRed connects. ADO rather than System.Data.OleDb: the property can only be
+    // set on an open session, which OleDbConnection does not expose.
+    [Fact]
+    public void LibRed_is_refused_while_Ace_bars_new_connections_as_Aces_own_connection_is()
+    {
+        Type? adoConnection = Type.GetTypeFromProgID("ADODB.Connection");
+        Assert.SkipWhen(adoConnection is null, "ADODB is not registered in this process.");
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "libred-register-ace-");
+        AceTestDatabase.ReleaseAbandonedComObjects();
+        dynamic ace = Activator.CreateInstance(adoConnection)!;
+        try
+        {
+            OpenAdo(ace, path);
+            ace.Properties.Item("Jet OLEDB:Connection Control").Value = 1;
+
+            var aceRefused = Assert.Throws<InvalidOperationException>(() => AceTestDatabase.Open(path, attempts: 1).Dispose());
+            OleDbException aceRefusal = Assert.IsType<OleDbException>(aceRefused.InnerException);
+            Assert.Equal("3734", aceRefusal.Errors[0].SQLState);   // OLE DB carries the Jet error number here
+
+            IOException refused = Assert.Throws<IOException>(() => JetDatabase.Open(path, readOnly: false).Dispose());
+            Assert.Equal(aceRefusal.Errors[0].Message, refused.Message);
+            Assert.Contains($"by user 'Admin' on machine '{Environment.MachineName}'", refused.Message, StringComparison.Ordinal);
+
+            ace.Properties.Item("Jet OLEDB:Connection Control").Value = 2;
+            using (JetDatabase database = JetDatabase.Open(path, readOnly: false))
+                Assert.Equal(2, database.Channel.UserNumber);
+        }
+        finally
+        {
+            try { ace.Close(); } catch (Exception) { /* never opened */ }
+            Marshal.FinalReleaseComObject((object)ace);
+            AceTestDatabase.ReleaseAbandonedComObjects();
+            TemporaryDatabase.Delete(path);
+        }
+    }
+
+    private static void OpenAdo(dynamic connection, string path)
+    {
+        Exception? last = null;
+        foreach (string provider in new[] { "Microsoft.ACE.OLEDB.16.0", "Microsoft.ACE.OLEDB.12.0" })
+        {
+            try { connection.Open($"Provider={provider};Data Source={path};"); return; }
+            catch (Exception e) { last = e; }
+        }
+        throw last!;
     }
 
     private static OleDbConnection OpenExclusive(string path)

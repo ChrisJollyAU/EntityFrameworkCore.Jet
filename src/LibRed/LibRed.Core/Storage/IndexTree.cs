@@ -78,8 +78,11 @@ internal sealed class IndexTree(PageChannel channel, TableDefinition table)
     /// <remarks>
     /// The key encoding is order-preserving but <b>lossy</b> for text/binary collation, so distinct values can
     /// share a key — the seek is an access path that may over-return; the caller re-applies the real predicate.
+    /// <para>With <paramref name="referencedKey"/> — the key a foreign key references, sought for a child row's check —
+    /// the leaf the first match is found on is locked as ACE locks it, its shared byte held for the transaction
+    /// (<see cref="PageChannel.LockPage"/>), before the match is yielded.</para>
     /// </remarks>
-    public IEnumerable<RowId> Seek(IndexDef index, object?[] values)
+    public IEnumerable<RowId> Seek(IndexDef index, object?[] values, bool referencedKey = false)
     {
         byte[] key = IndexKeyCodec.Encode(index.Columns, values);
         int leaf = Descend(index.RootPage, WithTrailer(key, 0), path: null);
@@ -96,7 +99,13 @@ internal sealed class IndexTree(PageChannel channel, TableDefinition table)
                 Entry e = page.Entries[i];
                 int cmp = CompareBytes(e.Key, key);
                 if (cmp > 0) yield break;                 // sorted past the key — no more matches
-                if (cmp == 0) yield return RowId.FromPacked(e.Trailer);
+                if (cmp != 0) continue;
+                if (referencedKey)
+                {
+                    _channel.LockPage(leaf, JetLockPurpose.ReferencedKey, out _);
+                    referencedKey = false;
+                }
+                yield return RowId.FromPacked(e.Trailer);
             }
             leaf = page.Next;                             // matches may continue on the next leaf
         }

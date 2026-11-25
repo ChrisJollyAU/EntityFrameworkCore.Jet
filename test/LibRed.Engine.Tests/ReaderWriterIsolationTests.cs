@@ -132,6 +132,21 @@ public class ReaderWriterIsolationTests
             child.ExecuteNonQuery("BEGIN TRANSACTION");
             child.ExecuteNonQuery("INSERT INTO Children (Id, ParentId) VALUES (10, 1)");  // parent 1 is there
 
+            if (childDb.Channel.UserNumber is not null)
+            {
+                // Two Jet users: the child's check holds the shared byte on the parents' index page until COMMIT, and the
+                // other connection's DELETE — which writes that page — is refused. ACE, two OLE DB connections, this
+                // sequence on these tables (measured): the DELETE fails with 3218 after about 2.2 s, and after the
+                // child's COMMIT with 3200, the child row found.
+                var refused = Assert.Throws<InvalidOperationException>(() => parent.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1"));
+                Assert.Equal(CurrentlyLocked, refused.Message);
+                child.ExecuteNonQuery("COMMIT");
+                var related = Assert.Throws<InvalidOperationException>(() => parent.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1"));
+                Assert.Equal(RelatedRecords("Children"), related.Message);
+                Assert.Single(parent.ExecuteQuery("SELECT Id FROM Children").Rows);
+                return;
+            }
+
             parent.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1");                   // ... until now
 
             var conflict = Assert.Throws<InvalidOperationException>(() => child.ExecuteNonQuery("COMMIT"));
@@ -174,6 +189,20 @@ public class ReaderWriterIsolationTests
             parent.ExecuteNonQuery("BEGIN TRANSACTION");
             parent.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1");                   // no children yet
 
+            if (parentDb.Channel.UserNumber is not null)
+            {
+                // Two Jet users: the DELETE holds the parents' index page until COMMIT, and the other connection's child
+                // INSERT is refused its shared byte there. ACE, two OLE DB connections, these tables (measured): the
+                // INSERT fails with 3624 after about 2.2 s — for a child of the parent deleted and of another parent
+                // alike — and once the DELETE has committed, an INSERT of a child of the parent left goes ahead.
+                var refused = Assert.Throws<InvalidOperationException>(() => child.ExecuteNonQuery("INSERT INTO Children (Id, ParentId) VALUES (10, 1)"));
+                Assert.Equal(CouldNotRead, refused.Message);
+                parent.ExecuteNonQuery("COMMIT");
+                child.ExecuteNonQuery("INSERT INTO Children (Id, ParentId) VALUES (11, 2)");
+                Assert.Equal(2, Convert.ToInt32(parent.ExecuteQuery("SELECT Id FROM Parents").Rows.Single()[0]));
+                return;
+            }
+
             child.ExecuteNonQuery("INSERT INTO Children (Id, ParentId) VALUES (10, 1)");  // ... until now
 
             var conflict = Assert.Throws<InvalidOperationException>(() => parent.ExecuteNonQuery("COMMIT"));
@@ -215,9 +244,22 @@ public class ReaderWriterIsolationTests
             child.ExecuteNonQuery("INSERT INTO Children (Id, ParentId) VALUES (10, 1)");
             child.ExecuteNonQuery("UPDATE Children SET ParentId = 2 WHERE Id = 10");
 
-            parent.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1");
-
-            child.ExecuteNonQuery("COMMIT");
+            if (childDb.Channel.UserNumber is not null)
+            {
+                // Two Jet users: both checks hold the shared byte on the parents' index page until COMMIT, and the other
+                // connection's DELETE of parent 1 is refused meanwhile, and goes ahead after. ACE, two OLE DB
+                // connections, this sequence on these tables (measured): 3218 after about 2.2 s, then the DELETE of one
+                // row after the COMMIT.
+                var refused = Assert.Throws<InvalidOperationException>(() => parent.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1"));
+                Assert.Equal(CurrentlyLocked, refused.Message);
+                child.ExecuteNonQuery("COMMIT");
+                Assert.Equal(1, parent.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1"));
+            }
+            else
+            {
+                parent.ExecuteNonQuery("DELETE FROM Parents WHERE Id = 1");
+                child.ExecuteNonQuery("COMMIT");
+            }
             Assert.Equal(2, Convert.ToInt32(parent.ExecuteQuery("SELECT ParentId FROM Children").Rows.Single()[0]));
         }
         finally { TemporaryDatabase.Delete(path); }
@@ -273,6 +315,12 @@ public class ReaderWriterIsolationTests
         }
         finally { TemporaryDatabase.Delete(path); }
     }
+
+    private const string CurrentlyLocked = "Could not update; currently locked.";
+    private const string CouldNotRead = "Could not read the record; currently locked by another user.";
+
+    private static string RelatedRecords(string table) =>
+        $"The record cannot be deleted or changed because table '{table}' includes related records.";
 
     private static string OpenedExclusively(string table) =>
         $"The table '{table}' is already opened exclusively by another user, or it is already open through the user interface and cannot be manipulated programmatically.";

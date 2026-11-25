@@ -189,7 +189,19 @@ Region 1 groups (`0x10000000 + group * 256 + byte`):
 |---|---|
 | 0 | User `n` holds byte `n` for the whole session. |
 | 1 | The session byte: user `n` holds byte `n - 1` for the whole session (`0x10000100` for user 1, `0x10000101` for user 2). |
-| 5 | Every user locks and releases all 256 bytes (`0x10000500`) on connecting. Its meaning is unknown. |
+| 5 | Connection control. User `n` barring new connections (`Jet OLEDB:Connection Control` = 1) locks and releases all 256 bytes (`0x10000500`), then holds byte `n` (`0x10000501` for user 1) until it allows them again or closes. Every user connecting tries all 256 bytes and lets them go; refused, it looks for the holder (below). Shown as `connection control, whole group` and `connection control, user n byte`. |
+| 6 | Tried only by a user group 5 refused: byte 0 (`0x10000600`), and when that is refused too, the byte `n` of each user number that has a record in the lock file, highest down to 1, its own included. What it is for is not known. |
+
+A user connecting while group 5 is held (measured with user 1 connected, the newcomer user 2): refused the whole of
+group 5, it locks and releases `0x10000600`, then tries the group-5 byte of each connected user, user 1's first
+(`0x10000501`). That one refused, it reads that user's record, releases its own `0x101` and `0x2`, and fails with 3734
+naming the record's security and computer names. Granted (the byte held is not a connected user's), it lets it go and
+starts again from the whole of group 5 — ten rounds, then 3733, "an unknown user". With `0x10000600` held as well, it
+is refused that too and tries no group-5 byte: it locks and releases the group-6 byte of each user number with a
+record, highest down to 1, its own included. Another user's byte refused, it fails with 3734 naming that user; its own
+refused, it ends the round naming no one; none refused, the next round. Ten rounds, then 3733. `0x10000600` held alone
+blocks nothing: group 5 is granted and group 6 never tried. A user setting `Jet OLEDB:Connection Control` to 1 while
+another already bars takes and holds nothing and reports no error, so only the first setter bars connections.
 
 On opening, ACE first tries the whole of group 0 (`0x10000001`, 255 bytes), which succeeds only when the user is
 alone, and releases it. A later user is refused there, refused on `0x100` (255 bytes), `0x100` and `0x1`, then
@@ -214,7 +226,8 @@ Region names are the Jet development team's own, from `docs/JetWhitePapers_UPDAT
 
 Things the tool deliberately reports rather than explains, pending experiments:
 
-- **What region 1 group 5 is for.** Every user locks and releases it on connecting; nothing else is known.
+- **What region 1 group 6 is for.** It is tried only by a user connection control refused; what holds it in ACE is
+  not known.
 - **The commit-slot values.** What a user writes to its page-0 commit slot, and when, is not decoded here.
 - **Row-level locking mode.** How, or whether, locks are placed per row in that mode is not measured: the layout
   above is the page-level one.

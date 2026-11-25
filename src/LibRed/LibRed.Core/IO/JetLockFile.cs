@@ -91,6 +91,17 @@ internal sealed class JetLockFile : IDisposable
         return RandomAccess.Read(_handle, bytes, offset);
     }
 
+    /// <summary>The lock file's length in bytes: <see cref="JetLockLayout.UserRecordSize"/> for each user number
+    /// that has a record in it.</summary>
+    public long Length
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+            return RandomAccess.GetLength(_handle);
+        }
+    }
+
     /// <summary>Tries to lock <paramref name="length"/> bytes at <paramref name="offset"/> exclusively, without
     /// waiting.</summary>
     /// <returns>True when the lock was taken; false when another lock on those bytes conflicts with it.</returns>

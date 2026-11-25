@@ -23,9 +23,6 @@ public static class LockDecoder
     /// </summary>
     private static readonly JetFormatBase PageZeroFormat = JetFormatBase.FromVersionByte((byte)JetVersion.Version4);
 
-    /// <summary>The group of region 1 every user locks and releases on connecting; what it is for is not known.</summary>
-    private const int UnknownUserGroup = 5;
-
     private static string RegionName(JetLockRegion region)
         => region switch
         {
@@ -55,9 +52,11 @@ public static class LockDecoder
         string mark = exclusive == false ? "  !! OS-SHARED lock: ACE takes none" : "";
 
         // Region 1 is not page-based: groups of 256 bytes, one byte per user. A connected user holds its byte in
-        // group 0 and its byte in group 1 (one lower) for its whole session; every user also locks and releases the
-        // whole of group 5, whose meaning is unknown. A range over several bytes is a presence probe or the first
-        // attempt on open: it succeeds only when nobody else holds a byte in it.
+        // group 0 and its byte in group 1 (one lower) for its whole session. Group 5 is connection control: a user
+        // barring new connections holds its own byte there, and every user connecting tries the whole group; group 6
+        // is tried only by a user group 5 refused, and what it is for is not known. A range over several bytes of
+        // group 0 or 1 is a presence probe or the first attempt on open: it succeeds only when nobody else holds a byte
+        // in it.
         if (a.Region == JetLockRegion.User)
         {
             long group = a.Window;
@@ -68,7 +67,16 @@ public static class LockDecoder
                 (JetLockLayout.SessionGroup, _, { } user) => $"group 1  session byte, user {user}",
                 (JetLockLayout.UserGroup or JetLockLayout.SessionGroup, > 1, _)
                     => $"group {group}  bytes {slot}..{slot + (length ?? 1) - 1}: presence probe over several users' bytes",
-                (UnknownUserGroup, _, _) => $"group 5  bytes {slot}..{slot + (length ?? 1) - 1}: meaning unknown",
+                (JetLockLayout.ConnectionControlGroup, JetLockLayout.UserGroupSize, _) when slot == 0
+                    => "group 5  connection control, whole group: is anyone barring new connections?",
+                (JetLockLayout.ConnectionControlGroup, _, { } user)
+                    => $"group 5  connection control, user {user} byte (held while user {user} bars new connections)",
+                (JetLockLayout.ConnectionControlGroup, _, _)
+                    => $"group 5  connection control, bytes {slot}..{slot + (length ?? 1) - 1}",
+                (JetLockLayout.ConnectionControlFollowUpGroup, _, { } user)
+                    => $"group 6  user {user} byte (tried after group 5 and group 6 byte 0 refused; meaning unknown)",
+                (JetLockLayout.ConnectionControlFollowUpGroup, 1, _) when slot == 0
+                    => "group 6  byte 0 (tried after group 5 refused; meaning unknown)",
                 _ => $"group {group}  byte {slot}",
             };
 

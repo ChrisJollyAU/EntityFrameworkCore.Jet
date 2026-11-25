@@ -31,7 +31,8 @@ internal sealed class JetUserRegistration : IDisposable
     public const string CurrentlyLockedMessage = "Could not update; currently locked.";
 
     /// <summary>ACE's error 3624, for a read of a chained long value refused its shared byte on the chain's first page
-    /// once the retries are spent (measured, locking.md §7).</summary>
+    /// once the retries are spent, and for a child row's foreign-key check refused its shared byte on the parent's index
+    /// page (measured, locking.md §7).</summary>
     public const string CouldNotReadMessage = "Could not read the record; currently locked by another user.";
 
     /// <summary>ACE's error 3202, for an <c>UPDATE</c> replacing a chained long value refused the exclusive lock on the
@@ -41,7 +42,9 @@ internal sealed class JetUserRegistration : IDisposable
     // ACE's retry of a refused lock: 21 attempts in all, about 108 ms apart (measured, locking.md §7); a long-value read
     // makes three such rounds back to back, 63 attempts (measured). The delay is the sleep between attempts; ACE's
     // measured spacing includes its own work between them.
-    // A table's read byte refused — another user changing its design — is retried two rounds, about 4.4 s (measured).
+    // A table's read byte refused — another user changing its design — is retried two rounds, about 4.4 s, when the
+    // statement opens the table for reading (a SELECT, an UPDATE, a DELETE), and one when it opens it for writing (an
+    // INSERT) (measured: 42 attempts and 21).
     private const int LockAttempts = 21;
     private const int LongValueReadAttempts = 3 * LockAttempts;
     private const int TableReadAttempts = 2 * LockAttempts;
@@ -72,6 +75,9 @@ internal sealed class JetUserRegistration : IDisposable
     /// open would trip over — where it cannot: off Windows, for an extension Jet/ACE does not lock, when the lock
     /// file cannot be created or opened (a read-only directory, say), and when every user number is taken. What ACE
     /// does in the last two cases is not measured; this continues unregistered rather than refusing the open.</summary>
+    /// <exception cref="IOException">Another user has barred new connections (connection control,
+    /// <see cref="PassConnectionControl"/>): ACE's 3734 naming that user from its record, or 3733 when no connected
+    /// user is found holding the bar. The open is refused, with this connection's bytes let go first.</exception>
     public static JetUserRegistration? Connect(string databasePath)
     {
         if (!OperatingSystem.IsWindows()) return null;
@@ -82,9 +88,12 @@ internal sealed class JetUserRegistration : IDisposable
         try { lockFile = JetLockFile.Open(lockFilePath, createIfMissing: true); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
 
+        string refusal;
         try
         {
-            if (TakeUserNumber(lockFile) is not { } user)
+            // The numbers below the one taken whose group-0 byte was refused on the way: the users found connected.
+            Span<bool> connected = stackalloc bool[JetLockLayout.MaxUserNumber + 1];
+            if (TakeUserNumber(lockFile, connected) is not { } user)
             {
                 lockFile.Dispose();
                 return null;
@@ -100,22 +109,34 @@ internal sealed class JetUserRegistration : IDisposable
             if (lockFile.Read(offset, present) != record.Length || !present.SequenceEqual(record))
                 lockFile.Write(offset, record);
 
-            long connect = JetLockLayout.UserGroupStart(JetLockLayout.ConnectGroup);
-            if (lockFile.TryLock(connect, JetLockLayout.UserGroupSize))
-                lockFile.Unlock(connect, JetLockLayout.UserGroupSize);
+            // One of the process's connections at a time: another's momentary hold of the whole of group 5 covers its
+            // own byte there, and would read as a bar.
+            string? refused;
+            lock (ConnectionControlGate) refused = PassConnectionControl(lockFile, user, connected);
+            if (refused is null)
+                return new JetUserRegistration(lockFile, lockFilePath, user);
 
-            return new JetUserRegistration(lockFile, lockFilePath, user);
+            // Refused: ACE lets its session byte go, then its user byte, and leaves its record (measured).
+            lockFile.Unlock(JetLockLayout.SessionByte(user), 1);
+            lockFile.Unlock(JetLockLayout.UserByte(user), 1);
+            refusal = refused;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
             lockFile.Dispose();   // releases whatever it took
             return null;
         }
+
+        // The lock file is not deleted: whoever holds the bar holds it through a handle of its own, which refuses the
+        // delete.
+        lockFile.Dispose();
+        throw new IOException(refusal);
     }
 
     /// <summary>ACE's handshake: the whole of group 0 first, and alone, user 1; otherwise the whole of group 1, then
-    /// each number from 1 in turn — its session byte, then its user byte — until both are taken.</summary>
-    private static int? TakeUserNumber(JetLockFile lockFile)
+    /// each number from 1 in turn — its session byte, then its user byte — until both are taken. Each number whose
+    /// user byte was refused on the way is marked in <paramref name="connected"/>.</summary>
+    private static int? TakeUserNumber(JetLockFile lockFile, Span<bool> connected)
     {
         long users = JetLockLayout.UserByte(1);
         long sessions = JetLockLayout.SessionByte(1);
@@ -124,7 +145,7 @@ internal sealed class JetUserRegistration : IDisposable
         if (lockFile.TryLock(users, all))
         {
             lockFile.Unlock(users, all);
-            if (TryTake(lockFile, 1)) return 1;
+            if (TryTake(lockFile, 1, connected)) return 1;
         }
         else if (lockFile.TryLock(sessions, all))
         {
@@ -133,20 +154,108 @@ internal sealed class JetUserRegistration : IDisposable
         }
 
         for (int user = 1; user <= all; user++)
-            if (TryTake(lockFile, user)) return user;
+            if (TryTake(lockFile, user, connected)) return user;
         return null;
     }
 
     // Both bytes are tried even when the first is refused, as ACE tries them; a number is taken only with both.
-    private static bool TryTake(JetLockFile lockFile, int user)
+    private static bool TryTake(JetLockFile lockFile, int user, Span<bool> connected)
     {
         bool session = lockFile.TryLock(JetLockLayout.SessionByte(user), 1);
-        bool connected = lockFile.TryLock(JetLockLayout.UserByte(user), 1);
-        if (session && connected) return true;
+        bool userByte = lockFile.TryLock(JetLockLayout.UserByte(user), 1);
+        if (session && userByte) return true;
         if (session) lockFile.Unlock(JetLockLayout.SessionByte(user), 1);
-        if (connected) lockFile.Unlock(JetLockLayout.UserByte(user), 1);
+        if (userByte) lockFile.Unlock(JetLockLayout.UserByte(user), 1);
+        else connected[user] = true;
         return false;
     }
+
+    // A connecting user's tries of connection control, in all, before it gives up (measured: 10).
+    private const int ConnectionControlRounds = 10;
+
+    private static readonly Lock ConnectionControlGate = new();
+
+    /// <summary>ACE's connection-control check, made once the user has its number and has written its record
+    /// (locking.md §3): the whole of group 5 granted — nobody bars new connections — is let go, and the user is
+    /// connected; returns null. Refused, it tries byte 0 of group 6. Granted, that is let go and each other connected
+    /// user's group-5 byte is tried in turn: the first refused names the user barring connections, and the refusal is
+    /// ACE's 3734 with the names in that user's record; one granted is let go. Refused byte 0, the group-6 byte of
+    /// each user number that has a record in the lock file is tried from the highest down to 1, the user's own
+    /// included, each one granted being let go at once: a refused byte of another user is the refusal, ACE's 3734
+    /// naming that user from its record, and a refused byte of the user's own ends the round naming no one. Either way,
+    /// with no holder found, it starts again from the whole of group 5, ten rounds in all, and then the refusal is
+    /// ACE's 3733, an unknown user. No round waits for the next.</summary>
+    /// <remarks>Group 5's walk is measured as far as its first byte: with byte 0 of group 6 granted, the first byte
+    /// tried is that of the lowest connected user, whether or not the newcomer is user 3 and other users are
+    /// connected, and it was refused in every such case. The order beyond it with several users barring, whether the
+    /// newcomer's own byte is tried, whether the walk covers every record or only the connected users, and which
+    /// users a newcomer counts as connected when its own number is not the highest (here: those its search for a
+    /// number was refused below its own), are not measured. Group 6's walk is measured with one to three records in
+    /// the file.</remarks>
+    private static string? PassConnectionControl(JetLockFile lockFile, int user, ReadOnlySpan<bool> connected)
+    {
+        long control = JetLockLayout.UserGroupStart(JetLockLayout.ConnectionControlGroup);
+        long followUp = JetLockLayout.UserGroupStart(JetLockLayout.ConnectionControlFollowUpGroup);
+
+        for (int round = 0; round < ConnectionControlRounds; round++)
+        {
+            if (lockFile.TryLock(control, JetLockLayout.UserGroupSize))
+            {
+                lockFile.Unlock(control, JetLockLayout.UserGroupSize);
+                return null;
+            }
+
+            if (lockFile.TryLock(followUp, 1))
+            {
+                lockFile.Unlock(followUp, 1);
+                for (int other = 1; other < connected.Length; other++)
+                {
+                    if (!connected[other]) continue;
+                    long bar = JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, other);
+                    if (!lockFile.TryLock(bar, 1)) return BarredByMessage(lockFile, other);
+                    lockFile.Unlock(bar, 1);
+                }
+            }
+            else
+            {
+                int records = (int)Math.Min(lockFile.Length / JetLockLayout.UserRecordSize, JetLockLayout.MaxUserNumber);
+                for (int other = records; other >= 1; other--)
+                {
+                    long held = JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlFollowUpGroup, other);
+                    if (lockFile.TryLock(held, 1))
+                    {
+                        lockFile.Unlock(held, 1);
+                        continue;
+                    }
+
+                    if (other == user) break;
+                    return BarredByMessage(lockFile, other);
+                }
+            }
+        }
+
+        return BarredByUnknownUserMessage;
+    }
+
+    // ACE's 3734, the names read from the barring user's record (measured: 'Admin' on machine 'DESKTOP-D1RBTPV' for a
+    // record holding them).
+    private static string BarredByMessage(JetLockFile lockFile, int holder)
+    {
+        Span<byte> record = stackalloc byte[JetLockLayout.UserRecordSize];
+        int read = lockFile.Read(JetLockLayout.UserRecordOffset(holder), record);
+        (string computerName, string securityName) = JetLockLayout.RecordNames(record[..read]);
+        return BarredByUserMessage(securityName, computerName);
+    }
+
+    /// <summary>ACE's error 3734, for an open refused because the connected user named holds the database barred to
+    /// new connections — connection control (measured, locking.md §7).</summary>
+    public static string BarredByUserMessage(string securityName, string computerName) =>
+        $"The database has been placed in a state by user '{securityName}' on machine '{computerName}' that prevents it from being opened or locked.";
+
+    /// <summary>ACE's error 3733, for an open refused by connection control when no connected user is found holding
+    /// it (measured, locking.md §7).</summary>
+    public const string BarredByUnknownUserMessage =
+        "The database has been placed in a state by an unknown user that prevents it from being opened or locked.";
 
     /// <summary>ACE's error 3211, for a table lock refused once the retries are spent (measured for <c>ALTER
     /// TABLE</c> and <c>CREATE INDEX</c>, locking.md §7).</summary>
@@ -162,11 +271,11 @@ internal sealed class JetUserRegistration : IDisposable
     /// <summary>Takes this user's lock on <paramref name="page"/>'s window in <paramref name="region"/> for one more
     /// holder in the connection, for <paramref name="purpose"/> (locking.md §2, §4): <paramref name="exclusive"/>, or
     /// the shared byte. A lock another user holds refuses it, and it is retried as ACE retries it — 21 attempts, 100 ms
-    /// apart; 63 for a long-value read, 42 for a table's read byte — and then refused with ACE's outcome for the
-    /// purpose: an <see cref="InvalidOperationException"/> with 3218 for a page write, 3624 for a long-value read, 3202
-    /// for an <c>UPDATE</c> replacing a chained long value, for a table 3211 naming <paramref name="table"/> — 3008
-    /// when it is its read byte that is refused; for a <c>DELETE</c> removing a chained long value, no exception — the
-    /// caller goes ahead without the lock.</summary>
+    /// apart; 63 for a long-value read, 42 for the read byte of a table opened for reading — and then refused with
+    /// ACE's outcome for the purpose: an <see cref="InvalidOperationException"/> with 3218 for a page write, 3624 for a
+    /// long-value read and for a foreign key's referenced key, 3202 for an <c>UPDATE</c> replacing a chained long
+    /// value, for a table 3211 naming <paramref name="table"/> — 3008 when it is its read byte that is refused; for a
+    /// <c>DELETE</c> removing a chained long value, no exception — the caller goes ahead without the lock.</summary>
     /// <returns>True when this call took an operating-system lock; false when the connection already held the lock and
     /// the caller has only joined it — it has then been held throughout, and no other user can have taken it
     /// meanwhile; null when <see cref="JetLockPurpose.LongValueRemove"/> was refused, and nothing is held.</returns>
@@ -184,8 +293,13 @@ internal sealed class JetUserRegistration : IDisposable
     /// </remarks>
     public bool? Lock(JetLockRegion region, int page, bool exclusive, JetLockPurpose purpose, string? table = null)
     {
-        bool tableRead = purpose == JetLockPurpose.Table && region == JetLockRegion.TableRead && !exclusive;
-        int attempts = purpose == JetLockPurpose.LongValueRead ? LongValueReadAttempts : tableRead ? TableReadAttempts : LockAttempts;
+        bool tableRead = (purpose is JetLockPurpose.Table or JetLockPurpose.TableRead) && region == JetLockRegion.TableRead && !exclusive;
+        int attempts = purpose switch
+        {
+            JetLockPurpose.LongValueRead => LongValueReadAttempts,
+            JetLockPurpose.TableRead => TableReadAttempts,
+            _ => LockAttempts,
+        };
         for (int attempt = 1; ; attempt++)
         {
             lock (_heldGate)
@@ -201,11 +315,11 @@ internal sealed class JetUserRegistration : IDisposable
                 return purpose switch
                 {
                     JetLockPurpose.LongValueRemove => null,
-                    JetLockPurpose.Table when tableRead => throw new InvalidOperationException(
+                    _ when tableRead => throw new InvalidOperationException(
                         TableOpenedExclusivelyMessage(table ?? throw new ArgumentNullException(nameof(table)))),
                     JetLockPurpose.Table => throw new InvalidOperationException(
                         TableInUseMessage(table ?? throw new ArgumentNullException(nameof(table)))),
-                    JetLockPurpose.LongValueRead => throw new InvalidOperationException(CouldNotReadMessage),
+                    JetLockPurpose.LongValueRead or JetLockPurpose.ReferencedKey => throw new InvalidOperationException(CouldNotReadMessage),
                     JetLockPurpose.LongValueReplace => throw new InvalidOperationException(CouldNotSaveMessage),
                     _ => throw new InvalidOperationException(CurrentlyLockedMessage),
                 };
@@ -370,8 +484,13 @@ internal enum JetLockPurpose
     /// <summary>A page about to be written: region 2, exclusive; refused with 3218.</summary>
     PageWrite,
 
-    /// <summary>A table read, write or design lock: regions 4–6; refused with 3211 naming the table.</summary>
+    /// <summary>A table read, write or design lock: regions 4–6; refused with 3211 naming the table — with 3008 when it
+    /// is the read byte of a table opened for writing (an <c>INSERT</c>'s target), after one round of retries.</summary>
     Table,
+
+    /// <summary>The read byte of a table opened for reading — a query's, an <c>UPDATE</c>'s or a <c>DELETE</c>'s tables,
+    /// which ACE opens twice: region 4, shared; refused with 3008 naming the table after two rounds of retries.</summary>
+    TableRead,
 
     /// <summary>A chained long value read: region 2, the shared byte on the chain's first page; refused with 3624 after
     /// three rounds of retries.</summary>
@@ -384,4 +503,8 @@ internal enum JetLockPurpose
     /// <summary>A chained long value a <c>DELETE</c> removes: region 2, exclusive on the chain's first page; once
     /// refused, the row is deleted without it and the chain is left where it is.</summary>
     LongValueRemove,
+
+    /// <summary>The key a foreign key references, found for a child row's check: region 2, the shared byte on the
+    /// parent's index page holding it; refused with 3624 after one round of retries.</summary>
+    ReferencedKey,
 }

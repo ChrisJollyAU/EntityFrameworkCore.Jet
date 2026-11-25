@@ -40,7 +40,11 @@ Status: **draft / accepted direction** · Date: 2026-07-18
 > condition from either end, so a condition registered under a key the transaction already holds (the same
 > relationship and key) is held once. `ALTER TABLE … ADD FOREIGN KEY` reads the same way, checking every existing child row against its
 > parent, so it registers one condition for the relationship: while it survives, every child row still has its
-> parent. ACE gets the same guarantee by holding both tables exclusively until the transaction ends. A savepoint rollback drops the conditions recorded after it, and their keys, along with the writes that
+> parent. ACE gets the same guarantee by holding both tables exclusively until the transaction ends. Between Jet
+> users the child's check is met earlier, as ACE meets it: the check takes the shared byte on the parent's index
+> page holding the key and holds it to the transaction's end, so the other connection's `DELETE` of the parent is
+> refused at the statement with 3218, and the child's `INSERT` beside an uncommitted parent `DELETE` with 3624
+> (locking.md §4); the read set stays, for connections that take no locks. A savepoint rollback drops the conditions recorded after it, and their keys, along with the writes that
 > needed them.
 > Schema-changing commits also advance a shared per-file catalog generation; other open
 > connections invalidate their parsed table/relationship/view caches on the next catalog access, while ordinary

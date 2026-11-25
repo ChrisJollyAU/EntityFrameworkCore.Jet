@@ -710,7 +710,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
     /// whether an UPDATE replaced the value or a DELETE removed its row. A packed value's page an UPDATE or a DELETE
     /// empties is held until close (<paramref name="releaseAtClose"/>, see <see cref="PageAllocator.Release"/>).
     /// A chained value is given back under this user's exclusive lock on its first page, for
-    /// <paramref name="purpose"/> (<see cref="PageChannel.LockLongValue"/>).
+    /// <paramref name="purpose"/> (<see cref="PageChannel.LockPage"/>).
     /// </remarks>
     private void FreeLongValue(ColumnDef column, byte[] descriptor, bool releaseAtClose, JetLockPurpose purpose)
     {
@@ -735,7 +735,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         // The chain's first page is locked exclusively before the chain is read and given back, as ACE's writer locks it
         // (measured): another user reading the value refuses an UPDATE with 3202, and a DELETE goes ahead without it and
         // leaves the chain where it is — still allocated, still the column's — as ACE's does (locking.md §4).
-        if (!_channel.LockLongValue(valuePage, purpose, out bool alone)) return;
+        if (!_channel.LockPage(valuePage, purpose, out bool alone)) return;
         try
         {
             var reader = new LongValueStore(_channel);
@@ -756,8 +756,8 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         }
         finally
         {
-            // Outside a statement the lock was this write's alone, and goes with it (PageChannel.LockLongValue).
-            if (alone) _channel.UnlockLongValue(valuePage, exclusive: true);
+            // Outside a statement the lock was this write's alone, and goes with it (PageChannel.LockPage).
+            if (alone) _channel.UnlockPage(valuePage, exclusive: true);
         }
     }
 

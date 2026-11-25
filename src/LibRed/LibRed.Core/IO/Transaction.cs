@@ -29,7 +29,7 @@ public sealed class Transaction
         public int StartReleaseCount;
         // How many read dependencies the transaction had recorded when this frame opened.
         public int StartDependencyCount;
-        // How many table locks the transaction held when this frame opened.
+        // How many table and referenced-key locks the transaction held when this frame opened.
         public int StartTableLockCount;
         public PageAllocator.AllocationState? Allocation;
     }
@@ -74,8 +74,9 @@ public sealed class Transaction
         return new Savepoint(_frames.Count - 1);
     }
 
-    /// <summary>How many table locks the transaction held when <paramref name="sp"/> was created — the count to let
-    /// go back to when rolling back to it, since the locks taken after it were taken for undone work.</summary>
+    /// <summary>How many table and referenced-key locks the transaction held when <paramref name="sp"/> was created —
+    /// those its earlier statements took (<c>PageChannel.InUseByThisConnection</c>); a rollback to it lets none of the
+    /// later ones go.</summary>
     internal int TableLockCountAt(Savepoint sp)
     {
         ValidateFrame(sp.Index);

@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Text;
 using LibRed.Formats;
 using LibRed.IO;
 
@@ -308,21 +307,18 @@ public static class LiveLocks
             return "(past the end of the lock file)";
         }
 
-        ReadOnlySpan<byte> record = records.AsSpan((int)start, JetLockLayout.UserRecordSize);
-        return $"computer \"{Text(record[..JetLockLayout.RecordNameSize])}\", security \"{Text(record[JetLockLayout.RecordNameSize..])}\"";
+        (string computer, string security) =
+            JetLockLayout.RecordNames(records.AsSpan((int)start, JetLockLayout.UserRecordSize));
+        return $"computer \"{Printable(computer)}\", security \"{Printable(security)}\"";
     }
 
-    // Each name is single-byte text ended by a NUL and padded with spaces (JetLockLayout.UserRecord); anything
-    // unprintable is shown as '.', so a record that is not text is visible.
-    private static string Text(ReadOnlySpan<byte> name)
-    {
-        int end = name.IndexOf((byte)0);
-        var text = new StringBuilder();
-        foreach (byte b in end < 0 ? name : name[..end])
+    // Anything unprintable is shown as '.', so a record that is not text is visible.
+    private static string Printable(string name)
+        => string.Create(name.Length, name, static (text, source) =>
         {
-            text.Append(b is >= 0x20 and < 0x7F ? (char)b : '.');
-        }
-
-        return text.ToString();
-    }
+            for (var i = 0; i < source.Length; i++)
+            {
+                text[i] = source[i] is >= ' ' and < (char)0x7F ? source[i] : '.';
+            }
+        });
 }

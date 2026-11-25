@@ -287,6 +287,48 @@ public class TableLockAccessTests
         finally { TemporaryDatabase.Delete(path); }
     }
 
+    // ACE's ALTER TABLE in an open transaction holds the table for its design change, and LibRed is refused its read
+    // byte with 3008 — an INSERT after one round of retries, a SELECT after two, as ACE's own INSERT and SELECT beside
+    // another ACE user's design lock are (measured: 21 attempts, about 2.2 s; 42, about 4.4 s).
+    [Fact]
+    public void A_table_ACE_alters_in_a_transaction_refuses_LibReds_INSERT_after_one_round_and_SELECT_after_two()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-tablelock-ace-");
+        try
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(database);
+            CreateRows(engine, 2);
+
+            using OleDbConnection ace = AceTestDatabase.Open(path);
+            using (OleDbTransaction transaction = ace.BeginTransaction())
+            {
+                Exec(ace, "ALTER TABLE T ADD COLUMN C INTEGER", transaction);
+
+                var wait = Stopwatch.StartNew();
+                var refused = Assert.Throws<InvalidOperationException>(() => engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (3, 'row3')"));
+                wait.Stop();
+                Assert.Equal(OpenedExclusively("T"), refused.Message);
+                Assert.InRange(wait.ElapsedMilliseconds, 1900, 3800);
+
+                wait.Restart();
+                refused = Assert.Throws<InvalidOperationException>(() => engine.ExecuteQuery("SELECT A FROM T").Rows.ToList());
+                wait.Stop();
+                Assert.Equal(OpenedExclusively("T"), refused.Message);
+                Assert.InRange(wait.ElapsedMilliseconds, 3900, 12_000);
+
+                transaction.Commit();
+            }
+
+            Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (3, 'row3')"));
+            Assert.Equal(["Id", "A", "C"], engine.ExecuteQuery("SELECT * FROM T").ColumnNames);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    private static string OpenedExclusively(string table) =>
+        $"The table '{table}' is already opened exclusively by another user, or it is already open through the user interface and cannot be manipulated programmatically.";
+
     private static void CreateRows(QueryEngine engine, int count)
     {
         engine.ExecuteNonQuery("CREATE TABLE T (Id INTEGER PRIMARY KEY, A TEXT(20))");

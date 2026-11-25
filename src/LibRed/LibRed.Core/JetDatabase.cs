@@ -763,13 +763,17 @@ public sealed class JetDatabase : IDisposable
     /// outside both, the table is locked for each read and enumeration of its rows instead
     /// (<see cref="Table.LockForRead"/>), and here only for the open itself. The catalog's own reads of its tables do
     /// not come here and take none.</remarks>
-    public Table OpenTable(string name)
+    /// <param name="name">The table's name.</param>
+    /// <param name="forWriting">The table is an <c>INSERT</c>'s target, which ACE opens once, for writing — its
+    /// table-write locks taken here, inside a transaction, and its read byte, refused by another user's design change,
+    /// retried one round rather than the two of a table opened for reading (measured).</param>
+    public Table OpenTable(string name, bool forWriting = false)
     {
         TableDefinition def = Catalog.FindTable(name)
             ?? throw new ArgumentException(
                 $"The Microsoft Access database engine cannot find the input table or query '{name}'. Make sure it "
                 + "exists and that its name is spelled correctly.", nameof(name));
-        _channel.LockTable(def.DefinitionPage, def.Name, TableUse.Read)?.Dispose();
+        _channel.LockTable(def.DefinitionPage, def.Name, forWriting ? TableUse.Write : TableUse.Read)?.Dispose();
         return new Table(_channel, def, Catalog, locked: true);
     }
 

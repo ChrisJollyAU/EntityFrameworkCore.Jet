@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace LibRed.IO;
 
 /// <summary>
@@ -48,7 +50,9 @@ internal enum JetLockRegion
 /// <para>Region <see cref="JetLockRegion.User"/> is not page-based: it is laid out in groups of
 /// <see cref="UserGroupSize"/> bytes. A connected user holds its byte in group 0 (<see cref="UserByte"/>, the user
 /// array the white paper documents) and its byte in group 1 (<see cref="SessionByte"/>) for the whole session. Group
-/// 5 is locked and released by every user on connecting; what it is for is not known.</para>
+/// 5 is connection control (<see cref="ConnectionControlGroup"/>): a user that bars new connections holds its byte
+/// there, and every user connecting tries the whole group. Group 6 (<see cref="ConnectionControlFollowUpGroup"/>) is
+/// tried only by a user that group 5 refused.</para>
 /// <para>The locks lie far past the end of the lock file; nothing in it is really locked, the ranges are pure
 /// semaphores. Measured against ACE 16 over OLE DB with users 1 and 2 only (see <c>tools/JetLockTrace/README.md</c>).
 /// The upper bound of 255 users, and how row-level locking mode places its locks, are from the white paper and
@@ -80,9 +84,19 @@ internal static class JetLockLayout
     /// <c>n - 1</c>.</summary>
     public const int SessionGroup = 1;
 
-    /// <summary>The group of the <see cref="JetLockRegion.User"/> region that every user locks whole and releases
-    /// on connecting. What it is for is not known.</summary>
-    public const int ConnectGroup = 5;
+    /// <summary>The group of the <see cref="JetLockRegion.User"/> region that is connection control: user <c>n</c>
+    /// barring new connections (ACE's <c>Jet OLEDB:Connection Control</c> set to 1, "no new users") locks the whole
+    /// group, releases it, and holds byte <c>n</c> until it allows them again or closes (measured for user 1, which
+    /// holds <c>0x10000501</c>). Every user connecting tries
+    /// the whole group once it has its user number, and a refusal is what keeps it out
+    /// (<c>docs/format/locking.md</c> §3).</summary>
+    public const int ConnectionControlGroup = 5;
+
+    /// <summary>The group of the <see cref="JetLockRegion.User"/> region that a connecting user tries only when
+    /// <see cref="ConnectionControlGroup"/> has refused it: byte 0, and when that is refused too, the byte of each
+    /// user number that has a record in the lock file, from the highest down to 1, <c>n</c> for user <c>n</c>. What
+    /// the group is for, and what holds it in ACE, is not known.</summary>
+    public const int ConnectionControlFollowUpGroup = 6;
 
     /// <summary>The highest user number (the white paper's bound; only users 1 and 2 are measured). User numbers run
     /// from 1.</summary>
@@ -141,10 +155,18 @@ internal static class JetLockLayout
 
     /// <summary>The one byte in group <see cref="UserGroup"/> of the <see cref="JetLockRegion.User"/> region that
     /// marks <paramref name="user"/> as connected.</summary>
-    public static long UserByte(int user)
+    public static long UserByte(int user) => UserGroupByte(UserGroup, user);
+
+    /// <summary>The byte of <paramref name="user"/> in <paramref name="group"/> of the <see cref="JetLockRegion.User"/>
+    /// region: byte <c>n</c> for user <c>n</c>, as in <see cref="UserGroup"/>, <see cref="ConnectionControlGroup"/> and
+    /// <see cref="ConnectionControlFollowUpGroup"/> — not in <see cref="SessionGroup"/>, which is one lower
+    /// (<see cref="SessionByte"/>).</summary>
+    public static long UserGroupByte(int group, int user)
     {
         ThrowIfNotUser(user);
-        return UserGroupStart(UserGroup) + user;
+        if (group == SessionGroup)
+            throw new ArgumentOutOfRangeException(nameof(group), "A user's session byte is SessionByte.");
+        return UserGroupStart(group) + user;
     }
 
     /// <summary>The offset of byte 0 of <paramref name="group"/> in the <see cref="JetLockRegion.User"/>
@@ -193,6 +215,20 @@ internal static class JetLockLayout
         field[length] = 0;
     }
 
+    /// <summary>The computer name and the security name in a user's record as <see cref="UserRecord"/> lays it out,
+    /// <paramref name="record"/> being its <see cref="UserRecordSize"/> bytes, or fewer where the lock file ends: each
+    /// field up to its NUL (the whole field when it has none), byte for character, and empty where the file does not
+    /// reach the field. What ACE writes for a character outside ASCII is not measured.</summary>
+    public static (string ComputerName, string SecurityName) RecordNames(ReadOnlySpan<byte> record)
+        => (RecordName(record[..Math.Min(record.Length, RecordNameSize)]),
+            RecordName(record.Length > RecordNameSize ? record[RecordNameSize..Math.Min(record.Length, UserRecordSize)] : []));
+
+    private static string RecordName(ReadOnlySpan<byte> field)
+    {
+        int end = field.IndexOf((byte)0);
+        return Encoding.Latin1.GetString(end < 0 ? field : field[..end]);
+    }
+
     /// <summary>The user whose record starts at <paramref name="offset"/> of the lock file, or null when the offset is
     /// not the start of a record.</summary>
     public static int? UserAtRecordOffset(long offset)
@@ -201,7 +237,7 @@ internal static class JetLockLayout
             : null;
 
     /// <summary>Splits a lock of <paramref name="length"/> bytes (null when unknown) at <paramref name="offset"/>
-    /// back into the fields <see cref="SharedByte"/>, <see cref="ExclusiveRange"/>, <see cref="UserByte"/> and
+    /// back into the fields <see cref="SharedByte"/>, <see cref="ExclusiveRange"/>, <see cref="UserGroupByte"/> and
     /// <see cref="SessionByte"/> pack. Any offset decodes; a lock that has none of the known shapes leaves
     /// <see cref="JetLockAddress.User"/> null.</summary>
     public static JetLockAddress Decode(long offset, long? length)
@@ -214,7 +250,12 @@ internal static class JetLockLayout
             long group = withinRegion / UserGroupSize;
             long slot = withinRegion % UserGroupSize;
             long user = length is null or 1
-                ? group switch { UserGroup => slot, SessionGroup => slot + 1, _ => 0 }
+                ? group switch
+                {
+                    UserGroup or ConnectionControlGroup or ConnectionControlFollowUpGroup => slot,
+                    SessionGroup => slot + 1,
+                    _ => 0,
+                }
                 : 0;
             return new JetLockAddress(region, withinRegion, group, slot, IsUser(user) ? (int)user : null);
         }
@@ -247,7 +288,8 @@ internal static class JetLockLayout
 /// within the group.</param>
 /// <param name="User">The user the lock names: for a one-byte lock on a page, the user whose byte it is; for an
 /// exclusive page lock, the user its end names; in the <see cref="JetLockRegion.User"/> region, for a one-byte (or
-/// unknown-length) lock in <see cref="JetLockLayout.UserGroup"/> or <see cref="JetLockLayout.SessionGroup"/>, that
-/// user. Null for any other shape.</param>
+/// unknown-length) lock in <see cref="JetLockLayout.UserGroup"/>, <see cref="JetLockLayout.SessionGroup"/>,
+/// <see cref="JetLockLayout.ConnectionControlGroup"/> or <see cref="JetLockLayout.ConnectionControlFollowUpGroup"/>,
+/// that user. Null for any other shape.</param>
 internal readonly record struct JetLockAddress(
     JetLockRegion Region, long WithinRegion, long Window, long ByteInWindow, int? User);

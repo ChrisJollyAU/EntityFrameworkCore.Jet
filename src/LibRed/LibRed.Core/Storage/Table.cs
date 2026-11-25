@@ -72,9 +72,12 @@ public sealed class Table
     /// an index key is lossy (text folds case and trailing spaces), so the seek only narrows.</summary>
     /// <remarks>The key has to be in each column's own kind already, because an index answers only in its
     /// column's kind; a caller that cannot promise that uses <see cref="RowsWhere"/>. A null in the key scans,
-    /// since how an index keys a null is not the question a key comparison asks.</remarks>
+    /// since how an index keys a null is not the question a key comparison asks.
+    /// <para><paramref name="referencedKey"/>: the key is one a foreign key references, sought for a child row's
+    /// check, and the index page it is found on is locked as ACE locks it, held for the transaction
+    /// (<see cref="IndexTree.Seek"/>).</para></remarks>
     public IEnumerable<(RowId Id, object?[] Values)> RowsWithKey(
-        int[] columns, object?[] key, Func<object?[], bool> match)
+        int[] columns, object?[] key, Func<object?[], bool> match, bool referencedKey = false)
     {
         IndexDef? index = key.Any(k => k is null) ? null : Definition.Indexes.FirstOrDefault(i =>
             i.RootPage > 0 && i.Columns.Count == columns.Length && i.Columns.All(c => columns.Contains(c.Column.Index)
@@ -86,7 +89,7 @@ public sealed class Table
         var seekKey = new object?[Definition.Columns.Count];
         for (int i = 0; i < columns.Length; i++)
             seekKey[columns[i]] = key[i];
-        return SeekRowsWithIds(index, seekKey).Where(r => match(r.Values));
+        return SeekRowsWithIds(index, seekKey, referencedKey: referencedKey).Where(r => match(r.Values));
     }
 
     /// <summary>A row decoder over this table's columns — reuse one across a seek/scan rather than allocating
@@ -175,12 +178,13 @@ public sealed class Table
     /// <summary>Like <see cref="SeekRows"/> but yields each matching row together with its <see cref="RowId"/> —
     /// for an UPDATE/DELETE join that must know which physical row to rewrite/remove, not just its values.
     /// <paramref name="decode"/> is as for <see cref="Rows"/>: a row that is then written has to be read again
-    /// in full.</summary>
-    public IEnumerable<(RowId Id, object?[] Values)> SeekRowsWithIds(IndexDef index, object?[] values, bool[]? decode = null)
+    /// in full. <paramref name="referencedKey"/> is as for <see cref="RowsWithKey"/>.</summary>
+    public IEnumerable<(RowId Id, object?[] Values)> SeekRowsWithIds(IndexDef index, object?[] values, bool[]? decode = null,
+        bool referencedKey = false)
     {
         using HeldTableLocks? held = LockForRead();
         RowCodec decoder = SeekDecoder(decode);
-        foreach (RowId id in IndexReader.Seek(index, values))
+        foreach (RowId id in IndexReader.Seek(index, values, referencedKey))
             if (GetRow(id, decoder) is { } row)
                 yield return (id, row);
     }
