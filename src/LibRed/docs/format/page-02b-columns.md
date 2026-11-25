@@ -260,8 +260,10 @@ as 20 bytes of raw UTF-16LE.
 > every type DAO will create: `0` for a Memo result, `509` for Text at *any* requested size (10, 60 and 255
 > all give 509), `510` for Binary, and `39` for everything else including GUID — which, like Memo and Binary,
 > takes descriptor type `0x0A` Text, so only the length tells the three apart. Nothing moves these: not the
-> size requested, not the length of the expression. Because the requested size is discarded, ACE does **not**
-> truncate — a `Text(5)` calculated column stores and returns a much longer result in full.
+> size requested, not the length of the expression. The requested size is discarded — a `Text(5)` calculated
+> column stores a much longer result — but a Text result is cut to the 243 characters 509 bytes hold as UTF-16
+> past the 23-byte envelope, before compression ([page-02e](page-02e-calculated-columns.md)). A Memo result
+> is not cut.
 >
 > **A calculated Memo arrives through the long-value machinery.** ACE declares it `0x0A` Text with a
 > declared length of `0`, gives it a **long-value map entry**, and stores a long-value descriptor in the

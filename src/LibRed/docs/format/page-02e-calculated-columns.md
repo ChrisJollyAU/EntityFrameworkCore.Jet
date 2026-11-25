@@ -363,9 +363,14 @@ encoding to define: such an index can never be populated.
 
 **Declared length is a constant, and the requested size is discarded.** `39` for every value type, `509` for
 Text whatever size was asked for (10, 60 and 255 all give 509), `0` plus a long-value map for Memo. `39` is
-not a payload ceiling tied to any type — a calculated GUID lands on Text/39 as well. Because the requested
-size is not kept, **ACE does not truncate**: a `Text(5)` calculated column holding a much longer result
-stores and returns it in full, and LibRed already agrees byte for byte.
+not a payload ceiling tied to any type — a calculated GUID lands on Text/39 as well. The requested size is
+not kept, so a `Text(5)` calculated column stores a much longer result — but **a Text result is cut to 243
+characters**, what the 509 bytes hold as UTF-16 past the 23-byte envelope. ACE cuts before it compresses, so a
+result that compresses is cut too (300 `a` store as the 2-byte mark and 243 bytes; 300 `Ж` as 486 bytes), and
+it cuts without an error, on OLE DB and DAO writes alike (verified, ACE 2010 and Microsoft 365). A **Memo**
+result is not cut: 300 characters store and read back in full. A Text payload longer than 243 characters is a
+row ACE's OLE DB reader refuses (*"Multiple-step OLE DB operation generated errors"*), and DAO reads back
+only its first 243.
 
 **A zero-length payload means Null — except for text, where it means the empty string.** The two are the
 same bytes on disk, because an empty string also encodes to nothing, and ACE resolves the ambiguity by

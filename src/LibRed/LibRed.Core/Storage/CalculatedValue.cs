@@ -152,6 +152,11 @@ internal static class CalculatedValue
             case JetDataType.Text:
                 {
                     string text = Convert.ToString(value, culture) ?? "";
+                    // ACE cuts a calculated Text result (not a Memo) to the characters its declared length holds as
+                    // UTF-16 past the envelope — 243 under the constant 509 — before compressing, so a result that
+                    // compresses is cut too. A longer payload is a row ACE's OLE DB reader refuses.
+                    int fits = (column.Length - MinimumSize) / 2;
+                    if (!column.HasLongValueMap && text.Length > fits) text = text[..fits];
                     byte[] utf16 = System.Text.Encoding.Unicode.GetBytes(text);
                     if (column.HasLongValueMap) return utf16;        // a calculated Memo: never compressed
                     return Types.JetTypeCodec.TryCompressText(column, text, requireCapableFlag: false) ?? utf16;

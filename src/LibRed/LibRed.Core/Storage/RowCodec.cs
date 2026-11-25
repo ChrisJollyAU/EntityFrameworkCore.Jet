@@ -251,8 +251,8 @@ public sealed class RowCodec(IReadOnlyList<ColumnDef> columns, JetFormatBase for
         IReadOnlyCollection<int>? written = null)
     {
         // A calculated column is exempt from the declared-width check: its length field is a constant ACE
-        // writes (39 for a value type, 509 for any Text, whatever size was asked for), not a limit — a
-        // Text(5) calculated column stores a far longer result and ACE reads it back in full (§3.4a).
+        // writes (39 for a value type, 509 for any Text, whatever size was asked for), not the size asked for — a
+        // Text(5) calculated column stores up to 243 characters, which CalculatedValue.Encode cuts to (§3.4a).
         foreach (ColumnDef column in columns)
             if (!column.IsFixedLength && !column.IsCalculated && (written is null || written.Contains(column.Index))
                 && column.VariableIndex >= 0 && column.VariableIndex < varChunks.Count)

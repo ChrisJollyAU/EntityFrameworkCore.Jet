@@ -705,6 +705,63 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
         finally { TemporaryDatabase.Delete(path); }
     }
 
+    // ACE cuts a calculated Text result to 243 characters -- what the constant 509-byte declared length holds as
+    // UTF-16 past the 23-byte envelope -- and cuts a result that compresses too. LibRed once stored the whole
+    // result, a row ACE's OLE DB reader then refused. ACE writes row 1, LibRed row 2, and ACE reads both.
+    [Theory]
+    [InlineData(DbText, "a", 243)]
+    [InlineData(DbText, "Ж", 243)]
+    [InlineData(DbMemo, "a", 300)]
+    [InlineData(DbMemo, "Ж", 300)]
+    public void Stores_as_much_of_a_long_text_result_as_ace_does(int declaredType, string character, int expectedLength)
+    {
+        object? engine = CreateDbEngine();
+        Assert.SkipWhen(engine is null, "DAO is unavailable in this process; it authors the fixture.");
+
+        string path = TemporaryDatabase.CreatePath("calculated-long-text-");
+        try
+        {
+            CreateTable(engine!, path, "C", declaredType, declaredType == DbText ? 255 : 0, "String(300,[A])");
+            using (var connection = AceTestDatabase.Open(path))
+            {
+                using var insert = connection.CreateCommand();
+                insert.CommandText = $"INSERT INTO T_C (Id, Qty, Price, A) VALUES (1, 7, 1, '{character}')";
+                insert.ExecuteNonQuery();
+            }
+
+            using (var db = JetDatabase.Open(path, readOnly: false))
+            {
+                Table t = db.OpenTable("T_C");
+                var values = new object?[t.Definition.Columns.Count];
+                values[t.Definition.FindColumn("Id")!.Index] = 2;
+                values[t.Definition.FindColumn("Qty")!.Index] = 7;
+                values[t.Definition.FindColumn("Price")!.Index] = 1m;
+                values[t.Definition.FindColumn("A")!.Index] = character;
+                t.Insert(values);
+            }
+
+            var fromAce = new List<string>();
+            using (var connection = AceTestDatabase.Open(path))
+            {
+                using var select = connection.CreateCommand();
+                select.CommandText = "SELECT C FROM T_C ORDER BY Id";
+                using var reader = select.ExecuteReader();
+                while (reader.Read()) fromAce.Add(reader.GetString(0));
+            }
+
+            using var check = JetDatabase.Open(path, readOnly: true);
+            Table table = check.OpenTable("T_C");
+            int index = table.Definition.FindColumn("C")!.Index;
+            List<object?> fromLibRed = [.. table.Rows().Select(r => r[index])];
+
+            output.WriteLine($"ACE reads lengths {string.Join(", ", fromAce.Select(s => s.Length))}");
+            string expected = new(character[0], expectedLength);
+            Assert.Equal([expected, expected], fromAce);
+            Assert.Equal([expected, expected], fromLibRed);
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
     /// <summary>The raw stored slot for the calculated column of rows 1 and 2 — ACE's, then LibRed's.</summary>
     private static (byte[] Ace, byte[] LibRed) StoredEnvelopes(string path, string table, string column)
     {
