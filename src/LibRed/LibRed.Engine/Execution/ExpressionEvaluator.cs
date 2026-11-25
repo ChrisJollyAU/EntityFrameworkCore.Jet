@@ -742,13 +742,17 @@ internal sealed partial class ExpressionEvaluator(
     /// <summary>
     /// <c>=</c> or <c>&lt;&gt;</c> against the literal <c>True</c> or <c>False</c> tests the other side's truth
     /// rather than comparing it (verified vs ACE): a value that reads as 0 is False and anything else is True, so
-    /// <c>2 = True</c>, <c>'abc' = True</c> and <c>'' = True</c> are all True, while <c>'0' = False</c> is True.
+    /// <c>2 = True</c> and <c>0.0 = False</c> are True. Text is False only as the text "0", compared as text is, as a
+    /// GUID or binary value is (verified vs ACE 2010 and Microsoft 365: <c>'0' = False</c> and <c>'0 ' = False</c> are
+    /// True, <c>'0.0'</c>, <c>' 0'</c>, <c>'00'</c>, <c>'-0'</c> and <c>''</c> are not, and each is <c>= True</c>).
     /// Null for any other comparison.
     /// </summary>
     private bool? TruthTest(BinaryExpression b, object left, object right) =>
-        b.Right is LiteralExpression { Value: bool rightLiteral } ? AsBool(left) == rightLiteral
-        : b.Left is LiteralExpression { Value: bool leftLiteral } ? AsBool(right) == leftLiteral
+        b.Right is LiteralExpression { Value: bool rightLiteral } ? Truth(left) == rightLiteral
+        : b.Left is LiteralExpression { Value: bool leftLiteral } ? Truth(right) == leftLiteral
         : null;
+
+    private bool? Truth(object value) => value is string ? CompareValues(value, "0", Text) != 0 : AsBool(value);
 
     /// <summary>The order of a comparison operator's two operands. Two texts compare by collation key, as
     /// <see cref="CompareAsKinds"/> would compare them, with two shortcuts that change no answer: texts identical
@@ -805,6 +809,17 @@ internal sealed partial class ExpressionEvaluator(
     /// BETWEEN's bounds and IS [NOT] DISTINCT FROM compare through here.</summary>
     private int CompareAsKinds(Expression leftOperand, object left, Expression rightOperand, object right)
     {
+        // Text as written — a text column or written text — beside a number, date or Boolean that is not computed
+        // either — a column, a written number or True, an aggregate, an IIf choosing one — is ACE's
+        // type mismatch, whichever operator compares them (verified vs ACE 2010 and Microsoft 365: [q] = [a], 7 = '7',
+        // [a] < 10, [dt] = '2020-01-02', a Yes/No column beside a text column, MAX(q) = '7', [q] IN ('7'),
+        // [q] BETWEEN '1' AND '9', with an index or without). Text the statement computes beside it reads as a number.
+        var (text, textOperand, plain, plainOperand) = left is string
+            ? (left, leftOperand, right, rightOperand) : (right, rightOperand, left, leftOperand);
+        if (text is string && (IsNumeric(plain) || plain is DateTime)
+            && Written(textOperand) && Written(plainOperand))
+            throw new InvalidCastException("Data type mismatch in criteria expression.");
+
         (left, right) = ComparedBooleans(left, right);
         bool currencyOnLeft = CurrencyBeside(left, leftOperand, right, rightOperand);
         if (currencyOnLeft || CurrencyBeside(right, rightOperand, left, leftOperand))
@@ -824,19 +839,13 @@ internal sealed partial class ExpressionEvaluator(
             is var beside && (left is byte[] || right is byte[])
             && (beside.Number is decimal && IsCurrency(beside.NumberOperand)
                 || IsNumeric(beside.Number)
-                    && (beside.Number is not long && IsComputed(beside.NumberOperand) || beside.NumberOperand is ParameterExpression)))
+                    && (beside.Number is not long && IsComputed(beside.NumberOperand, Arm) || beside.NumberOperand is ParameterExpression)))
             (left, right) = (ConcatText(left), ConcatText(right));
 
-        // A text column or written text beside a Yes/No column is ACE's type mismatch, whatever the text holds
-        // (verified, in a join, a correlated subquery and IN alike; text passed as a parameter is not).
-        var (yesNo, yesNoOperand, text, textOperand) = left is bool
-            ? (left, leftOperand, right, rightOperand) : (right, rightOperand, left, leftOperand);
-        if (yesNo is bool && yesNoOperand is ColumnReference && text is string && textOperand is ColumnReference or LiteralExpression)
-            throw new InvalidCastException("Type mismatch in expression: text cannot be compared with a Yes/No column.");
         bool textOnRight = right is string;
         var (textSide, other, otherOperand) = textOnRight ? (right, left, leftOperand) : (left, right, rightOperand);
         if (textSide is string && other is not string
-            && (otherOperand is ParameterExpression || (IsNumeric(other) && IsComputed(otherOperand))))
+            && (otherOperand is ParameterExpression || (IsNumeric(other) && IsComputed(otherOperand, Arm))))
         {
             object converted = ConcatText(other);
             (left, right) = textOnRight ? (converted, right) : (left, converted);
@@ -860,9 +869,12 @@ internal sealed partial class ExpressionEvaluator(
         // Written once with the GUID first; the order is the other way round when it is on the right.
         bool keyOnLeft = left is Guid;
         var (key, number, numberOperand) = keyOnLeft ? (left, right, rightOperand) : (right, left, leftOperand);
-        if (key is Guid && IsNumeric(number) && (numberOperand is ParameterExpression || IsComputed(numberOperand)))
+        if (key is Guid && IsNumeric(number) && (numberOperand is ParameterExpression || IsComputed(numberOperand, Arm)))
             return keyOnLeft ? -1 : 1;
         return CompareValues(left, right, Text);
+
+        Expression? Arm(FunctionCall iif) => IifArm(iif.Arguments);
+        bool Written(Expression operand) => operand is not ParameterExpression && !IsComputed(operand, Arm);
 
         // Each rule is written with the column first; the caller asks it both ways round.
         bool CurrencyBeside(object column, Expression columnOperand, object given, Expression givenOperand) =>
@@ -876,14 +888,21 @@ internal sealed partial class ExpressionEvaluator(
     /// <summary>Whether an operand is a value the statement computes, rather than a number as it writes one —
     /// <c>1</c>, <c>-1.5</c>, <c>True</c> — or another column. <c>False</c> counts as computed: beside a text
     /// column ACE takes it as a computed 0 (verified: <c>[S] &lt; False</c> answers where <c>[S] &lt; True</c> and
-    /// <c>[S] &lt; 0</c> are a type mismatch, as a number column beside it is). An aggregate and an IIf are taken as a
-    /// column is, whatever they hold (verified vs ACE: a parameter '5.0' finds <c>MAX(V)</c>, <c>MAX(V + 0)</c>,
-    /// <c>SUM(V)</c>, <c>IIF(V &gt; 0, V, 0)</c> and <c>IIF(V &gt; 0, 5, 0)</c> holding 5, where it finds <c>V + 0</c>,
-    /// <c>Abs(V)</c>, <c>CLng(V)</c>, <c>Switch(V &gt; 0, V)</c>, <c>Choose(1, V)</c> and <c>SUM(V) + 0</c> nowhere).</summary>
-    internal static bool IsComputed(Expression operand) =>
-        operand is not (LiteralExpression { Value: not false } or ColumnReference or ParameterExpression)
-        && !(operand is FunctionCall call
-            && (Planning.QueryPlanner.IsAggregate(call.Name) || call.Name.Equals("IIF", StringComparison.OrdinalIgnoreCase)));
+    /// <c>[S] &lt; 0</c> are a type mismatch, as a number column beside it is). An aggregate is taken as a column is,
+    /// whatever it holds (verified vs ACE: a parameter '5.0' finds <c>MAX(V)</c>, <c>MAX(V + 0)</c> and <c>SUM(V)</c>
+    /// holding 5, where it finds <c>V + 0</c>, <c>Abs(V)</c>, <c>CLng(V)</c>, <c>Switch(V &gt; 0, V)</c>,
+    /// <c>Choose(1, V)</c> and <c>SUM(V) + 0</c> nowhere; in a WHERE a subquery's value is computed, beside a text column
+    /// or a number one). An IIf is what the arm it takes is, as <paramref name="iifArm"/> names it (verified vs ACE: beside text
+    /// <c>IIf(q &gt; 0, q + 0, 0)</c> compares as text, <c>IIf(q &gt; 0, q, 0)</c> and <c>IIf(q &gt; 0, 7, 0)</c> as a
+    /// column and a written number do); without a row to choose by, it is taken as a column.</summary>
+    internal static bool IsComputed(Expression operand, Func<FunctionCall, Expression?>? iifArm = null) => operand switch
+    {
+        LiteralExpression { Value: not false } or ColumnReference or ParameterExpression => false,
+        FunctionCall call when call.Name.Equals("IIF", StringComparison.OrdinalIgnoreCase) =>
+            iifArm?.Invoke(call) is { } arm && IsComputed(arm, iifArm),
+        FunctionCall call => !Planning.QueryPlanner.IsAggregate(call.Name),
+        _ => true,
+    };
 
     /// <summary>Whether an operand is a value the statement does not write: a parameter, a function's result, or an
     /// expression holding either.</summary>

@@ -56,12 +56,12 @@ public class ParameterComparedWithColumnTests : TempDatabaseTest
         Assert.Equal([6], Ids(e, "SELECT Id FROM W WHERE S = @p0", true));
     }
 
-    // ACE refuses this query outright; LibRed reads the column as a number row by row instead, as SQL Server does.
+    // ACE refuses this query outright, with a type mismatch (measured against ACE 2010 and Microsoft 365).
     [Fact]
-    public void A_number_literal_against_a_text_column_is_not_converted()
+    public void A_number_literal_against_a_text_column_is_a_type_mismatch()
     {
         var e = Seeded();
-        Assert.Equal([4], Ids(e, "SELECT Id FROM W WHERE S = 11"));
+        Assert.Throws<InvalidCastException>(() => Ids(e, "SELECT Id FROM W WHERE S = 11"));
     }
 
     [Fact]

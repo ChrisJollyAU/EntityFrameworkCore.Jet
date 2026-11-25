@@ -7,8 +7,7 @@ namespace LibRed.Engine.Tests;
 /// <summary>
 /// The comparison operators <c>=</c> <c>&lt;&gt;</c> <c>&lt;</c> <c>&gt;</c> <c>&lt;=</c> <c>&gt;=</c>: how each kind of
 /// value compares with another, the truth test against the literal <c>True</c> or <c>False</c>, and where
-/// <c>NOT</c> binds. The expected values were measured against ACE, except that a text literal or text column
-/// compared with a number reads as a number here, as in SQL Server, where ACE refuses it.
+/// <c>NOT</c> binds. The expected values were measured against ACE.
 /// </summary>
 public class ComparisonOperatorTests(ComparisonOperatorTests.Database database)
     : TempDatabaseTest, IClassFixture<ComparisonOperatorTests.Database>
@@ -97,14 +96,20 @@ public class ComparisonOperatorTests(ComparisonOperatorTests.Database database)
     [InlineData("LEFT(' 1 ', 3) = 1", true)]
     [InlineData("TRUE < CSTR(5)", true)]
     [InlineData("LEFT('12', 2) < TRUE", false)]
-    [InlineData("'10' > 9", true)]
-    [InlineData("'1' = 1", true)]
-    [InlineData("S = 7", true)]
-    [InlineData("7 = S", true)]
-    [InlineData("S < 10", true)]
-    [InlineData("S = 7.0", true)]
     public void Text_against_a_number_compares_as_the_number_it_reads_as(string expression, bool expected) =>
         Assert.Equal(expected, Scalar(expression));
+
+    // Text as written beside a number as written is ACE's type mismatch, whatever the text holds (measured against
+    // ACE 2010 and Microsoft 365 alike, on this table).
+    [Theory]
+    [InlineData("'10' > 9")]
+    [InlineData("'1' = 1")]
+    [InlineData("S = 7")]
+    [InlineData("7 = S")]
+    [InlineData("S < 10")]
+    [InlineData("S = 7.0")]
+    public void Text_as_written_against_a_number_as_written_is_a_type_mismatch(string expression) =>
+        Assert.Throws<InvalidCastException>(() => Scalar(expression));
 
     // Text beside a number the statement computes, a written False among them, compares with the number's text
     // (measured against ACE 2010 and Microsoft 365 alike).
@@ -173,8 +178,11 @@ public class ComparisonOperatorTests(ComparisonOperatorTests.Database database)
     public void Comparisons_bind_below_concatenation_and_above_not_left_to_right(string expression, bool expected) =>
         Assert.Equal(expected, Scalar(expression));
 
+    [Fact]
+    public void A_criteria_raises_the_same_type_mismatch() =>
+        Assert.Throws<InvalidCastException>(() => Query("SELECT COUNT(*) FROM T WHERE S = 7"));
+
     [Theory]
-    [InlineData("SELECT COUNT(*) FROM T WHERE S = 7", 1)]
     [InlineData("SELECT COUNT(*) FROM T WHERE 2 = TRUE", 1)]
     [InlineData("SELECT COUNT(*) FROM T WHERE '0' = TRUE", 0)]
     [InlineData("SELECT COUNT(*) FROM T WHERE NOT N = 4", 1)]

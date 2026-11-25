@@ -1863,8 +1863,9 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// <list type="bullet">
     /// <item>Text against a number, Boolean or date: the text reads as a number (<see cref="VbaText.TextAsNumber"/>), a type
     /// mismatch when it is not one — exactly, against a Decimal (verified vs ACE: '9007199254740993' finds that row of a
-    /// DECIMAL(20,0) column and not 9007199254740992's). ACE does this for text a function returns; for a text literal
-    /// or column it raises a type mismatch instead, which LibRed does not, as SQL Server compares them numerically too.</item>
+    /// DECIMAL(20,0) column and not 9007199254740992's). In a query ACE does this for text a function returns; for a
+    /// text literal or column beside a number that is not computed it raises a type mismatch, which the engine's
+    /// comparison raises before it gets here.</item>
     /// <item>A date against a number: its serial.</item>
     /// <item>A GUID or binary value against text: both as text (a GUID braced upper case, binary as UTF-16). A GUID
     /// against binary: the GUID's sixteen bytes, as a binary column stores it, against the binary's (verified vs ACE,

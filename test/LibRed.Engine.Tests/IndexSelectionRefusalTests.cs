@@ -68,7 +68,8 @@ public class IndexSelectionRefusalTests : TempDatabaseTest
         QueryEngine engine = Fresh();
         const string sql = "SELECT T.Id FROM T INNER JOIN T AS R ON T.A = R.V";
         Assert.False(ContainsHashJoin(engine.PlanFor(sql)));
-        Assert.Equal(2, engine.ExecuteQuery(sql).Rows.Count());
+        // A number column joined to a text column is ACE's type mismatch (measured against ACE 2010 and Microsoft 365).
+        Assert.Throws<InvalidCastException>(() => engine.ExecuteQuery(sql).Rows.Count());
     }
 
     [Theory]

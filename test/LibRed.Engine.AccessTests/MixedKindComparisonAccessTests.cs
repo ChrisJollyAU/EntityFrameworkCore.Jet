@@ -49,6 +49,45 @@ public class MixedKindComparisonAccessTests(ITestOutputHelper output) : TempData
             Matches(table, [.. ((string[])["=", "<", ">"]).Select(op => $"SELECT ID FROM T WHERE V {op} @p ORDER BY ID")], parameter);
     }
 
+    // Text as written - a text column or written text - beside a number, date or Boolean that is not computed either - a
+    // column, a written number or True, an aggregate - is a type mismatch, whichever way round and through whatever
+    // comparison, a join's included. Text the statement computes beside it reads as a number - a subquery's among it - and
+    // an IIf is the kind of the arm it takes.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Text_as_written_beside_a_number_as_written_is_refused_as_ACE_refuses_it(bool indexed) =>
+        Matches(
+        [
+            "CREATE TABLE T (ID LONG, Q LONG, D DOUBLE, C CURRENCY, DT DATETIME, YN YESNO, V TEXT(20))",
+            .. indexed ? (string[])["CREATE INDEX IX_Q ON T (Q)", "CREATE INDEX IX_V ON T (V)"] : [],
+            "INSERT INTO T (ID, Q, D, C, DT, YN, V) VALUES (1, 7, 7, 7, #2020-01-02#, True, '7')",
+            "INSERT INTO T (ID, Q, D, C, DT, YN, V) VALUES (2, 7, 7.5, 7, #2020-01-02#, False, '7.0')",
+            "INSERT INTO T (ID, Q, D, C, DT, YN, V) VALUES (3, 1, 1, 1, #2020-01-02#, True, '01')",
+        ],
+        [
+            .. ((string[])["Q = V", "V = Q", "Q < '9'", "V > 6", "7 = V", "'7' = 7", "D = V", "C = V", "DT = V", "DT = '2020-01-02'",
+                "YN = V", "True < V", "V < True", "False < V", "Q IN ('7')", "V IN (7)", "Q BETWEEN '1' AND '9'", "V BETWEEN 1 AND 9",
+                "Q = (SELECT MAX(V) FROM T)", "(SELECT MAX(Q) FROM T) = V", "Q = Trim(V)", "Q = V & ''", "Q + 0 = V",
+                "IIf(Q > 0, Q + 0, 0) = V", "IIf(Q > 0, Q, 0) = V", "IIf(Q > 0, 7, 0) = '7'", "IIf(Q > 0, Q + 0, 0) = '7.0'",
+                "IIf(Q < 0, Q + 0, Q) = V"]).Select(c => $"SELECT ID FROM T WHERE {c} ORDER BY ID"),
+            "SELECT ID FROM T GROUP BY ID, V HAVING MAX(Q) = V ORDER BY ID",
+            "SELECT T.ID FROM T INNER JOIN T AS R ON T.Q = R.V ORDER BY T.ID",
+        ]);
+
+    // Text against the literal True or False is False only as the text "0", compared as text is.
+    [Theory]
+    [InlineData("TEXT(20)", false)]
+    [InlineData("TEXT(20)", true)]
+    [InlineData("MEMO", false)]
+    public void A_text_column_tested_against_True_or_False_is_True_or_False_as_ACE_takes_it(string type, bool indexed) =>
+        Matches(Table($"ID LONG, V {type}", indexed, ["'0'", "'0 '", "' 0'", "'00'", "'-0'", "'0.0'", "''", "'False'", "'7'", "NULL"]),
+        [
+            .. ((string[])["V = False", "V = True", "False = V", "True = V", "V <> False", "V <> True", "NOT (V = False)"])
+                .Select(c => $"SELECT ID FROM T WHERE {c} ORDER BY ID"),
+            "SELECT ID, IIF(V = False, 'y', 'n') FROM T ORDER BY ID",
+        ]);
+
     public static TheoryData<string, string, string, bool> BinaryColumns
     {
         get
