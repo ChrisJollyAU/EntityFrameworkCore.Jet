@@ -104,14 +104,15 @@ public class BitwiseAndDateFunctionTests
         Assert.Equal(new TimeSpan(14, 30, 15), t.TimeOfDay);
     }
 
+    // An Integer, as ACE gives each (measured: VarType 2, an Int16 result column). EF's DateTime.Year is sent as
+    // DATEPART, a Long, so it never reads these.
     [Fact]
-    public void Date_part_functions_return_int()
+    public void Date_part_functions_return_an_integer()
     {
-        Assert.Equal(2020, Scalar("Year(#3/15/2020#)"));
-        Assert.Equal(3, Scalar("Month(#3/15/2020#)"));
-        Assert.Equal(15, Scalar("Day(#3/15/2020#)"));
-        Assert.Equal(4, Scalar("Weekday(#1/1/2020#)")); // Wed, with Sunday = 1
-        Assert.IsType<int>(Scalar("Year(#3/15/2020#)"));  // int, matching EF's DateTime.Year
+        Assert.Equal((short)2020, Scalar("Year(#3/15/2020#)"));
+        Assert.Equal((short)3, Scalar("Month(#3/15/2020#)"));
+        Assert.Equal((short)15, Scalar("Day(#3/15/2020#)"));
+        Assert.Equal((short)4, Scalar("Weekday(#1/1/2020#)")); // Wed, with Sunday = 1
         Assert.Null(Scalar("Year(NULL)"));
     }
 }

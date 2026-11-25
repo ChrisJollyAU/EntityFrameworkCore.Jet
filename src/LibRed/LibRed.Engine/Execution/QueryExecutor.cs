@@ -1752,8 +1752,8 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
                 or "OCT" or "WEEKDAYNAME" or "MONTHNAME" or "PARTITION" or "CONCAT_WS" or "TRANSLATE" or "TYPENAME" or "STRCONV" => typeof(string),
             // DateDiff counts into Access's Long Integer whatever the interval, and DateDiff_Big into an Int64
             "DATEDIFF_BIG" => typeof(long),
-            "LEN" or "DATALENGTH" or "INSTR" or "INSTRREV" or "ASC" or "ASCW" or "DATEPART" or "DATEDIFF"
-                or "YEAR" or "MONTH" or "DAY" or "HOUR" or "MINUTE" or "SECOND" or "WEEKDAY" or "IMESTATUS" or "VARTYPE" => typeof(int),
+            "ASC" or "ASCW" or "YEAR" or "MONTH" or "DAY" or "HOUR" or "MINUTE" or "SECOND" or "WEEKDAY" => typeof(short),
+            "LEN" or "DATALENGTH" or "INSTR" or "INSTRREV" or "DATEPART" or "DATEDIFF" or "IMESTATUS" or "VARTYPE" => typeof(int),
             "CDATE" or "CVDATE" or "NOW" or "DATE" or "TIME" or "DATEADD" or "DATESERIAL" or "TIMESERIAL"
                 or "DATEVALUE" or "TIMEVALUE" or "GETUTCDATE" or "SYSDATETIME" or "SYSUTCDATETIME" => typeof(DateTime),
             "SQR" or "SIN" or "COS" or "TAN" or "ATN" or "LOG" or "EXP" or "RND"

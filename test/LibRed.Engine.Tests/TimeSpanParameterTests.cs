@@ -106,7 +106,7 @@ public class TimeSpanParameterTests : TempDatabaseTest
     {
         var result = Fresh().ExecuteQuery("SELECT @ts, HOUR(@ts) FROM Q", Bind(new TimeSpan(9, 30, 0)));
         Assert.Equal(typeof(DateTime), result.ColumnTypes[0]);
-        Assert.Equal(new object?[] { new DateTime(1899, 12, 30, 9, 30, 0), 9 }, result.Rows.Single());
+        Assert.Equal(new object?[] { new DateTime(1899, 12, 30, 9, 30, 0), (short)9 }, result.Rows.Single());
     }
 
     // Saved, it is stored as Jet stores a time — in a Date/Time column and a Date/Time Extended one alike — and a

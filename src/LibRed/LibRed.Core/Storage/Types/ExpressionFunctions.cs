@@ -132,12 +132,13 @@ internal abstract partial class ExpressionFunctions<TExpression>
             // Date$ and Time$ are text, in a fixed form whatever the locale (verified vs ACE: "11-25-2026", "20:00:36").
             "DATE" => dollar ? DateTime.Today.ToString("MM-dd-yyyy", CultureInfo.InvariantCulture) : DateTime.Today,
             "TIME" => dollar ? Clock.ToString("HH:mm:ss", CultureInfo.InvariantCulture) : DateTime.FromOADate(0).Add(Clock.TimeOfDay),
-            "YEAR" => Convert1(f, v => ToDate(v).Year),
-            "MONTH" => Convert1(f, v => ToDate(v).Month),
-            "DAY" => Convert1(f, v => ToDate(v).Day),
-            "HOUR" => Convert1(f, v => ToDate(v).Hour),
-            "MINUTE" => Convert1(f, v => ToDate(v).Minute),
-            "SECOND" => Convert1(f, v => ToDate(v).Second),
+            // Each date part, Weekday among them, is an Integer (verified vs ACE: VarType 2, an Int16 result column).
+            "YEAR" => Convert1(f, v => (short)ToDate(v).Year),
+            "MONTH" => Convert1(f, v => (short)ToDate(v).Month),
+            "DAY" => Convert1(f, v => (short)ToDate(v).Day),
+            "HOUR" => Convert1(f, v => (short)ToDate(v).Hour),
+            "MINUTE" => Convert1(f, v => (short)ToDate(v).Minute),
+            "SECOND" => Convert1(f, v => (short)ToDate(v).Second),
             "WEEKDAY" => Weekday(f),
             // DateValue is the date at midnight and TimeValue the time on 1899-12-30. Unlike CDate they take only a
             // date or text that reads as one; a number is a type mismatch. IsDate is true for exactly those.
@@ -187,8 +188,8 @@ internal abstract partial class ExpressionFunctions<TExpression>
             // Asc and Chr work in the system ANSI code page (Chr takes 0-255; Chr(128) is '€', Asc('Ā') is 65 by
             // best fit); AscW and ChrW in UTF-16 code units, AscW signed and ChrW taking -32768 to 65535. The
             // machine's code page, NOT the database's: in a 1251, 1253 or 932 database ACE on a 1252 machine still
-            // gives Chr(192) = 'À', and Asc of a Cyrillic or Greek letter is 63.
-            "ASC" => Convert1(f, v => (int)Ansi.GetBytes(FirstCharacter(v))[0]),
+            // gives Chr(192) = 'À', and Asc of a Cyrillic or Greek letter is 63. Asc and AscW are Integers (verified vs ACE).
+            "ASC" => Convert1(f, v => (short)Ansi.GetBytes(FirstCharacter(v))[0]),
             "CHR" => Convert1(f, v => AnsiCharacter(InRange(AsLong(v), 0, 255)).ToString()),
             "SPACE" => Convert1(f, v => new string(' ', Count(v))),
             "STRING" => StringOf(f),                         // String(count, char) → char repeated count times
@@ -239,7 +240,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
             "SYD" => Financial(f, a => Syd(a[0], a[1], a[2], a[3])),
             "DDB" => Financial(f, a => Ddb(a[0], a[1], a[2], a[3], f.Arguments.Count > 4 ? a[4] : 2)),
 
-            "ASCW" => Convert1(f, v => (int)(short)FirstCharacter(v)[0]),
+            "ASCW" => Convert1(f, v => (short)FirstCharacter(v)[0]),
             "CHRW" => Convert1(f, v => ((char)(InRange(AsLong(v), -32768, 65535) & 0xFFFF)).ToString()),
             // Byte variants operate on the UTF-16 byte layout (2 bytes/char): LenB = 2×length, AscB = the low
             // byte of the first char, and Left/Right/Mid/InStr count bytes. Verified vs ACE (LenB('abc')=6,
@@ -1479,7 +1480,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// <summary>Access <c>Weekday(date, [firstdayofweek])</c>: the day's 1-based position in the week.</summary>
     private object? Weekday(Call f) =>
         Evaluate(f.Arguments[0]) is { } date && FirstDayOfWeek(f, 1) is { } first
-            ? DaysIntoWeek(ToDate(date), first) + 1
+            ? (short)(DaysIntoWeek(ToDate(date), first) + 1)
             : null;
 
     /// <summary>

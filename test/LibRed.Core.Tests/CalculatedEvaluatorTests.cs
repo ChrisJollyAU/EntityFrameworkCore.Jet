@@ -282,8 +282,8 @@ public class CalculatedEvaluatorTests
     public void Evaluates_dates()
     {
         Assert.Equal(new DateTime(2003, 9, 30), Eval("[D] + 1", ("D", new DateTime(2003, 9, 29))));
-        Assert.Equal(2003, Eval("Year([D])", ("D", new DateTime(2003, 9, 29))));
-        Assert.Equal(9, Eval("Month([D])", ("D", new DateTime(2003, 9, 29))));
+        Assert.Equal((short)2003, Eval("Year([D])", ("D", new DateTime(2003, 9, 29))));
+        Assert.Equal((short)9, Eval("Month([D])", ("D", new DateTime(2003, 9, 29))));
         Assert.Equal(new DateTime(2020, 1, 1), Eval("DateSerial(2020, 1, 1)"));
     }
 

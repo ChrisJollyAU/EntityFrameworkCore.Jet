@@ -311,5 +311,5 @@ public class DateFunctionTests(DateFunctionTests.Database database)
     // ACE rounds a date to the second; LibRed keeps milliseconds, so 0.864 seconds is still second 0.
     [Fact]
     public void Second_keeps_the_fraction_of_a_second() =>
-        Assert.Equal(0, Scalar("SECOND(0.00001)"));
+        Assert.Equal((short)0, Scalar("SECOND(0.00001)"));
 }
