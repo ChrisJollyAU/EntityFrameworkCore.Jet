@@ -361,7 +361,8 @@ parser: the lexer/parser are pre-generated and committed under `LibRed.Sql/Gramm
 > **LibRed takes part in Jet's multi-user locking on Windows, and nowhere else.** On a shared (non-exclusive)
 > open on Windows it does what ACE does, as measured against ACE 16 (`src/LibRed/docs/format/locking.md` is the
 > specification): it registers as a Jet user in the `.laccdb`/`.ldb` beside the database, and is refused the open
-> while another user bars new connections (connection control); writes its commit slot on
+> while another user bars new connections (connection control), and bars them itself through
+> `JetDatabase.BarsNewConnections`; writes its commit slot on
 > page 0 around every batch of page writes; reads the slot table at the start of each statement and drops its
 > cached pages when another user's slot has moved; takes ACE's exclusive page lock when a statement first changes
 > a page (the table's TDEF page first for an INSERT, the global maps' page before reserving pages); and takes

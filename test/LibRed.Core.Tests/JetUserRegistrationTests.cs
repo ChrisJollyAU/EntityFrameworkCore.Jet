@@ -376,6 +376,189 @@ public class JetUserRegistrationTests
         finally { TemporaryDatabase.Delete(lockPath); }
     }
 
+    // Barring new connections (locking.md §3), as ACE's "Jet OLEDB:Connection Control" set to 1 does, a read-only
+    // connection's included (measured): user 1 locks and lets go the whole of group 5, then holds its own byte of it,
+    // 0x10000501; another open is refused with 3734 naming this machine's record. Set back, the byte is let go and the
+    // next open connects.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Barring_new_connections_holds_the_users_group_5_byte_and_refuses_another_open(bool readOnly)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-register-");
+        string lockPath = JetLockFile.PathFor(copy.Path)!;
+        long group5 = JetLockLayout.UserGroupStart(JetLockLayout.ConnectionControlGroup);
+        long bar = JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, 1);
+
+        using (JetDatabase database = JetDatabase.Open(copy.Path, readOnly))
+        {
+            Assert.False(database.BarsNewConnections);
+            database.BarsNewConnections = true;
+            Assert.True(database.BarsNewConnections);
+            using (JetLockFile other = JetLockFile.Open(lockPath, createIfMissing: false))
+            {
+                Assert.False(other.TryLock(group5, JetLockLayout.UserGroupSize));
+                Assert.False(other.TryLock(bar, 1));
+                Assert.True(other.TryLock(JetLockLayout.UserGroupStart(JetLockLayout.ConnectionControlFollowUpGroup), 1));
+                other.Unlock(JetLockLayout.UserGroupStart(JetLockLayout.ConnectionControlFollowUpGroup), 1);
+            }
+
+            IOException refused = Assert.Throws<IOException>(() => JetDatabase.Open(copy.Path, readOnly: false).Dispose());
+            Assert.Equal(
+                $"The database has been placed in a state by user 'Admin' on machine '{Environment.MachineName}' that prevents it from being opened or locked.",
+                refused.Message);
+            Assert.NotNull(database.OpenTable("Customers"));   // its own statements go on
+
+            database.BarsNewConnections = false;
+            Assert.False(database.BarsNewConnections);
+            using (JetLockFile other = JetLockFile.Open(lockPath, createIfMissing: false))
+            {
+                Assert.True(other.TryLock(group5, JetLockLayout.UserGroupSize));
+                other.Unlock(group5, JetLockLayout.UserGroupSize);
+            }
+            using (JetDatabase next = JetDatabase.Open(copy.Path, readOnly: false))
+                Assert.Equal(2, next.Channel.UserNumber);
+        }
+
+        Assert.False(File.Exists(lockPath));
+    }
+
+    // ACE's user barring twice holds its byte until it has set the property back twice, although the property reads 2
+    // after the first; an admit holding nothing does nothing (measured).
+    [Fact]
+    public void Barring_twice_holds_the_bar_until_admitted_twice()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-register-");
+        string lockPath = JetLockFile.PathFor(copy.Path)!;
+        long bar = JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, 1);
+
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        using JetLockFile other = JetLockFile.Open(lockPath, createIfMissing: false);
+        database.BarsNewConnections = false;
+        Assert.True(other.TryLock(bar, 1));
+        other.Unlock(bar, 1);
+
+        database.BarsNewConnections = true;
+        database.BarsNewConnections = true;
+        database.BarsNewConnections = false;
+        Assert.False(database.BarsNewConnections);
+        Assert.False(other.TryLock(bar, 1));
+        Assert.Throws<IOException>(() => JetDatabase.Open(copy.Path, readOnly: false).Dispose());
+
+        database.BarsNewConnections = false;
+        Assert.True(other.TryLock(bar, 1));
+        other.Unlock(bar, 1);
+    }
+
+    // Closing while barring lets the byte go, however many times it barred: the bar never outlives the user (measured).
+    // Another user stays connected, so the lock file stays to be probed.
+    [Fact]
+    public void Closing_while_barring_new_connections_lets_the_bar_go()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-register-");
+        string lockPath = JetLockFile.PathFor(copy.Path)!;
+        long bar = JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, 1);
+
+        try
+        {
+            using JetLockFile other = JetLockFile.Open(lockPath, createIfMissing: true);
+            Assert.True(other.TryLock(JetLockLayout.SessionByte(2), 1));
+            Assert.True(other.TryLock(JetLockLayout.UserByte(2), 1));
+
+            using (JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false))
+            {
+                Assert.Equal(1, database.Channel.UserNumber);
+                database.BarsNewConnections = true;
+                database.BarsNewConnections = true;
+                Assert.False(other.TryLock(bar, 1));
+            }
+
+            Assert.True(other.TryLock(JetLockLayout.UserGroupStart(JetLockLayout.ConnectionControlGroup), JetLockLayout.UserGroupSize));
+            other.Unlock(JetLockLayout.UserGroupStart(JetLockLayout.ConnectionControlGroup), JetLockLayout.UserGroupSize);
+            Assert.True(other.TryLock(JetLockLayout.UserByte(1), 1));
+            other.Unlock(JetLockLayout.UserByte(1), 1);
+            other.Unlock(JetLockLayout.UserByte(2), 1);
+            other.Unlock(JetLockLayout.SessionByte(2), 1);
+        }
+        finally { TemporaryDatabase.Delete(lockPath); }   // the simulated user never closes as a user would
+    }
+
+    // A second user barring while the first bars: refused the whole group, it finds the first's byte refused and stops,
+    // holding nothing and raising nothing, and its property reads as set. When the first lets its bar go, a newcomer
+    // connects although the second's still reads as set; barring again then holds its own byte (measured).
+    [Fact]
+    public void A_second_user_barring_holds_nothing_yet_reads_as_barring()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-register-");
+        string lockPath = JetLockFile.PathFor(copy.Path)!;
+        long bar1 = JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, 1);
+        long bar2 = JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, 2);
+
+        using JetDatabase first = JetDatabase.Open(copy.Path, readOnly: false);
+        using JetDatabase second = JetDatabase.Open(copy.Path, readOnly: false);
+        Assert.Equal(2, second.Channel.UserNumber);
+        using JetLockFile other = JetLockFile.Open(lockPath, createIfMissing: false);
+
+        first.BarsNewConnections = true;
+        second.BarsNewConnections = true;
+        Assert.True(second.BarsNewConnections);
+        Assert.False(other.TryLock(bar1, 1));
+        Assert.True(other.TryLock(bar2, 1));
+        other.Unlock(bar2, 1);
+
+        first.BarsNewConnections = false;
+        Assert.True(second.BarsNewConnections);
+        using (JetDatabase newcomer = JetDatabase.Open(copy.Path))
+            Assert.Equal(3, newcomer.Channel.UserNumber);
+
+        second.BarsNewConnections = true;
+        Assert.False(other.TryLock(bar2, 1));
+        Assert.Throws<IOException>(() => JetDatabase.Open(copy.Path).Dispose());
+        second.BarsNewConnections = false;
+        Assert.True(other.TryLock(bar2, 1));
+        other.Unlock(bar2, 1);
+    }
+
+    // A group-5 byte held by no connected user: the setter is refused the whole group and finds no holder, and holds
+    // nothing; the property reads as set (measured).
+    [Fact]
+    public void Barring_while_a_byte_of_group_5_is_held_by_no_connected_user_holds_nothing()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-register-");
+        string lockPath = JetLockFile.PathFor(copy.Path)!;
+        long stray = JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, 7);
+        long bar = JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, 1);
+
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        using JetLockFile other = JetLockFile.Open(lockPath, createIfMissing: false);
+        Assert.True(other.TryLock(stray, 1));
+        database.BarsNewConnections = true;
+        Assert.True(database.BarsNewConnections);
+        Assert.True(other.TryLock(bar, 1));
+        other.Unlock(bar, 1);
+        other.Unlock(stray, 1);
+    }
+
+    // ACE's exclusive connection takes the property and reads it back, with no error and no lock file (measured).
+    [Fact]
+    public void An_exclusive_open_takes_the_bar_and_holds_nothing()
+    {
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-register-");
+        string lockPath = JetLockFile.PathFor(copy.Path)!;
+
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false, exclusive: true);
+        database.BarsNewConnections = true;
+        Assert.True(database.BarsNewConnections);
+        Assert.False(File.Exists(lockPath));
+        database.BarsNewConnections = false;
+        Assert.False(database.BarsNewConnections);
+    }
+
     // Nothing of a refused open stays locked: the bytes it took as user 2, and every group-5 and group-6 byte it tried.
     private static void AssertUser2Free(JetLockFile other)
     {

@@ -61,11 +61,20 @@ internal sealed class JetUserRegistration : IDisposable
     private readonly Dictionary<(JetLockRegion Region, int Page), Holders> _held = [];
     private readonly Lock _heldGate = new();
 
-    private JetUserRegistration(JetLockFile lockFile, string lockFilePath, int user)
+    // The users found connected when this one connected — the numbers below its own whose group-0 byte its search for
+    // a number was refused — whose group-5 bytes its connection-control check tries (PassConnectionControl).
+    private readonly bool[] _connected;
+
+    // How many times this connection has barred new connections while holding its group-5 byte, less the times it has
+    // admitted them since: the byte is held while this is above zero (SetConnectionControl).
+    private int _bars;
+
+    private JetUserRegistration(JetLockFile lockFile, string lockFilePath, int user, bool[] connected)
     {
         _lockFile = lockFile;
         _lockFilePath = lockFilePath;
         User = user;
+        _connected = connected;
     }
 
     /// <summary>The user number taken: the index of the record, and of the bytes held.</summary>
@@ -92,7 +101,7 @@ internal sealed class JetUserRegistration : IDisposable
         try
         {
             // The numbers below the one taken whose group-0 byte was refused on the way: the users found connected.
-            Span<bool> connected = stackalloc bool[JetLockLayout.MaxUserNumber + 1];
+            bool[] connected = new bool[JetLockLayout.MaxUserNumber + 1];
             if (TakeUserNumber(lockFile, connected) is not { } user)
             {
                 lockFile.Dispose();
@@ -109,12 +118,10 @@ internal sealed class JetUserRegistration : IDisposable
             if (lockFile.Read(offset, present) != record.Length || !present.SequenceEqual(record))
                 lockFile.Write(offset, record);
 
-            // One of the process's connections at a time: another's momentary hold of the whole of group 5 covers its
-            // own byte there, and would read as a bar.
             string? refused;
-            lock (ConnectionControlGate) refused = PassConnectionControl(lockFile, user, connected);
+            lock (ConnectionControlGate) refused = PassConnectionControl(lockFile, user, connected, bar: false);
             if (refused is null)
-                return new JetUserRegistration(lockFile, lockFilePath, user);
+                return new JetUserRegistration(lockFile, lockFilePath, user, connected);
 
             // Refused: ACE lets its session byte go, then its user byte, and leaves its record (measured).
             lockFile.Unlock(JetLockLayout.SessionByte(user), 1);
@@ -173,26 +180,33 @@ internal sealed class JetUserRegistration : IDisposable
     // A connecting user's tries of connection control, in all, before it gives up (measured: 10).
     private const int ConnectionControlRounds = 10;
 
+    // Every connection-control check of the process's connections, a connecting one's and a setter's, one at a time:
+    // one's momentary hold of the whole of group 5 covers another's own byte there, and would read to it as a bar.
     private static readonly Lock ConnectionControlGate = new();
 
-    /// <summary>ACE's connection-control check, made once the user has its number and has written its record
-    /// (locking.md §3): the whole of group 5 granted — nobody bars new connections — is let go, and the user is
-    /// connected; returns null. Refused, it tries byte 0 of group 6. Granted, that is let go and each other connected
-    /// user's group-5 byte is tried in turn: the first refused names the user barring connections, and the refusal is
+    /// <summary>ACE's connection-control check (locking.md §3), made by a user once it has its number and has written
+    /// its record, and again by a user setting connection control — <paramref name="bar"/>: the whole of group 5
+    /// granted — nobody bars new connections — is let go, the setter then takes its own byte of the group and holds it,
+    /// and null is returned: the user is connected, or bars new connections. Refused, it tries byte 0 of group 6.
+    /// Granted, that is let go and each other connected user's group-5 byte is tried in turn: the first refused names the user barring connections, and the refusal is
     /// ACE's 3734 with the names in that user's record; one granted is let go. Refused byte 0, the group-6 byte of
     /// each user number that has a record in the lock file is tried from the highest down to 1, the user's own
     /// included, each one granted being let go at once: a refused byte of another user is the refusal, ACE's 3734
     /// naming that user from its record, and a refused byte of the user's own ends the round naming no one. Either way,
     /// with no holder found, it starts again from the whole of group 5, ten rounds in all, and then the refusal is
-    /// ACE's 3733, an unknown user. No round waits for the next.</summary>
-    /// <remarks>Group 5's walk is measured as far as its first byte: with byte 0 of group 6 granted, the first byte
+    /// ACE's 3733, an unknown user. No round waits for the next. A newcomer refused fails its open with the refusal; a
+    /// setter refused holds nothing and raises nothing (measured).</summary>
+    /// <remarks>A setter's own byte refused just after the whole group was granted — another user's momentary try of
+    /// it in between — runs the round again; ACE's handling of that race is not measured. A setter refused by no holder
+    /// found makes the ten rounds too; how many ACE's makes is not measured — it holds nothing either way.
+    /// Group 5's walk is measured as far as its first byte: with byte 0 of group 6 granted, the first byte
     /// tried is that of the lowest connected user, whether or not the newcomer is user 3 and other users are
     /// connected, and it was refused in every such case. The order beyond it with several users barring, whether the
     /// newcomer's own byte is tried, whether the walk covers every record or only the connected users, and which
     /// users a newcomer counts as connected when its own number is not the highest (here: those its search for a
     /// number was refused below its own), are not measured. Group 6's walk is measured with one to three records in
     /// the file.</remarks>
-    private static string? PassConnectionControl(JetLockFile lockFile, int user, ReadOnlySpan<bool> connected)
+    private static string? PassConnectionControl(JetLockFile lockFile, int user, ReadOnlySpan<bool> connected, bool bar)
     {
         long control = JetLockLayout.UserGroupStart(JetLockLayout.ConnectionControlGroup);
         long followUp = JetLockLayout.UserGroupStart(JetLockLayout.ConnectionControlFollowUpGroup);
@@ -202,7 +216,9 @@ internal sealed class JetUserRegistration : IDisposable
             if (lockFile.TryLock(control, JetLockLayout.UserGroupSize))
             {
                 lockFile.Unlock(control, JetLockLayout.UserGroupSize);
-                return null;
+                if (!bar || lockFile.TryLock(JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, user), 1))
+                    return null;
+                continue;
             }
 
             if (lockFile.TryLock(followUp, 1))
@@ -211,9 +227,9 @@ internal sealed class JetUserRegistration : IDisposable
                 for (int other = 1; other < connected.Length; other++)
                 {
                     if (!connected[other]) continue;
-                    long bar = JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, other);
-                    if (!lockFile.TryLock(bar, 1)) return BarredByMessage(lockFile, other);
-                    lockFile.Unlock(bar, 1);
+                    long barring = JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, other);
+                    if (!lockFile.TryLock(barring, 1)) return BarredByMessage(lockFile, other);
+                    lockFile.Unlock(barring, 1);
                 }
             }
             else
@@ -256,6 +272,32 @@ internal sealed class JetUserRegistration : IDisposable
     /// it (measured, locking.md §7).</summary>
     public const string BarredByUnknownUserMessage =
         "The database has been placed in a state by an unknown user that prevents it from being opened or locked.";
+
+    /// <summary>Bars new connections, or admits them again, as ACE's session property <c>Jet OLEDB:Connection
+    /// Control</c> does set to 1 or 2 (measured, locking.md §3). Barring runs the connection-control check
+    /// (<see cref="PassConnectionControl"/>): with nobody barring, this user takes its group-5 byte and holds it; with
+    /// another user barring, it holds nothing and raises nothing. Barring again while the byte is held only counts,
+    /// and the byte is let go by as many admits — or by <see cref="Dispose"/>; an admit while it holds nothing does
+    /// nothing.</summary>
+    /// <remarks>Not thread-safe, like the rest of a channel's state: one caller at a time.</remarks>
+    public void SetConnectionControl(bool bar)
+    {
+        if (!bar)
+        {
+            if (_bars > 0 && --_bars == 0)
+                _lockFile.Unlock(JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, User), 1);
+            return;
+        }
+
+        if (_bars > 0)
+        {
+            _bars++;
+            return;
+        }
+
+        lock (ConnectionControlGate)
+            if (PassConnectionControl(_lockFile, User, _connected, bar: true) is null) _bars = 1;
+    }
 
     /// <summary>ACE's error 3211, for a table lock refused once the retries are spent (measured for <c>ALTER
     /// TABLE</c> and <c>CREATE INDEX</c>, locking.md §7).</summary>
@@ -434,7 +476,8 @@ internal sealed class JetUserRegistration : IDisposable
     }
 
     /// <summary>Deregisters as ACE does at close: tries every other user's group-0 byte and lets them go, releases
-    /// its own session and user bytes, closes the lock file, and deletes it when no other user was found. Never
+    /// its group-5 byte when it bars new connections, however many times it barred them, then its own session and user
+    /// bytes, closes the lock file, and deletes it when no other user was found. Never
     /// throws: a delete another process's open handle refuses is the ordinary case of someone having connected
     /// meanwhile, and a failed lock call leaves the file in place rather than risk deleting a live user's.</summary>
     public void Dispose()
@@ -443,6 +486,11 @@ internal sealed class JetUserRegistration : IDisposable
         try
         {
             alone = OthersAbsent();
+            if (_bars > 0)
+            {
+                _bars = 0;
+                _lockFile.Unlock(JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, User), 1);
+            }
             _lockFile.Unlock(JetLockLayout.SessionByte(User), 1);
             _lockFile.Unlock(JetLockLayout.UserByte(User), 1);
         }

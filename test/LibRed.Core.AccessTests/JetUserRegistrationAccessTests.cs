@@ -135,6 +135,77 @@ public class JetUserRegistrationAccessTests
         }
     }
 
+    // LibRed barring new connections, as ACE's "Jet OLEDB:Connection Control" set to 1 does: ACE's next connection is
+    // refused with 3734 naming LibRed's record, an ACE connection already open goes on working, and once LibRed admits
+    // new connections again ACE connects.
+    [Fact]
+    public void Ace_is_refused_while_LibRed_bars_new_connections()
+    {
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "libred-register-ace-");
+        try
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            using OleDbConnection connected = AceTestDatabase.Open(path);
+            database.BarsNewConnections = true;
+
+            var aceRefused = Assert.Throws<InvalidOperationException>(() => AceTestDatabase.Open(path, attempts: 1).Dispose());
+            OleDbException aceRefusal = Assert.IsType<OleDbException>(aceRefused.InnerException);
+            Assert.Equal("3734", aceRefusal.Errors[0].SQLState);   // OLE DB carries the Jet error number here
+            Assert.Equal(
+                $"The database has been placed in a state by user 'Admin' on machine '{Environment.MachineName}' that prevents it from being opened or locked.",
+                aceRefusal.Errors[0].Message);
+
+            using (OleDbCommand command = connected.CreateCommand())
+            {
+                command.CommandText = "SELECT COUNT(*) FROM Customers";
+                Assert.Equal(91, Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+            }
+
+            database.BarsNewConnections = false;
+            AceTestDatabase.Open(path, attempts: 1).Dispose();
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // LibRed setting the bar while ACE already bars: it holds nothing, raises nothing and reads as set, as ACE's second
+    // setter does; once ACE lets its bar go, ACE's next connection connects though LibRed's property still reads true.
+    [Fact]
+    public void LibRed_barring_behind_Aces_bar_holds_nothing()
+    {
+        Type? adoConnection = Type.GetTypeFromProgID("ADODB.Connection");
+        Assert.SkipWhen(adoConnection is null, "ADODB is not registered in this process.");
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "libred-register-ace-");
+        AceTestDatabase.ReleaseAbandonedComObjects();
+        dynamic ace = Activator.CreateInstance(adoConnection)!;
+        try
+        {
+            OpenAdo(ace, path);
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            Assert.Equal(2, database.Channel.UserNumber);
+            long libRedBar = JetLockLayout.UserGroupByte(JetLockLayout.ConnectionControlGroup, 2);
+
+            ace.Properties.Item("Jet OLEDB:Connection Control").Value = 1;
+            database.BarsNewConnections = true;
+            Assert.True(database.BarsNewConnections);
+            using (JetLockFile probe = JetLockFile.Open(JetLockFile.PathFor(path)!, createIfMissing: false))
+            {
+                Assert.True(probe.TryLock(libRedBar, 1));
+                probe.Unlock(libRedBar, 1);
+            }
+
+            ace.Properties.Item("Jet OLEDB:Connection Control").Value = 2;
+            Assert.True(database.BarsNewConnections);
+            AceTestDatabase.Open(path, attempts: 1).Dispose();
+        }
+        finally
+        {
+            try { ace.Close(); } catch (Exception) { /* never opened */ }
+            Marshal.FinalReleaseComObject((object)ace);
+            AceTestDatabase.ReleaseAbandonedComObjects();
+            TemporaryDatabase.Delete(path);
+        }
+    }
+
     private static void OpenAdo(dynamic connection, string path)
     {
         Exception? last = null;

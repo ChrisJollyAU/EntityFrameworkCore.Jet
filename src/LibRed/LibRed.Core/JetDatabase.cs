@@ -231,6 +231,44 @@ public sealed class JetDatabase : IDisposable
     /// <summary>Whether a transaction is currently open.</summary>
     public bool InTransaction => _channel.InTransaction;
 
+    private bool _barsNewConnections;
+
+    /// <summary>
+    /// Bars new connections to the file while true, and admits them again when set back to false — ACE's session
+    /// property <c>Jet OLEDB:Connection Control</c> set to 1 or 2 ("passive shutdown"), done the way ACE does it
+    /// (docs/format/locking.md §3). False when opened. While it bars, any other open of the file — by Access, by ACE
+    /// or by LibRed, shared or read-only — is refused with ACE's 3734 naming this connection's computer and
+    /// <c>'Admin'</c>; users already connected are unaffected, and so are this database's own statements and
+    /// transactions. The bar ends when it is set back to false or the database is closed.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Reading true does not mean new connections are barred.</b> As with ACE's property, only the first user
+    /// to bar connections holds the bar. Set while another connected user already bars them, the property takes
+    /// nothing and raises nothing, yet reads back true; when that other user lets its bar go, new connections are
+    /// admitted although this property still reads true. Setting it to true again then bars them. Likewise, set while
+    /// a byte of the group is held by no connected user, it bars nothing (measured).</para>
+    /// <para>Setting it to true again while this database bars counts: the bar is held until it has been set back to
+    /// false as many times (or the database closes), although the property reads false after the first. ACE's
+    /// property behaves so (measured). A <c>false</c> while this database bars nothing does nothing.</para>
+    /// <para>A bool, where ACE's property is an integer, because ACE accepts only its two values — 1 and 2; any other
+    /// is refused as an invalid property value (measured).</para>
+    /// <para>An exclusive open takes the value and reads it back but does nothing with it: nobody else can open the
+    /// file anyway, and there is no lock file to hold a bar in — what ACE's exclusive connection does (measured). A
+    /// shared open off Windows, or one whose lock file could not be opened, does the same: LibRed's own choice, as it
+    /// is not registered as a Jet user there and nothing could see a bar.</para>
+    /// <para>Like the rest of a database's state, not thread-safe: set it from one thread at a time.</para>
+    /// </remarks>
+    public bool BarsNewConnections
+    {
+        get => _barsNewConnections;
+        set
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _channel.SetConnectionControl(value);
+            _barsNewConnections = value;
+        }
+    }
+
     /// <summary>Runs a logical read without allowing a concurrent multi-page commit to publish halfway through.
     /// Shared — reads on this file run concurrently with each other.</summary>
     public T ReadConsistent<T>(Func<T> action) => _channel.ReadConsistent(action);

@@ -325,6 +325,10 @@ public sealed class PageChannel : IDisposable
     /// <see cref="JetUserRegistration"/>).</summary>
     internal int? UserNumber => _user?.User;
 
+    /// <summary>Bars new connections, or admits them again, through this channel's registration
+    /// (<see cref="JetUserRegistration.SetConnectionControl"/>); a channel that is not registered does nothing.</summary>
+    internal void SetConnectionControl(bool bar) => _user?.SetConnectionControl(bar);
+
     /// <summary>Rejects a page number that cannot exist in this file. Page numbers come out of the file
     /// itself, so a bad one is corruption — without this the read seeks past the end and throws
     /// <c>EndOfStreamException</c>, which callers handling a damaged file do not catch. Called only on the
