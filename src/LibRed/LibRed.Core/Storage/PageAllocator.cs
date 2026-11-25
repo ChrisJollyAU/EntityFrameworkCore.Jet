@@ -785,8 +785,8 @@ internal sealed class PageAllocator
     }
 
     /// <summary>Sets a page's bit in a reference-type global free map, on the bitmap page for its range, to
-    /// <paramref name="isFree"/>. If that range has no bitmap page (e.g. a page grown past the map's coverage), the
-    /// page is left unrecorded — it simply won't be reused, matching the pre-existing inline-window behaviour.</summary>
+    /// <paramref name="isFree"/>. If that range has no bitmap page, the page is left unrecorded — it won't be
+    /// reused — where an inline map refuses a page it has no bit for (<see cref="WriteFreeBit"/>).</summary>
     private void WriteReferenceFreeBit(MapRecord free, MapRecord released, int page, bool isFree)
     {
         JetFormatBase format = _channel.Format;

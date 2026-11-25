@@ -45,9 +45,11 @@ Each entry ends with a **4-byte big-endian** trailing pointer:
 > 4-byte trailer *after reconstruction* (§10.3), and requires the compressed prefix to fit the first
 > entry. Node child/tail, leaf
 > previous/next, and indexed-row page pointers are checked against the file's page range; optional leaf
-> links must be zero or name an in-file page. Point/range seeks track every
-> descent and leaf-chain page and reject repeats; the full index cursor uses an iterative ordered walk
-> with the same repeated-page check, avoiding recursive stack exhaustion. A followed leaf link must
+> links must be zero or name an in-file page. Point/range seeks bound the walk by counting rather than by
+> remembering pages: a descent deeper than any real tree, or a leaf chain longer than the file has pages, is a
+> cycle. The full index cursor uses an iterative ordered walk that rejects a repeated page, avoiding recursive
+> stack exhaustion. Keys must not descend wherever they are decoded — every page a seek reads and every leaf
+> the cursor walks. A followed leaf link must
 > resolve to another leaf of the same owner. Insert, delete, split propagation, and leaf-link mutation
 > revalidate the target page at the final read-modify-write boundary, including its expected leaf/node
 > role; this avoids relying on an earlier descent check if the file changed between reads. Violations
@@ -587,12 +589,9 @@ to `n` bytes, as page-01 stores it. LibRed builds the row and every key from one
   `Œ`→`OE`. **Own primaries**: `ſ` `6C 06`, `ŋ` `63 05`, `ŧ` `6E 06`+`0x1E`, `ı` `59`+`0x03`, and
   NBSP `08 02` (against the ordinary space's `0x07`).
 
-  **Accented Latin-1 letters** sort with their **base letter's primary weight** and record the
-  accent in a **secondary section**. Each character has a secondary weight (default `0x02`); an
-  accented letter carries the weight of its diacritic instead (verified against ACE, and the weight
-  depends only on the accent, not the base letter): **acute `0x0E`, grave `0x0F`, circumflex `0x12`,
-  diaeresis/umlaut `0x13`, tilde `0x19`, ring `0x1A`, cedilla `0x1C`**; plus atomic `Ø`→base `O`+`0x21`,
-  `Ð`→base `D`+`0x68`, and the ligature `Æ`→primaries `A E` (no accent).
+  **Accented letters** sort with their **base letter's primary weight** and record the accent in a
+  **secondary section**. Each character has a secondary weight (default `0x02`); an accented letter carries
+  the weight of its diacritic instead — the weights above (verified against ACE).
 
   > **The secondary section has one entry per primary *weight*, not per primary *byte*.** A weight may be
   > one byte or two, and a two-byte weight still takes a single slot — Norwegian `ö` is
@@ -1073,9 +1072,6 @@ is refused**; every key past the cap is truncated the way ACE truncates it. (Ver
 > two readings part company the moment the last key column is numeric. See
 > [`docs/design/index-key-checksum.md`](../design/index-key-checksum.md).
 
-The cap is on the **whole entry, not per column**: two 200-character text columns weigh about 404 bytes of
-key each, comfortably under the cap individually, and ACE stores their combined entry hashed at 510.
-
 Because it limits **weights** rather than characters, the text it buys depends on collation and script — and
 this is the practical cost of General over General Legacy, invisible in the schema:
 
@@ -1204,8 +1200,14 @@ The split mechanics:
 > **Indexable types — coverage vs ACE (§10.4).** `IndexKeyCodec` encodes **every type ACE lets you
 > index**, all byte-verified: Boolean, Byte, Int16, Int32, Currency, Single, Double, DateTime, Text, GUID,
 > Binary, FixedPoint, Memo (its first 255 chars), **`Int64`/BIGINT** (`0x13`) and
-> **`DateTimeExtended`/DATETIME2** (`0x14`). ACE correctly **refuses** to index `OLE` (`0x0B`) and `Complex`
-> (`0x12`).
+> **`DateTimeExtended`/DATETIME2** (`0x14`). ACE **refuses** to index `OLE` (`0x0B`) and BigBinary (`0x11`).
+> A `Complex` (`0x12`) column it does index (verified, on attachment, multi-value Long and multi-value Text
+> columns): `CREATE INDEX` and `CREATE UNIQUE INDEX` over one, a composite including one, `ADD CONSTRAINT …
+> UNIQUE`, a foreign key from one complex column to another and DAO's `CreateIndex` are all accepted, through
+> DAO and OLE DB alike, and rows insert with those indexes in place. LibRed takes the same statements and
+> gives each index the same flags and a data block of its own, and ACE reads and writes the result. Every complex column already has the index Access gives it when the column is made
+> ([page-02d §3.5](page-02d-constraints.md), flags `0x0289`), keyed on the row's Int32 complex id exactly as an
+> Int32 is (verified).
 >
 > `Int64`/BIGINT keys exactly as Currency does — an int64, sign bit flipped, big-endian — verified against ACE
 > including both extremes, ascending and descending. Note its **variable-length storage does not change

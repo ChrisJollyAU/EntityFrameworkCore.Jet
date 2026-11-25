@@ -22,13 +22,12 @@ namespace LibRed.Formats
     /// Which format version a column type needs in order to exist on disk at all.
     /// </summary>
     /// <remarks>
-    /// Stated over <see cref="JetDataType"/> rather than over a SQL type name, so it can be enforced in the
-    /// layer that actually writes the descriptor. The Engine's <c>AccessTypeMapper</c> has the same table
-    /// keyed by type name and refuses the DDL earlier, with a better message — but its guard is reachable
-    /// only through the SQL front door, and every <c>JetDatabase</c> DDL method takes a <c>ColumnSpec</c>
-    /// carrying a raw <see cref="JetDataType"/> straight to the writer. So a direct Core caller could write a
-    /// 0x13 descriptor into an ACE 12 file with nothing objecting: a column Access cannot read, produced by
-    /// the API whose documentation says that cannot happen.
+    /// Stated over <see cref="JetDataType"/> rather than over a SQL type name, so it holds in the layer that
+    /// actually writes the descriptor: every <c>JetDatabase</c> DDL method takes a <c>ColumnSpec</c> carrying a
+    /// raw <see cref="JetDataType"/> straight to the writer, the SQL front end's among them (its
+    /// <c>AccessTypeMapper</c> maps a type whatever the file's version). <c>SchemaEditor.RaiseFormatFor</c> raises
+    /// the file to what <see cref="Required"/> says, and <see cref="EnsureStorable"/> refuses what reaches the
+    /// writer unraised — a 0x13 descriptor in an ACE 12 file is a column Access cannot read.
     /// <para>BIGINT and DATETIME2 arrived in DIFFERENT versions — verified against files authored with each
     /// feature enabled: Large Number forces ACE 16 (version byte 0x05), Date/Time Extended ACE 17 (0x06).</para>
     /// </remarks>

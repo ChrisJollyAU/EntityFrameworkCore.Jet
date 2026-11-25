@@ -170,11 +170,14 @@ normally, but a compact drops the column, every column after it and every row of
 
 > **Every flag a user column carries is modelled; the rest ride through raw.** LibRed reads the user-column
 > bits of `0x0F` and `0x10` into `ColumnDef` (`IsUpdatable`/`IsGuidAutoNumber`/`IsHyperlink`,
-> `SupportsCompressedUnicode`/`IsCalculated`) and composes them back on write, so they round-trip explicitly.
-> It writes the catalog bits `0x10`/`0x20` on the system tables it creates. Everything else — the reserved
-> words at `0x03` and `0x11`, the catalog bits of an existing column, and the `0x10` bits it does not model,
-> which the complex columns' flat tables set — survives because every ALTER edits the existing descriptor in
-> place, as ACE does, rather than re-emitting it.
+> `SupportsCompressedUnicode`/`IsCalculated`) and composes them onto a column it creates — a calculated one as
+> `0xC0`. `EvaluatesExpression`, `IsVersionHistory` and the write-once bit of `0x11` (`IsWriteOnce`) it only
+> reads. It writes the catalog bits `0x10`/`0x20` on the system tables it creates. Everything else — the
+> catalog bits of an existing column, and the `0x10` bits it does not model, which the complex columns' flat
+> tables set — survives because every ALTER edits the existing descriptor in place, as ACE does, rather than
+> re-emitting it. Two fields are the exception, rewritten whenever a design change rewrites the definition, as
+> ACE rewrites them: the minimum build at `0x01`–`0x04` and the write-once field at `0x11`, reduced to its one
+> bit (table above).
 
 > **Nullability, defaults and checks are *not* in the descriptor.** The column's *Required* (NOT NULL)
 > property is **not** encoded anywhere in the 25-byte descriptor — verified: a nullable column and a
@@ -378,7 +381,7 @@ column's rank among the variable columns ordered by ascending id.
 
 Two limits bind a declaration, both enforced by ACE when it **opens the file**, so writing past either
 damages the database rather than just the table. Verified vs ACE 16; LibRed applies both in
-`Catalog/RowCodec.cs`, on create and on every incremental path.
+`RowCodec` (`ValidateFieldWidth`, `ValidateRecordFits`), on create and on every incremental path.
 
 **Per field: 510 bytes** — 255 Text characters, or 510 bytes of Binary, fixed or variable alike. ACE
 refuses a wider column through its own DDL identically on `CREATE TABLE`, `ALTER COLUMN` and `ADD COLUMN`

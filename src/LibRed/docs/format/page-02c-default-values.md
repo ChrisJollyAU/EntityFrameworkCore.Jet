@@ -175,9 +175,12 @@ they are otherwise valid expressions (see the table below).
 - **Row scope decides row-awareness.** A query evaluates against a **row scope** (so `IIf(N>10,…)` can read the
   column `N`); a default evaluates against an **empty scope** (so a column reference throws "Column 'A' was not
   found"). Same function, different scope — that is exactly the "row-blind default vs row-aware query" line.
-- **Rejection timing.** ACE rejects forbidden defaults (columns, aggregates, bad types) at **CREATE**; LibRed
-  stores the text and rejects at **INSERT** (defaults are parsed lazily when applied). Net behaviour matches
-  (both refuse); the messages and timing differ. *TODO:* optional create-time validation with ACE-like messages.
+- **Rejection timing.** ACE rejects forbidden defaults (columns, aggregates, bad types) at **CREATE**. LibRed
+  refuses at declaration — `CREATE TABLE`, `ADD COLUMN`, `ALTER COLUMN` alike — a default it can evaluate
+  there and its column cannot take (`DEFAULT 300` or `DEFAULT 'abc'` on a `BYTE`, `DEFAULT True` on a GUID;
+  `StatementExecutor.CheckDefault`); one it cannot evaluate when declared — a column reference, an aggregate —
+  it stores, and refuses at **INSERT**, when the default is applied. Net behaviour matches (both refuse); for
+  those the messages and timing differ.
 - **Superset grammar.** LibRed's ANTLR front-end parses compound/nested defaults ACE's DDL parser rejects; ACE
   still reads and applies them from `LvProp`. That includes the leading `=`: LibRed takes it before any default,
   spaced or not (`DEFAULT = 1`), in all four routes, and stores the text as written — every such text is one the

@@ -28,7 +28,7 @@ public sealed record IndexDef
     public bool Required { get; init; }
 
     /// <summary>The whole flags word of the index-data block — the bits above included, and
-    /// <see cref="IndexAttributes.ComplexColumn"/> on an index over a complex column.</summary>
+    /// <see cref="IndexAttributes.ComplexColumn"/> on the index a complex column is made with.</summary>
     public IndexAttributes Flags { get; init; }
 
     /// <summary>

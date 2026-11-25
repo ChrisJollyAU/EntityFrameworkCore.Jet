@@ -604,8 +604,8 @@ public static class JetTypeCodec
         return [.. bytes];
     }
 
-    /// <summary>Encodes text. A fixed-length (CHAR/NCHAR) column is **space-padded** (or truncated) to its byte
-    /// length — matching ACE, which stores and returns fixed text space-padded to the full width; a variable
+    /// <summary>Encodes text. A fixed-length (CHAR/NCHAR) column is **space-padded** to its byte length — matching
+    /// ACE, which stores and returns fixed text space-padded to the full width — and refuses a value past it; a variable
     /// column (TEXT/VARCHAR) is its exact UTF-16 bytes, or the compressed form when the column allows it and
     /// ACE would use it (see <see cref="TryCompressText"/>).</summary>
     private static byte[] EncodeText(ColumnDef column, string value)
@@ -617,7 +617,7 @@ public static class JetTypeCodec
         EnsureFitsFixedWidth(column, text.Length, value.Length);
         var padded = new byte[column.Length];
         for (int i = 0; i < column.Length; i += 2) padded[i] = 0x20; // UTF-16LE space (0x20 0x00)
-        Array.Copy(text, padded, Math.Min(text.Length, column.Length));
+        text.CopyTo(padded, 0);
         return padded;
     }
 

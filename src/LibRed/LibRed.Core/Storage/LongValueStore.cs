@@ -231,7 +231,7 @@ public sealed class LongValueStore(PageChannel channel)
 
         int rowCount = parsed.RowCount;
         // A long-value descriptor addresses its row with a ONE-BYTE field (the row byte of its record pointer),
-        // exactly as an index entry addresses a data row — so the same 256-slot ceiling applies, and passing it
+        // exactly as an index entry addresses a data row — so the same ceiling applies, held at MaxRowsPerPage, and passing it
         // would alias one value's descriptor onto another's row with no error. Today it is unreachable: a
         // payload of 64 bytes or less inlines and never arrives here, and a page leaves the free-pages map once
         // it has no room left for a MinLvalValue-byte value and its slot (RowInserter), which caps a page at 104 rows

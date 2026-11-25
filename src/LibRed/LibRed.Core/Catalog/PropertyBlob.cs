@@ -14,7 +14,7 @@ namespace LibRed.Catalog;
 /// <c>KKD\0</c> for older MDB) followed by blocks. Each block is <c>[int length][short type][body]</c>,
 /// the length covering the whole block. Type <c>0x80</c> is the property-name pool
 /// (<c>[short len][UTF-16 name]</c> repeated); other blocks are a per-owner value map, whose type says what
-/// owns it — <c>0x0000</c> the table, <c>0x0001</c> a column, and by mdbtools' account <c>0x0002</c> an index:
+/// owns it — <c>0x0000</c> the table, <c>0x0001</c> a column, <c>0x0002</c> an index, under the index's own name:
 /// <c>[short ownerRecLen][short 0][short nameLen][owner name]</c> then property entries
 /// <c>[short entryLen][byte flags][byte dataType][short nameIndex][short valueLen][UTF-16 value]</c>.
 /// </remarks>
@@ -32,7 +32,7 @@ public static class PropertyBlob
     internal const int BlockHeaderSize = 6;
 
     /// <summary>The block types: the property-name pool, and the value blocks owned by the table (empty owner
-    /// name) and by a column. By mdbtools' account an index's block is <c>0x0002</c>.</summary>
+    /// name) and by a column. An index's block is <c>0x0002</c>, kept as read (<see cref="Property.Block"/>).</summary>
     internal const ushort NameListBlock = 0x0080;
     internal const ushort TableBlock = 0x0000;
     internal const ushort ColumnBlock = 0x0001;
@@ -92,8 +92,8 @@ public static class PropertyBlob
     /// <c>0x80</c> on its own account (seen on stored queries). It defaults to <c>0x01</c> because the properties
     /// LibRed creates are schema properties such as <c>DefaultValue</c>, <c>Required</c> and
     /// <c>CheckConstraints</c>.</para>
-    /// <para><see cref="Block"/> is the type of the value block the property was read from — by mdbtools' account an
-    /// index's properties sit in a block of their own, under the index's name, which is usually its column's — and
+    /// <para><see cref="Block"/> is the type of the value block the property was read from — an index's properties
+    /// sit in a block of their own, under the index's name, which is usually its column's — and
     /// is written back as that type. It is null for a property LibRed constructs, which goes in the table's block or its column's.</para></summary>
 #pragma warning disable CA1716 // "Property" is the format's own name for this record, and it is nested in PropertyBlob.
     public readonly record struct Property(
@@ -343,8 +343,8 @@ public static class PropertyBlob
         return [.. result];
     }
 
-    /// <summary>Parses every property (owner, name, value) from a blob. Empty owner = a table property.</summary>
-    /// <summary>Every property in the blob. The accessors below select from the result rather than taking the
+    /// <summary>Every property (owner, name, value) in the blob; an empty owner is the table's. The accessors
+    /// below select from the result rather than taking the
     /// blob themselves, so a caller wanting several of them parses once — <see cref="Catalog.JetCatalog"/>
     /// wants five per table, two of them per column.</summary>
     public static IReadOnlyList<Property> Read(ReadOnlySpan<byte> blob)

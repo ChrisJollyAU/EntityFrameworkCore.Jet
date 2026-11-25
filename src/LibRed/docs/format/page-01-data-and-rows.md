@@ -114,7 +114,9 @@ hundreds of bytes against the pointer's four.
 > delete on a `.mdb` too.
 
 > **Reader guardrails.** LibRed requires an exact format-sized type-`0x0101` page before either a full
-> scan or the O(1) index-seek slot path. The declared slot directory must fit before the heap; every
+> scan or the O(1) index-seek slot path. The row count may not exceed `MaxRowsPerPage` (255) — stricter than
+> ACE, which reads a page of 256 and drops the slots past that (above) — and the declared slot directory must
+> fit before the heap; every
 > masked row offset must lie between the directory end and page end and must not increase relative to
 > the previous slot. Equal offsets remain valid because ALTER/relocation can deliberately leave a
 > zero-length deleted+overflow tombstone. Violations are reported as `InvalidDataException` before a

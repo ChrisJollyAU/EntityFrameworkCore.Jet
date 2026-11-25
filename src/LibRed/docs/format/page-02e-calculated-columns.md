@@ -26,18 +26,20 @@ value is a cache of ACE's own evaluation and anything else there produces a file
   takes, and the long-value map admits a calculated column whatever its declared type;
 - `ResultType` decides how the payload is read, rather than it being inferred from the payload's width;
 - `CalculatedExpression` parses and validates, `CalculatedEvaluator` evaluates — every function on the
-  whitelist below, with Access's null semantics and its per-function argument rules;
+  whitelist below, each the one implementation the SQL engine uses too (`ExpressionFunctions`), behind the
+  calculated column's own gates: the whitelist and its per-function argument rules;
 - `RowCodec` recomputes on insert; `RowInserter.Update` does so only when a column the expression reads is
   in the changed set;
 - a Memo result too large to inline spills to a long-value page through a callback `RowInserter` hands the
   encoder — a calculated column is the one value the encoder *derives* rather than receives, so it cannot
   have been materialised before the row arrived the way a plain memo is. Recomputing frees the pages the
   previous result held;
-- `ColumnSpec.Calculated` authors one, and `DELETE` frees a calculated Memo's pages.
+- `ColumnSpec.Calculated` authors one, and `DELETE` frees a calculated Memo's pages;
+- the SQL front end declares one as `column type AS (expression)` — a LibRed extension, since Access SQL has
+  no syntax for one and ACE creates them only through DAO.
 
 **Not done:** changing an existing calculated column's expression or result type (see [Still
-open](#still-open)), and any SQL syntax for declaring one — Access SQL has none, so it would need LibRed's
-extended mode.
+open](#still-open)).
 
 ## What the file actually carries
 
@@ -237,16 +239,16 @@ are in.
 
 ## How it is implemented
 
-**Two evaluators, deliberately.** `LibRed.Engine` has an expression evaluator already, but the dependency
-runs `Engine → Core` and this evaluation happens in **Core**, at row-encode time. A dedicated Core evaluator
-was chosen over inverting with an interface Engine supplies, because inversion buys nothing here: the layer
-that needs the answer is the one that cannot reach the implementation, so a Core-only caller
-(`JetDatabase.Insert` is public API) would still have to refuse. The subset is small, frozen by ACE, and
-semantically its own language — the Access *expression service*, not Access SQL — and it must match ACE
-exactly, including null propagation, Currency scaling and the compressed-vs-raw text choice. The financial
-functions and the two name functions are **ported** from `ExpressionEvaluator` rather than re-derived, so one
-formula cannot answer differently through SQL than through a calculated column. Moving the shared
-primitives down into Core remains the answer if the duplication starts to bite.
+**Two evaluators over one set of functions.** `LibRed.Engine` has an expression evaluator already, but the
+dependency runs `Engine → Core` and this evaluation happens in **Core**, at row-encode time: a Core-only
+caller (`Table.Insert` is public API) has to get its answer without the engine. So the functions and the
+operator and value helpers live once, in Core's `ExpressionFunctions<TExpression>`, and both evaluators derive
+from it — the engine's `ExpressionEvaluator` over the SQL AST, Core's `CalculatedEvaluator` over the
+calculated column's own parse tree — so one formula cannot answer differently through SQL than through a
+calculated column. `CalculatedEvaluator` implements no function; it applies what is the calculated column's
+alone — ACE's whitelist, the `$` refusal, the measured argument counts, and the Null arguments whose cached
+error LibRed refuses to write — and then calls the shared one. Each evaluator walks its own tree, and the
+subset stays semantically its own language — the Access *expression service*, not Access SQL.
 
 **Authoring.** `ColumnSpec.Calculated` builds one: promoted storage type in the descriptor, `0xC0`, variable
 slot, the constant declared length. `CREATE TABLE` and `ADD COLUMN` write the
@@ -262,10 +264,10 @@ all. Measured end to end: ACE accepts, evaluates and *recomputes* a column LibRe
 type including a spilled Memo.
 
 **`ALTER` leaves a calculated column working.** `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN` (retype) and
-`RenameColumn` all leave a calculated column working. Where an unrelated column's retype requires LibRed's
-full table rebuild (for example Memo → Text), the rebuild carries each calculated column's `Expression`/`ResultType` properties along with its descriptor and
-regenerates its cached value from the expression; a cached value is not caller-supplied data and cannot be
-reinserted verbatim.
+`RenameColumn` all leave a calculated column working. Every one of them edits the definition in place, a
+retype to or from Memo/OLE included ([page-02b §3.8](page-02b-columns.md)), so a calculated column's
+descriptor and its `Expression`/`ResultType` properties are never rebuilt, and a re-laid row carries its
+cached value as the chunk it was.
 Dropping a column an expression reads is **refused**, which ACE does not do; see below.
 
 **Text compression follows the declared type**, and the encoding rule is in
@@ -489,6 +491,5 @@ is more permissive than ACE**, which refuses such a column outright; whether Lib
    **Drop the calculated column and add it again** instead: both halves are supported, neither touches the
    data columns, and the result is indistinguishable from one ACE authored. Refusing to drop a column an
    expression reads is what keeps that the only way the two can get out of step.
-6. **No SQL syntax to declare one.** Access SQL has none, so this needs LibRed's extended mode (something
-   like `ADD COLUMN c AS (<expr>)`), and then a decision about whether EF's `HasComputedColumnSql` maps
-   onto it.
+6. **Whether EF's `HasComputedColumnSql` maps onto the SQL syntax** LibRed has for declaring one
+   (`column type AS (expression)`, above) is not decided.

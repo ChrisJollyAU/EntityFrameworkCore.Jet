@@ -236,6 +236,32 @@ public class ComplexColumnTests
     private static int ComplexIndexFlags(JetDatabase db) =>
         (int)db.Catalog.FindTable("MSysResources")!.Indexes.Single(i => i.Columns.Any(c => c.Column.Name == "Data")).Flags;
 
+    // 0x0200 belongs to the index a complex column is made with. One created over the column afterwards is
+    // flagged as over any column, and so cannot share that index's data block (measured against ACE: CREATE
+    // INDEX 0x0080, unique 0x0081, unique DISALLOW NULL 0x0089, each a block of its own).
+    [Fact]
+    public void An_index_created_over_a_complex_column_does_not_carry_the_complex_flag()
+    {
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "complex-index-");
+        try
+        {
+            using (var db = JetDatabase.Open(path, readOnly: false))
+            {
+                db.CreateIndex("MSysResources", "IxData", [("Data", false)]);
+                db.CreateIndex("MSysResources", "UxData", [("Data", false)], isUnique: true, disallowNull: true);
+            }
+
+            using var reopened = JetDatabase.Open(path);
+            var overData = reopened.Catalog.FindTable("MSysResources")!.Indexes
+                .Where(i => i.Columns.Any(c => c.Column.Name == "Data")).ToList();
+            Assert.Equal(0x0080, (int)overData.Single(i => i.Name == "IxData").Flags);
+            Assert.Equal(0x0089, (int)overData.Single(i => i.Name == "UxData").Flags);
+            Assert.Equal(0x0289, (int)overData.Single(i => i.Name is not ("IxData" or "UxData")).Flags);
+            Assert.Equal(3, overData.Select(i => i.RealIndexOrdinal).Distinct().Count());
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
     // A complex column's catalog row names its column by NAME, and the catalog drops a row whose name the
     // owning table does not have — so a rename that left the row behind did not misname the column, it
     // disconnected it: the values stayed on disk with nothing able to reach them.

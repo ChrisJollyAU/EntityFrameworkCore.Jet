@@ -918,13 +918,6 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
         return gaining;
     }
 
-    /// <summary>Finds a data page with room for a row of the needed size, growing the table if none has.</summary>
-    /// <remarks>
-    /// Consults the <i>free</i>-pages map, not the owned-pages map. The two agree only while a table is
-    /// small: once a page fills, Access clears its free bit (see <see cref="AllocateDataPage"/>), so the free
-    /// map is normally just the page currently being appended to. Scanning the owned map instead would read
-    /// every already-full page from disk on every insert — O(pages) per row, i.e. quadratic over a bulk load.
-    /// </remarks>
     /// <summary>Rejects a record ACE would refuse to store, before any page is touched. Without this
     /// <see cref="FindPageWithRoom"/> finds nothing with room, allocates a fresh page that cannot hold it
     /// either, and the offset arithmetic then throws an ArgumentOutOfRangeException that says nothing about
@@ -938,6 +931,13 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
                 + "bytes excluding long values. Move the large columns to Memo/OLE, which live on their own pages.");
     }
 
+    /// <summary>Finds a data page with room for a row of the needed size, growing the table if none has.</summary>
+    /// <remarks>
+    /// Consults the <i>free</i>-pages map, not the owned-pages map. The two agree only while a table is
+    /// small: once a page fills, Access clears its free bit (see <see cref="AllocateDataPage"/>), so the free
+    /// map is normally just the page currently being appended to. Scanning the owned map instead would read
+    /// every already-full page from disk on every insert — O(pages) per row, i.e. quadratic over a bulk load.
+    /// </remarks>
     private (int PageNumber, byte[] Page) FindPageWithRoom(JetFormatBase format, int needed)
     {
         foreach (int pageNumber in new UsageMap(_channel, _table).FreeDataPages().ToList())
@@ -994,24 +994,21 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
 
 
     /// <summary>
-    /// Access stores a memo/OLE value <b>inline</b> only up to 64 bytes (Jackcess
-    /// <c>MAX_INLINE_LONG_VALUE_SIZE</c>, the same for Jet3/Jet4); a larger value goes on its own LVAL
-    /// page. Inlining a long value works for LibRed's own reader but Access rejects it (e.g. it opens the
-    /// database yet fails to run a view whose subquery Expression is inlined). So for each memo/OLE column
-    /// whose value exceeds the inline limit, write it to an LVAL page and substitute the 12-byte reference
-    /// descriptor (short values, and pre-built descriptors from other callers, are left as-is to inline).
-    /// </summary>
-    /// <summary>
     /// The row as it is <b>stored</b>: a copy of the logical values in which every memo/OLE value too large to
     /// inline has become the descriptor naming its pages.
     /// </summary>
     /// <remarks>
+    /// Access stores a memo/OLE value <b>inline</b> only up to 64 bytes; a larger one goes on an LVAL page.
+    /// Inlining it works for LibRed's own reader but Access rejects it (e.g. it opens the database yet fails to
+    /// run a view whose subquery Expression is inlined). Short values, and descriptors other callers have
+    /// already built, are left as they are.
+    /// <para>
     /// The copy is the point. A row has two representations — the values a caller holds, and the descriptors
     /// the record carries — and they are indistinguishable at the type level, since both live in an
     /// <c>object?[]</c>. Materialising in place made the caller's array silently change meaning halfway
     /// through a write, and everything that then read it got the wrong one: a delete keyed an index off a
     /// <c>byte[]</c> descriptor, an update moved an index entry using a descriptor as a key, a caller was left
-    /// holding pages that had been freed. Two arrays makes the distinction one the code can state.
+    /// holding pages that had been freed. Two arrays makes the distinction one the code can state.</para>
     /// </remarks>
     private object?[] ToStorageValues(object?[] values)
     {
@@ -1337,7 +1334,8 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
     /// reject the insert as a duplicate primary key.)</item>
     /// <item>Per-index **unique-entry count** (`0x3F + ordinal×12`, `+4`) — incremented by one for
     /// each index in <paramref name="newKeys"/> (the row brings a key it does not hold yet). Access advances it on insert only,
-    /// once per real index, and never decrements it. The sibling **total-entry count**
+    /// once per real index; a delete or a key change can lower it (<see cref="Delete"/>, <see cref="CountKeyMoved"/>).
+    /// The sibling **total-entry count**
     /// (`+0`) is deliberately left untouched **on insert**: Access does not raise it there — it is written
     /// when the index is built (to its entries, in <c>SchemaEditor</c>'s back-fill) or the file compacted
     /// (verified: an index created on an empty table reads total `0` through any number of inserts).

@@ -22,8 +22,8 @@ public enum IndexAttributes : ushort
     /// <summary>Always set on Access 2000+ index-data blocks.</summary>
     AlwaysSet = 0x0080,
 
-    /// <summary>The index is over a complex (multi-value / attachment) column. Set on every such index Access
-    /// writes — always as <c>0x0289</c>, with unique, required and always-set — and on no other (measured across
-    /// Access-written files).</summary>
+    /// <summary>The index is the one a complex (multi-value / attachment) column is made with — always
+    /// <c>0x0289</c>, with unique, required and always-set. No other index carries it: one created over a complex
+    /// column afterwards is flagged as over any column (verified vs ACE).</summary>
     ComplexColumn = 0x0200,
 }

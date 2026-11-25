@@ -693,9 +693,12 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         AddIndex(table, indexName, columns, isUnique, isPrimary, disallowNull, ignoreNulls);
     }
 
-    /// <summary>Adds an index using an already resolved definition, including during catalog creation.</summary>
+    /// <summary>Adds an index using an already resolved definition, including during catalog creation.
+    /// <paramref name="ownsComplexColumn"/> says it is the index a complex column is made with, the only one that
+    /// carries <see cref="IndexAttributes.ComplexColumn"/>: an index created over such a column afterwards does not
+    /// (verified vs ACE: CREATE INDEX, a UNIQUE constraint and a foreign key over one are 0x0080 and 0x0081).</summary>
     internal void AddIndex(TableDefinition table, string indexName, IReadOnlyList<(string Column, bool Descending)> columns,
-        bool isUnique, bool isPrimary, bool disallowNull, bool ignoreNulls)
+        bool isUnique, bool isPrimary, bool disallowNull, bool ignoreNulls, bool ownsComplexColumn = false)
     {
         JetName.Validate(indexName, "index name");
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, table.Name);
@@ -708,7 +711,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         if (isPrimary && table.Indexes.Any(i => i.IsPrimaryKey))
             throw new InvalidOperationException($"Primary key already exists on table '{table.Name}'.");
         InsertIndex(table, indexName, slots,
-            unique: isUnique || isPrimary, required: isPrimary || disallowNull, ignoreNulls,
+            unique: isUnique || isPrimary, required: isPrimary || disallowNull, ignoreNulls, ownsComplexColumn,
             (num, ord) => TableDefinition.LogicalIndexSpec.Plain(num, ord, isPrimary, indexName));
     }
 
@@ -766,7 +769,8 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// <paramref name="buildInfo"/> gets (block number, data-block ordinal) and returns the info block's fields — a
     /// plain index or an outgoing-FK block. Returns the new block number.</summary>
     private int InsertIndex(TableDefinition table, string indexName, List<(int Id, bool Ascending)> slots,
-        bool unique, bool required, bool ignoreNulls, Func<int, int, TableDefinition.LogicalIndexSpec> buildInfo)
+        bool unique, bool required, bool ignoreNulls, bool complexColumn,
+        Func<int, int, TableDefinition.LogicalIndexSpec> buildInfo)
     {
         JetFormatBase format = _channel.Format;
         RejectDuplicateIndexName(table, indexName);
@@ -794,7 +798,6 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             EnsureExistingRowsFitIndex(table, indexName, slots, unique, required);
 
         int dataCount = parts.DataBlocks.Count;
-        bool complexColumn = slots.Any(s => table.Columns.Any(c => c.ColumnId == s.Id && c.Type == JetDataType.Complex));
         byte[] dataBlock = TableDefinition.BuildDataBlock(format, slots, rootPage: 0, usageRow: 0, usagePage: 0,
             unique, ignoreNulls, required, complexColumn);
 
@@ -1047,7 +1050,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         {
             _catalog.CreateRelationshipObject(fk.Name);
             int childBlockNum = InsertIndex(child, fk.Name, slots,
-                unique: fk.IsOneToOne, required: false, ignoreNulls: false,
+                unique: fk.IsOneToOne, required: false, ignoreNulls: false, complexColumn: false,
                 (num, ord) => new TableDefinition.LogicalIndexSpec(num, ord, ForeignKeyType.Outgoing, (uint)parentNum,
                     parentPage, upd, del, IndexInfoType.Foreign, fk.Name));
 
@@ -2196,8 +2199,9 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         new RowInserter(_channel, registry, databaseCollation: null).Insert(row, updateIndexes: true);
         _catalog.Invalidate();
 
-        AddIndex(ownerName, $"{column.Name[..Math.Min(column.Name.Length, OwnerIndexColumnLength)]}_{NewGuidName()}",
-            [(column.Name, false)], isUnique: true, isPrimary: false, disallowNull: true, ignoreNulls: false);
+        AddIndex(DesignTable(ownerName), $"{column.Name[..Math.Min(column.Name.Length, OwnerIndexColumnLength)]}_{NewGuidName()}",
+            [(column.Name, false)], isUnique: true, isPrimary: false, disallowNull: true, ignoreNulls: false,
+            ownsComplexColumn: true);
         SetColumnProperties(flatPage, valueColumns[0].Name,
             [PropertyBlob.Bool(valueColumns[0].Name, PropertyBlob.RequiredProperty, false)]);
         _catalog.Invalidate();
@@ -3299,10 +3303,4 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         while (number > 0);
         return name.ToString();
     }
-
-
-    // A user table's owner + grantee SIDs — Users owns user objects; Users + Admin get the grants — read from
-    // the file being written, since an on-disk SID is masked per file (page-00 §2.3). Baking in the pair this
-    // engine creates files with meant a table added to an ACE-authored file carried an owner that decodes to
-    // no account in it (ACE writes 690C in Northwind where LibRed wrote its own 26CD).
 }

@@ -16,11 +16,13 @@ namespace LibRed.Crypto;
 /// Algorithm verified against the jackcess-encrypt providers and real fixtures (db2007-oldenc = RC4-40 /
 /// Test123; db-nonstandard = AES-256 / password):
 /// <list type="bullet">
-/// <item><c>baseHash = SHA1(salt ‖ UTF16LE(password))</c>.</item>
+/// <item><c>baseHash = hash(salt ‖ UTF16LE(password))</c>, the hash the header's AlgIDHash names — not fixed to
+/// SHA-1.</item>
 /// <item>per-block key: <c>iterHash = iterate(baseHash, iterations)</c> (0 iterations for RC4-CryptoAPI and the
-/// AES "non-standard" variant; 50000 for ECMA-standard AES); <c>H = SHA1(iterHash ‖ block)</c>; then AES uses the
-/// <c>0x36/0x5C</c> expansion <c>key = (SHA1(0x36pad⊕H) ‖ SHA1(0x5Cpad⊕H))[0..keyLen]</c> while RC4 uses
-/// <c>key = H[0..keyLen]</c> (a 40-bit RC4 key is then zero-padded to 16 bytes).</item>
+/// AES "non-standard" variant; 50000 for ECMA-standard AES); <c>H = hash(iterHash ‖ block)</c>; then RC4 uses
+/// <c>key = H[0..keyLen]</c> (a short RC4 key may then be zero-padded to 16 bytes), while AES uses either that or
+/// the <c>0x36/0x5C</c> expansion <c>key = (hash(0x36pad⊕H) ‖ hash(0x5Cpad⊕H))[0..keyLen]</c> — whichever
+/// authenticates the verifier (docs/format/page-00-database.md §2.5).</item>
 /// <item>verifier block = <c>LE32(0)</c>; per-page block = <c>pageNumber XOR databaseKey</c> (the 4-byte
 /// database key at page-0 <c>0x3E</c>).</item>
 /// <item>cipher: RC4 (stream, re-keyed per page; the verifier + verifier-hash decrypt as one continuous stream)

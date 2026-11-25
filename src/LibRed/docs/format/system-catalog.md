@@ -67,8 +67,9 @@
 
   **Writing a table object** (verified against Access-written rows). A complete user-table row sets:
   `Id` = TDEF page; `ParentId` = `0x0F000001` (the database's "Tables" container, constant);
-  `Type` = `1`; `Name`; `Flags` = `0`; `Owner` = the 2-byte binary SID of the **Users** account *as this file
-  masks it* (see the SID note below — the bytes differ per database); and `DateCreate` / `DateUpdate`. The other
+  `Type` = `1`; `Name`; `Flags` = `0`; `Owner` = the 2-byte binary SID of the **admin** user, who creates it,
+  *as this file masks it* (see the SID note below — the bytes differ per database); and `DateCreate` /
+  `DateUpdate`. The other
   columns (`Connect`, `Database`, `ForeignName`, `Lv*`, `RmtInfo*`) are null **except `LvProp`**,
   an OLE long-value blob ("MR2"-prefixed) holding the object's **extended properties** — including
   column-level properties such as *Required* (see §3.4) and *DefaultValue*.
@@ -239,8 +240,8 @@
   > first appearing as `Required`, then `DefaultValue`, then `CheckConstraints` are pooled as
   > `["Required","DefaultValue","CheckConstraints"]`, not `["CheckConstraints","DefaultValue","Required"]`.
   > Example (`Req int NOT NULL, …, Def int DEFAULT 7 NOT NULL`): name pool `["Required","DefaultValue"]`, then `Req`'s `Required`, then `Def`'s `DefaultValue`=`7`
-  > and `Required` — reproduced byte-for-byte by `PropertyBlob.Write` (which builds the pool by first
-  > appearance via `Distinct()`).
+  > and `Required` — reproduced byte-for-byte by `PropertyBlob.Write` (which pools each new name where it first
+  > appears, after whatever pool the blob being rewritten already had).
   >
   > **Unmodelled properties round-trip verbatim.** LibRed *interprets* `DefaultValue`, `Required`,
   > `AllowZeroLength`, `CheckConstraints` and the text `ValidationRule`/`ValidationText` (the last two are
@@ -262,10 +263,10 @@
   > column null ("You must enter a value in the '<table>.<column>' field.", matching Access). Access
   > **applies the default**, **enforces Required**, and **enforces the CHECK** on its own inserts —
   > including on a LibRed-created table (verified: ACE rejects an insert omitting a LibRed `NOT NULL`
-  > column). `LvProp` is stored on a **single LVAL page** (`LongValueStore`, descriptor flag `0x40`) — the
-  > form Access's property loader requires. **Verified:** Access opens the file and **applies the default** on
-  > its own insert that omits the column. (An *inline* value, flag `0x80`, is valid long-value storage but is
-  > **not** recognised by Access's property loader.)
+  > column). `LvProp` is stored as any long value is ([long-values.md](long-values.md), *Writing long
+  > values*): inline in the row up to 64 bytes, on a packed LVAL page (descriptor flag `0x40`) past that, and
+  > chained once it outgrows one page.
+  > **Verified:** Access opens the file and **applies the default** on its own insert that omits the column.
   >
   > **`ALTER COLUMN … SET DEFAULT expr` / `DROP DEFAULT`** are LvProp edits only — no TDEF/type change. Both
   > read the `LvProp` blob, mutate the target column's map, and rewrite it: SET replaces (or adds) that
@@ -368,7 +369,7 @@
 - **Relationships** are `MSysObjects` rows of **Type 8** too — one per relationship, alongside its
   `MSysRelationships` rows (verified vs ACE: every relationship Access or ACE creates has one, whether from
   `ALTER TABLE … ADD CONSTRAINT` or a `CREATE TABLE` foreign key). `Name` is the relationship's name,
-  `ParentId 0x0F000003` (the Relationships container), `Flags 0`, `Owner` = the file's Users SID (the SID note
+  `ParentId 0x0F000003` (the Relationships container), `Flags 0`, `Owner` = the file's admin SID (the SID note
   above), `DateCreate` = `DateUpdate` =
   the creation time, and `LvProp`, `Lv`, `LvExtra`, `LvModule`, `Connect`, `Database`, `ForeignName`,
   `RmtInfoShort`, `RmtInfoLong` all null — for one ACE creates. An Access-written relationship can carry
@@ -435,9 +436,9 @@
   > query object's `Id`), `Attribute` (Byte, the row kind — see below), `Flag` (Int16, attribute-specific),
   > `Name1` and `Name2` (Text, attribute-specific names), `Expression` (Memo, attribute-specific text —
   > SQL fragments), `Order` (Binary, a 4-byte big-endian per-attribute sequence counter), and `LvExtra`
-  > (Int32) — a long-value/overflow field observed **null** in Access-written query rows and that LibRed
-  > leaves null (not needed for the queries it writes). Only index = composite PK `(ObjectId, Attribute,
-  > Order)`.
+  > (Int32) — a declared parameter's facets on its `0x02` row, and null on a query that declares none (below,
+  > *A declared parameter's facets* and *`LvExtra` after a sized parameter*). Only index = composite PK
+  > `(ObjectId, Attribute, Order)`.
 
   The query itself is stored in **MSysQueries**, decomposed into rows keyed by `ObjectId`, each with an `Attribute`
   byte (verified vs ACE for the "simple SELECT" a view may contain): `0x00` =

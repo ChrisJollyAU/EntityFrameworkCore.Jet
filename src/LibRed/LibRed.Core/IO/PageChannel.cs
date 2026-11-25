@@ -258,12 +258,10 @@ public sealed class PageChannel : IDisposable
             stream.Seek(0, SeekOrigin.Begin);
             stream.ReadExactly(page0);
             int databaseKey = DatabaseDefinitionPage.ReadDatabaseKey(page0, format);
-            // A nonzero database key means the pages are encrypted. ACE (.accdb) uses Office Agile encryption
-            // (with a password); the pre-ACE Jet 3/4 formats (.mdb and the .mdw workgroup file) use the legacy
-            // RC4 scheme keyed by the database key alone (no password).
-            // ACE (.accdb) may use Agile (XML descriptor) or the older Office "Standard"/CryptoAPI scheme (binary
-            // descriptor) — detect by descriptor, trying Agile first then Standard. The pre-ACE Jet 3/4 formats
-            // (.mdb and the .mdw workgroup file) use the legacy RC4 scheme keyed by the database key alone.
+            // A nonzero database key means the pages are encrypted. ACE (.accdb) may use Agile (XML descriptor) or
+            // the older Office "Standard"/CryptoAPI scheme (binary descriptor), each with a password — detect by
+            // descriptor, trying Agile first then Standard. The pre-ACE Jet 4 format (.mdb and the .mdw workgroup
+            // file) uses the legacy RC4 scheme keyed by the database key alone (no password).
             IPageCodec? codec = format.IsAccdb
                 ? (IPageCodec?)AgileEncryption.TryCreate(page0, databaseKey, password, format)
                     ?? OfficeStandardEncryption.TryCreate(page0, databaseKey, password, format)

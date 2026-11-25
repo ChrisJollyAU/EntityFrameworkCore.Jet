@@ -268,7 +268,8 @@ public abstract class JetFormatBase
     public abstract int TdefAutoNumberIncrementOffset { get; }
 
     /// <summary>Offset of the 4-byte complex-type AutoNumber high-water (mdbtools <c>ct_autonum</c>) — the
-    /// next id for a complex (multi-value/attachment) column. 0 for every table without such a column.</summary>
+    /// last record id handed to the table's complex (multi-value/attachment) columns. 0 for every table without
+    /// such a column.</summary>
     public abstract int TdefComplexAutoNumberOffset { get; }
 
     /// <summary>Offset of the 1-byte table type (0x4E 'N' user, 0x53 'S' system).</summary>
@@ -361,8 +362,8 @@ public abstract class JetFormatBase
     /// <summary>Offset in a real-index entry of its 4-byte total entry count (the row count).</summary>
     public abstract int RealIndexRowCountOffset { get; }
 
-    /// <summary>Offset in a real-index entry of its 4-byte unique entry count — cumulative, never decremented by
-    /// Access.</summary>
+    /// <summary>Offset in a real-index entry of its 4-byte unique entry count — raised by an insert that brings a
+    /// new key, lowered by a delete or a key change, and set afresh when the index is built (page-02d §3.3.1).</summary>
     public abstract int RealIndexUniqueCountOffset { get; }
 
     // --- TDEF column descriptor: one per column, after the real-index block (offsets within a descriptor) ---
@@ -372,8 +373,8 @@ public abstract class JetFormatBase
 
     public abstract int ColumnTypeOffset { get; }
 
-    /// <summary>Offset of the 2-byte low half of <see cref="TdefRecordMarker"/> in a column descriptor.
-    /// Access needs it; the reader ignores it.</summary>
+    /// <summary>Offset of the 4-byte <see cref="TdefRecordMarker"/> in a column descriptor — the column's minimum
+    /// engine build, which ACE refuses the table over (page-02b §3.4). The reader ignores it.</summary>
     public abstract int ColumnRecordMarkerOffset { get; }
 
     public abstract int ColumnNumberOffset { get; }

@@ -87,8 +87,8 @@ differently from a delete:
 > does, so on such an index an UPDATE appears to change neither count.
 
   LibRed maintains both this way — inserts, deletes and updates in `RowInserter`, builds in `SchemaEditor`'s index
-  back-fill, and the Memo/OLE retype (which LibRed does by rebuilding the whole table) restores every other
-  index's counts afterwards — and exposes `+4` as `IndexDef.UniqueEntryCount`.
+  back-fill, which a retype runs only for the indexes over the changed column, Memo/OLE included — and exposes
+  `+4` as `IndexDef.UniqueEntryCount`.
 
 
 ### 3.5 Index-data block (52 bytes)
@@ -101,7 +101,7 @@ differently from a delete:
 | `0x23` | 3 | Usage-map page |
 | `0x26` | 4 | **B-tree root page** |
 | `0x2A` | 4 | Unknown / reserved (zero). Not read by ACE, and zeroed when it rewrites the TDEF (verified) |
-| `0x2E` | 2 | Flags: `0x01` unique, `0x02` ignore-nulls (`WITH IGNORE NULL` — rows whose key is Null in every column excluded from the index), `0x08` required (`WITH DISALLOW NULL` / part of a primary key), `0x80` always-set (Access 2000+), `0x0200` an index over a **complex** (multi-value / attachment) column. Verified vs ACE: a plain index is `0x0080`, `IGNORE NULL` `0x0082`, `DISALLOW NULL` `0x0088`, a PK `0x0089`. Every index Access writes over a complex column is `0x0289` — unique, required, always-set and `0x0200` — and no other index carries `0x0200` (verified). A foreign key's child block (§3.6) carries `0x01` exactly when the relationship is one-to-one
+| `0x2E` | 2 | Flags: `0x01` unique, `0x02` ignore-nulls (`WITH IGNORE NULL` — rows whose key is Null in every column excluded from the index), `0x08` required (`WITH DISALLOW NULL` / part of a primary key), `0x80` always-set (Access 2000+), `0x0200` the index a **complex** (multi-value / attachment) column is made with. Verified vs ACE: a plain index is `0x0080`, `IGNORE NULL` `0x0082`, `DISALLOW NULL` `0x0088`, a PK `0x0089`. The index every complex column gets when it is made is `0x0289` — unique, required, always-set and `0x0200` — and no other index carries `0x0200`: one created over a complex column afterwards is flagged as over any column (`CREATE INDEX` `0x0080`, unique `0x0081`, `DISALLOW NULL` `0x0088`, a foreign key's `0x0080`) and takes a data block of its own, a unique `DISALLOW NULL` one (`0x0089`) included (verified). DAO's `Indexes` collection does not list the `0x0200` index. A foreign key's child block (§3.6) carries `0x01` exactly when the relationship is one-to-one
 (`MSysRelationships.grbit` `0x01`), and **this bit, not `grbit`, is what ACE enforces**: made to disagree, a
 child index with the bit refuses a second child row with the same key although `grbit` says one-to-many, and
 one without it accepts the duplicate although `grbit` says one-to-one (verified vs ACE). There is **no clustered flag**: `CLUSTERED`/`NONCLUSTERED` after `PRIMARY KEY` or `UNIQUE` in a constraint is accepted and stores nothing (the file is byte-identical without it), and DAO's `Index.Clustered` reads `False` even on an index created with it set. |
@@ -321,6 +321,8 @@ physical (data-block) index, prefer a real index's name over a foreign-key relat
 > each **incoming** relationship (same `index_num2`, `fkTablePage` = the child table), while its
 > **outgoing** FK relationships map to the child-column real indexes. So `index_num2` points to the real
 > index on this table's side — the child FK column for an outgoing FK, the referenced key (PK) for an
-> incoming one — which is exactly mdbtools' "index into index cols list". LibRed's reader keys off
-> `0x08` (its `DataNumber`) and does not use `0x04`.
+> incoming one — which is exactly mdbtools' "index into index cols list". LibRed's reader resolves an index's
+> columns, root and name through `0x08` (`LogicalIndexSpec.DataOrdinal`); `0x04` (`Number`) pairs a
+> relationship's incoming block with its child's when a parent's relationships are put in order, and the
+> writers number a new block and cross-link the two ends by it.
 

@@ -168,9 +168,8 @@ public sealed class ColumnDef
     public int ComplexId { get; init; }
 
     /// <summary>The column's on-disk descriptor bytes (the 25-byte Jet4 record), captured verbatim on read —
-    /// the reserved words at <c>0x03</c> and <c>0x11</c> and the undocumented flag bits included, which no
-    /// modelled property carries. Nothing writes from it: every DDL edits the descriptor in place, so those
-    /// bytes are never re-emitted. Null for a freshly-built (never-read) column.</summary>
+    /// the flag bits no modelled property carries included. Nothing writes from it: every DDL edits the
+    /// descriptor in place, so those bytes are never re-emitted. Null for a freshly-built (never-read) column.</summary>
     internal byte[]? RawDescriptor { get; init; }
 
     /// <summary>Catalog flag bits (byte 0x0F) to force-set on a created column — the system-catalog column marker

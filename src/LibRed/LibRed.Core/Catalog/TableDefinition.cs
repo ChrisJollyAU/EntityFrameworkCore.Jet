@@ -106,9 +106,9 @@ public sealed class TableDefinition : Page
     public int NextDefinitionPage { get; private set; }
     public int RowCount { get; internal set; }
 
-    /// <summary>The complex-type AutoNumber high-water (header <c>0x1C</c>) — the next id for a complex
-    /// (multi-value/attachment) column. Read and carried for faithful round-trip; 0 for every table without
-    /// such a column (LibRed neither creates nor consumes complex columns).</summary>
+    /// <summary>The complex-type AutoNumber high-water (header <c>0x1C</c>) — the last record id handed to the
+    /// table's complex (multi-value/attachment) columns, which a new row's id follows; 0 for every table without
+    /// such a column.</summary>
     public int ComplexAutoNumber { get; internal set; }
 
     public TableType TableType { get; private set; }
@@ -400,8 +400,8 @@ public sealed class TableDefinition : Page
     internal static int RealIndexEntry(JetFormatBase format, int ordinal) =>
         format.TdefRealIndexBlockOffset + ordinal * format.RealIndexEntrySize;
 
-    /// <summary>Real index <paramref name="ordinal"/>'s two statistics: its total entry count, and its unique count —
-    /// cumulative, never decremented by Access on an insert.</summary>
+    /// <summary>Real index <paramref name="ordinal"/>'s two statistics: its total entry count and its unique entry
+    /// count (page-02d §3.3.1).</summary>
     internal static (int Total, int Unique) ReadIndexCounts(ReadOnlySpan<byte> tdef, JetFormatBase format, int ordinal)
     {
         int entry = RealIndexEntry(format, ordinal);
@@ -844,7 +844,7 @@ public sealed class TableDefinition : Page
         ColumnSpec? counter = counters.FirstOrDefault();
         if (counter is { Increment: 0 }) throw ZeroIncrement(counter.Name);
         WriteCounter(page, format, counter?.Seed ?? 1, counter?.Increment ?? 1);
-        // Complex-type AutoNumber high-water (0x1C): 0 for a new table, which has no complex column.
+        // Complex-type AutoNumber high-water (0x1C): 0 for a new table, no row of which has an id yet.
         WriteComplexAutoNumber(page, format, 0);
         BinaryPrimitives.WriteInt32LittleEndian(page.AsSpan(format.TdefNextPageOffset, 4), 0);
         WriteRowCount(page, format, 0);
@@ -1095,7 +1095,7 @@ public sealed class TableDefinition : Page
     /// <summary>A fresh index-data block (§3.5): the marker, a slot per column with its order and the rest unused,
     /// the index's B-tree (<see cref="WriteIndexTree"/>), and its flags — always <see cref="IndexAttributes.AlwaysSet"/>,
     /// and the bit for each of <paramref name="unique"/>, <paramref name="ignoreNulls"/>, <paramref name="required"/>
-    /// and <paramref name="complexColumn"/> (an index over a complex column carries it; every one Access writes does).
+    /// and <paramref name="complexColumn"/> (the index a complex column is made with carries it, and no other).
     /// </summary>
     internal static byte[] BuildDataBlock(JetFormatBase format, IReadOnlyList<(int Id, bool Ascending)> columns,
         int rootPage, int usageRow, int usagePage, bool unique, bool ignoreNulls, bool required, bool complexColumn)
@@ -1275,7 +1275,7 @@ public sealed class TableDefinition : Page
     {
         byte[] d = new byte[format.ColumnDescriptorSize];
         d[format.ColumnTypeOffset] = (byte)c.Type;
-        BinaryPrimitives.WriteUInt16LittleEndian(d.AsSpan(format.ColumnRecordMarkerOffset, 2), (ushort)JetFormatBase.TdefRecordMarker);
+        BinaryPrimitives.WriteUInt32LittleEndian(d.AsSpan(format.ColumnRecordMarkerOffset, 4), JetFormatBase.TdefRecordMarker);
         BinaryPrimitives.WriteUInt16LittleEndian(d.AsSpan(format.ColumnNumberOffset, 2), (ushort)c.ColumnId);
         // Offset 0x09 repeats the id on a user column. Every creator does it — ACE's SQL DDL, DAO's object
         // model and DAO-executed SQL — and every user table in every fixture carries it, while only the

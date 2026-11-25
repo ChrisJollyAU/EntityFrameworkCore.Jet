@@ -114,7 +114,8 @@ internal static class AccessTypeMapper
             "DATETIME" or "DATE" or "TIME" or "TIMESTAMP" or "SMALLDATETIME"
                 => Fixed(column, JetDataType.DateTime, 8),
             // Date/Time Extended: a fixed 42-byte ASCII triple, not the 8-byte OA double (see JetTypeCodec).
-            // Version-gated to ACE 17 above. ACE's own DDL accepts only this bare spelling - DATETIME2(7),
+            // It needs the ACE 17 format, which Core raises the file to (see ToColumnSpec). ACE's own DDL accepts
+            // only this bare spelling - DATETIME2(7),
             // DATETIMEEXTENDED and DATE/TIME EXTENDED are all syntax errors - so there are no aliases to fold
             // in, and the declared precision is always 7.
             "DATETIME2"

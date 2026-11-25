@@ -21,7 +21,7 @@
 | `0x0F` | GUID | 16 raw bytes. Stored as a *variable*-length column when declared through SQL (see below) |
 | `0x10` | FixedPoint (Numeric/Decimal) | 17 bytes: sign byte (`0x80` = negative) + 128-bit magnitude (four 32-bit little-endian words, low word last); value = magnitude / 10^scale. Precision/scale from the column descriptor (§3.4) |
 | `0x11` | BigBinary — **BIGBINARY(n)** | raw bytes, inline, up to 4000 (see below) |
-| `0x12` | Complex (multi-value / attachment) | descriptor parsed; contents not materialized (out of scope for SQL/EF) |
+| `0x12` | Complex (multi-value / attachment) | 4 bytes: the row's Int32 complex id. The values are rows of the column's flat table ([system-catalog](system-catalog.md), *Complex columns*) |
 | `0x13` | Int64 — **BIGINT** (ACE 16 / Access 2016) | 8-byte little-endian signed integer. Stored as a *variable*-length column (see below) |
 | `0x14` | DateTimeExtended — **DATETIME2** (ACE 17 / Access 2019+) | fixed 42-byte ASCII `<day>:<time>:<precision>` (see below) |
 
@@ -157,8 +157,9 @@ push a 250-column GUID table that ACE creates without complaint past the declare
 **New-type format versions — the two are NOT the same version**, which is the natural assumption and is
 wrong. **`BIGINT` (Large Number)** requires the **ACE 16 / Access 2016** format (`0x05`); **`DATETIME2`
 (Date/Time Extended)** requires the **ACE 17 / Access 2019+** format (`0x06`) — it arrived later (Access for
-Microsoft 365). LibRed gates each accordingly (`AccessTypeMapper`). Both thresholds are verified — see
-[page-00 §2](page-00-database.md), which owns the version byte. `DATETIME2` is a fixed 42-byte ASCII string
+Microsoft 365). LibRed holds each to its own threshold (`JetDataTypeVersions.Required`) and, as ACE does,
+raises an older `.accdb` to it when DDL introduces the type (`SchemaEditor.RaiseFormatFor`). Both thresholds
+are verified — see [page-00 §2](page-00-database.md), which owns the version byte. `DATETIME2` is a fixed 42-byte ASCII string
 of three colon-separated fields: the .NET **day number**, the count of **100-ns ticks within the
 day**, and the fractional **precision** (e.g. `7`). The first two are zero-padded to 19 digits so
 that byte order equals chronological order (an order-preserving inline encoding). The value is

@@ -406,15 +406,19 @@ This is allocation policy, not an on-disk requirement; see `docs/design/page-all
 > file of 1,761 pages carries a 229-byte record, covering 1,792 — and a page freed above the original 512-page
 > window is marked in it like any other. A page the map has no bit for is therefore a malformed map, not an
 > ordinary state, and cannot be recorded as free: nothing else remembers it, so a writer that drops it there
-> loses it for good.
+> loses it for good. LibRed refuses to free such a page into an inline map (`InvalidDataException`); in a
+> reference-form map, a page in a range that has no bitmap page is left unrecorded.
 >
 > **Release at close.** The frees ACE holds go through `Release`, which keeps the page in a list on the handle
 > — staged with the open transaction, kept on commit, dropped on rollback or on a rollback to a savepoint
 > taken before it. Closing a writable `JetDatabase` returns those pages and any already set in the
 > released-pages map to the free map, clears the released map and first sizes it as above, all in one
 > transaction. A close that released nothing and wrote nothing writes
-> nothing. Only an `UPDATE`'s replaced long value goes through `Free` at once — after the new value is written,
-> so, as in ACE, the `UPDATE` that frees those pages does not reuse them (the whole file then matches ACE's).
+> nothing. The two kinds ACE frees sooner (above) go through `Free`: a chained long value's pages, at once
+> — an `UPDATE`'s after the new value is written, so, as in ACE, the `UPDATE` that frees those pages does not
+> reuse them (the whole file then matches ACE's) — and a rewritten definition's old continuation pages, when
+> the statement's transaction commits. So do the pages of a calculated Memo's old result when an `UPDATE`
+> recomputes it, a packed page it empties included (*unverified* against ACE).
 >
 > **Where LibRed differs from ACE.** Held pages live in the handle, not in the released-pages map — which is
 > ACE's own behaviour (above), the difference being only that each LibRed handle releases its own at its own
@@ -500,5 +504,6 @@ and how close a LibRed drop lands to an ACE one are in [page-08](page-08-release
 
 Deleting the last live row on a table's data page, or the last value that shared a packed long-value page,
 releases the page and stamps it **`0x09`**, clearing it from the owning maps here — the table's for a data
-page, the column's for a long-value one. A table's **first** data page is the exception and is never
-released. That mechanism, and the page it leaves behind, are in [page-09](page-09-released-data.md).
+page, the column's for a long-value one. An emptied data page that is the lowest its table's free-pages map
+marks is the exception and is kept. That mechanism, and the page it leaves behind, are in
+[page-09](page-09-released-data.md).

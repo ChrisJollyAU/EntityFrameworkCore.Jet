@@ -111,8 +111,10 @@
 > burned. DAO refuses to create the flag on a GUID column at all (`dbAutoIncrField` on `dbGUID`: *"Invalid
 > argument"*).
 
-> **Reader/writer count guardrails.** LibRed validates the documented 255-column and 32-real-index
-> limits before allocating count-sized structures, rejects negative logical/real index counts, and checks
+> **Reader/writer count guardrails.** LibRed validates the documented 255-column limit and the 32-index
+> limit — on the real count and on the logical one, which is the one that binds
+> ([page-02d §3.5](page-02d-constraints.md)) — before allocating count-sized structures, rejects negative
+> logical/real index counts, and checks
 > each fixed-size count-derived region against the fully assembled definition before parsing it. The writer
 > likewise rejects column counts/ids outside `0..254`, duplicate ids, byte lengths that do not fit the 16-bit
 > descriptor field, and fixed-data layouts whose offsets would exceed that field. These checks enforce existing
@@ -123,7 +125,8 @@
 > even UTF-16LE byte length of at most 128 bytes (64 UTF-16 code units), decode without replacement, and fit
 > before that boundary. Column type codes and ids are validated, ids must be unique in `0..254`, and stored
 > variable-table indexes must fit the `0x2B` high-water. The final long-value-map list must contain complete,
-> unique 10-byte entries for existing Memo/OLE columns, end with `0xFFFF`, and consume the definition exactly.
+> unique 10-byte entries for existing Memo/OLE columns — or calculated ones, whose Memo result is declared
+> Text ([page-02b §3.4a](page-02b-columns.md)) — end with `0xFFFF`, and consume the definition exactly.
 > LibRed reports violations as `InvalidDataException` before constructing catalog/index metadata.
 
 > **`ADD` / `DROP COLUMN` are metadata-only edits — the three column counts behave differently

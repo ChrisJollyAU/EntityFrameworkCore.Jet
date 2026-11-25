@@ -140,7 +140,7 @@ usage-map pointers, terminated by a `col_num` of `0xFFFF`. Iterate reading 10-by
 
 | Offset | Size | Meaning |
 | --- | --- | --- |
-| `0x00` | 2 | `col_num` — the column's index; `0xFFFF` terminates the list |
+| `0x00` | 2 | `col_num` — the column's id (descriptor `0x05`); `0xFFFF` terminates the list |
 | `0x02` | 4 | `used_pages` pointer (1-byte row + 3-byte page) to the column's owned-pages usage map |
 | `0x06` | 4 | `free_pages` pointer (1-byte row + 3-byte page) to its free-pages usage map |
 
@@ -151,7 +151,9 @@ list (terminator included) counts toward the definition, not free space.
 > OLE (`0x0B`)** columns appear here — *not* plain **Text (`0x0A`)**, even though Text is
 > variable-length — because only memo/OLE have their own long-value (LVAL) page chains that need
 > usage maps; Text is stored inline in the row (verified): every entry is a Memo or OLE column, and **a table with Text columns but no memo/OLE has an
-> empty list**. So mdbtools' name is imprecise; the list is keyed to long-value columns.
+> empty list**. So mdbtools' name is imprecise; the list is keyed to long-value columns. The one entry whose
+> column is not declared Memo or OLE is a **calculated column with a Memo result**, which ACE declares Text
+> and still gives its maps ([page-02b §3.4a](page-02b-columns.md)).
 
 ### Dropping a long-value column
 
@@ -259,9 +261,10 @@ remainder and continue into a reservation from the next bitmap. The bitmap selec
 > **The terminating `0xFFFF` is mandatory on write — even for a table with no long-value
 > columns** (where the list is empty and the `0xFFFF` is the only bytes here). Omitting it makes
 > Access reject the whole table with *"Unrecognized database format"* even though every other byte
-> of the TDEF is valid (verified vs ACE). LibRed's reader doesn't
-> consume this list (it stops after the named indexes; long values are located via the in-row LVAL
-> pointer, not these maps), but the terminator **must be written**. A table with memo/OLE columns must
+> of the TDEF is valid (verified vs ACE). LibRed's reader requires it too: it parses the list, and refuses a
+> definition whose list does not end with the terminator exactly at the definition's length
+> ([page-02a §3.1](page-02a-tdef.md), *Variable-region guardrails*). Reading a value does not go through these
+> maps — it follows the in-row LVAL pointer — but every write and free of one does. A table with memo/OLE columns must
 > additionally allocate the usage-map records and emit a real `{col_num, used, free}` entry per long-value
 > column (verified vs ACE).
 >

@@ -20,12 +20,13 @@ public static class IndexKeyCodec
     // --- Limits ---
 
     /// <summary>
-    /// The longest index entry ACE stores verbatim. Measured: an entry of exactly 510 bytes comes back
-    /// byte-for-byte, and one that would be 511 comes back as 510 — the weights cut short and the last two
-    /// bytes replaced by a value that varies with the string (<c>…0E0602</c> for one 254-character value,
-    /// <c>…0EDE2A</c> for the 255-character one). That is a truncated key plus a checksum, which is why two
-    /// long values never collide. It caps the whole entry rather than each column: two 200-character text
-    /// columns are about 404 bytes of key each and ACE stores their combined entry truncated.
+    /// The longest index key ACE stores verbatim — the key alone, its 4-byte row pointer on top. Measured: a
+    /// key of exactly 510 bytes comes back byte-for-byte, and one that would be 511 comes back as 510 — the
+    /// weights cut short and the last two bytes replaced by a value that varies with the string
+    /// (<c>…0E0602</c> for one 254-character value, <c>…0EDE2A</c> for the 255-character one). That is a
+    /// truncated key plus a checksum, which is why two long values never collide. It caps the whole key rather
+    /// than each column: two 200-character text columns are about 404 bytes of key each and ACE stores their
+    /// combined key truncated.
     /// </summary>
     internal const int MaxKeyBytes = 510;
 
@@ -301,7 +302,7 @@ public static class IndexKeyCodec
 
         // Past MaxKeyBytes ACE keeps the leading KeptKeyBytes and replaces the rest with a checksum over what it
         // dropped, which is why two long values sharing a prefix still sort apart. The limit is on the WHOLE
-        // entry, not per column (see MaxKeyBytes).
+        // key, not per column (see MaxKeyBytes).
         if (!enforceLengthLimit || buffer.Count <= MaxKeyBytes) return [.. buffer];
 
         // A discarded word-sort record used to be refused here, on the reasoning that the record sits in the
