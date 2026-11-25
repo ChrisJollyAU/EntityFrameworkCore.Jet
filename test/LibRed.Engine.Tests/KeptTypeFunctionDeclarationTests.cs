@@ -35,7 +35,7 @@ public class KeptTypeFunctionDeclarationTests(KeptTypeFunctionDeclarationTests.D
     [InlineData("INT(T)", typeof(DateTime))]
     [InlineData("FIX(Y)", typeof(decimal))]
     [InlineData("FIX(T)", typeof(DateTime))]
-    [InlineData("SGN(Y)", typeof(int))]
+    [InlineData("SGN(Y)", typeof(short))]
     [InlineData("IIF(Id = 1, ROUND(Y), 0)", typeof(decimal))]
     [InlineData("IIF(Id = 2, ROUND(Y), 0)", typeof(decimal))]
     [InlineData("CASE WHEN Id = 1 THEN ROUND(Y, 2) ELSE 5 END", typeof(decimal))]

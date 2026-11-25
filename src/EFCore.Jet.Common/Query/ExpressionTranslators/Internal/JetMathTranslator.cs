@@ -109,13 +109,15 @@ namespace EntityFrameworkCore.Jet.Query.ExpressionTranslators.Internal
                     newArguments[1] = _sqlExpressionFactory.ApplyTypeMapping(arguments[1], typeMapping);
                 }
 
+                // Sgn is an Integer whatever its argument (verified vs ACE: an Int16 column), so it is read as one and
+                // widened to Math.Sign's int.
                 return _sqlExpressionFactory.Function(
                     sqlFunctionName,
                     newArguments,
                     nullable: true,
                     argumentsPropagateNullability: newArguments.Select(_ => true).ToArray(),
                     method.ReturnType,
-                    sqlFunctionName == "SGN" ? null : typeMapping);
+                    sqlFunctionName == "SGN" ? ShortTypeMapping.Default : typeMapping);
             }
 
             if (_supportedMethodTranslationsIndirect.Contains(method))

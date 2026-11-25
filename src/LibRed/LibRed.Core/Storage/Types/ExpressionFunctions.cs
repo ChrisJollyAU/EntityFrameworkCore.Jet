@@ -157,11 +157,9 @@ internal abstract partial class ExpressionFunctions<TExpression>
                 ? BinaryDouble(f, static (b, x) => b <= 0 || b == 1 || x <= 0 ? double.NaN : Math.Log(x, b))
                 : UnaryDouble(f, Math.Log),
             "SQR" => UnaryDouble(f, Math.Sqrt),
-            // SGN sits apart from the group above: it takes a double but yields an Integer, both in VBA
-            // (Sgn returns Variant/Integer) and in .NET (Math.Sign returns int). Going through UnaryDouble
-            // widened that int straight back to a double, which only showed once EF projected the value
-            // instead of comparing it - GetInt32 on a boxed Double throws.
-            "SGN" => Convert1(f, v => Math.Sign(Dbl(ConversionNumber(v)))),
+            // SGN sits apart from the group above: it takes a double but yields an Integer, whatever the operand
+            // (verified vs ACE: VarType 2 and an Int16 result column, from a Byte to a Decimal, text or a date).
+            "SGN" => Convert1(f, v => (short)Math.Sign(Dbl(ConversionNumber(v)))),
             // The standard SQL math functions, LibRed extensions (ACE has none of them). The ones Access has under
             // another name are that function - Floor is Int, Sqrt is Sqr, Ln is Log, Atan is Atn, Sign is Sgn, and
             // Power is the ^ operator - so they read their arguments and fail as it does.
@@ -1810,7 +1808,8 @@ internal abstract partial class ExpressionFunctions<TExpression>
     }
 
     /// <summary>
-    /// Unary minus, keeping the operand's type as C# does (an Integer, a Byte or a Boolean gives a Long). Text is read as
+    /// Unary minus, keeping the operand's type: an Integer or a Boolean gives an Integer, and a Byte a Long (verified vs
+    /// ACE: -True is the Integer 1, and a Byte column negates to a Long). Text is read as
     /// a number first, and a date negates its serial and stays a date (verified vs ACE: -#2020-01-02# is 1779-12-27). A
     /// result the operand's type cannot hold is an overflow (verified vs ACE: -CINT(-32768) and -CLNG(-2147483648)).
     /// </summary>
@@ -1823,6 +1822,8 @@ internal abstract partial class ExpressionFunctions<TExpression>
         ulong u => checked(-(long)u),
         DateTime d => OaDate(-d.ToOADate()),
         short.MinValue => throw new OverflowException("Overflow: an Integer cannot hold 32768."),
+        short s => (short)-s,
+        bool b => (short)(b ? 1 : 0),
         var n => checked(-Int(n)),
     };
 

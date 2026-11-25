@@ -1746,13 +1746,13 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
             // the Round arm returned a Decimal.
             "ROUND" or "ABS" => KeptNumberType(argument, typeof(double)),
             _ when ExpressionFunctions<Expression>.KeepsNumberType(name) => KeptNumberType(argument, typeof(DateTime)),
-            "SGN" or "SIGN" => typeof(int),
+            "SIGN" => typeof(int),
             "CSTR" or "FORMAT" or "LCASE" or "UCASE" or "TRIM" or "LTRIM" or "RTRIM"
                 or "LEFT" or "RIGHT" or "MID" or "REPLACE" or "STRING" or "SPACE" or "HEX"
                 or "OCT" or "WEEKDAYNAME" or "MONTHNAME" or "PARTITION" or "CONCAT_WS" or "TRANSLATE" or "TYPENAME" or "STRCONV" => typeof(string),
             // DateDiff counts into Access's Long Integer whatever the interval, and DateDiff_Big into an Int64
             "DATEDIFF_BIG" => typeof(long),
-            "ASC" or "ASCW" or "YEAR" or "MONTH" or "DAY" or "HOUR" or "MINUTE" or "SECOND" or "WEEKDAY" => typeof(short),
+            "SGN" or "ASC" or "ASCW" or "YEAR" or "MONTH" or "DAY" or "HOUR" or "MINUTE" or "SECOND" or "WEEKDAY" => typeof(short),
             "LEN" or "DATALENGTH" or "INSTR" or "INSTRREV" or "DATEPART" or "DATEDIFF" or "IMESTATUS" or "VARTYPE" => typeof(int),
             "CDATE" or "CVDATE" or "NOW" or "DATE" or "TIME" or "DATEADD" or "DATESERIAL" or "TIMESERIAL"
                 or "DATEVALUE" or "TIMEVALUE" or "GETUTCDATE" or "SYSDATETIME" or "SYSUTCDATETIME" => typeof(DateTime),
@@ -1848,7 +1848,9 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
             return IsSixteenBits(operand) ? typeof(short) : IsInt64(operand) ? typeof(long) : typeof(int);
         if (operand == typeof(string))
             return typeof(double);
-        if (operand == typeof(short) || operand == typeof(byte) || operand == typeof(bool))
+        if (IsSixteenBits(operand))
+            return typeof(short);
+        if (operand == typeof(byte))
             return typeof(int);
         return IsInt64(operand) ? typeof(long) : operand;
     }
