@@ -132,7 +132,9 @@ procedure call, and a result past a Double an overflow.
 
 Arithmetic on Longs past a Long's range is a Double, as OLE Automation's arithmetic makes it (verified vs ACE:
 `VarType(2147483647*2)` is 5, and so in a calculated column); a query's result column of the Longs' type cannot hold
-it, so `SELECT 2147483647*2` is an overflow. A negative zero is written `-0` as text — `&`, `Str`, `CStr`, `Format` and a
+it, so `SELECT 2147483647*2` is an overflow. A `DateDiff` count past a Long is a Double the same way (verified, ACE 2010
+and Microsoft 365: `VarType(DateDiff("s", #1970-01-01#, #0101-01-01#))` is 5, and it compares, divides and converts as
+that number), and a bare `DateDiff` result past a Long is the overflow. A negative zero is written `-0` as text — `&`, `Str`, `CStr`, `Format` and a
 Text column alike — as the Microsoft 365 runtime writes it (verified: `-[Qty]^2` over 0, `CStr(-CDbl(0))`,
 `CStr(CDbl(0) * -1)`). ACE 2010 writes `"0"` instead, and `Str` `" 0"`; whether the engine version or the bitness
 decides that is not known, and LibRed writes what Microsoft 365 writes.
@@ -350,7 +352,7 @@ Two standard predicates, operators rather than functions, both never Null (ACE r
   milliseconds. `SysDateTime` and `SysUtcDateTime` are its `datetime2`, and keep the 100-ns ticks a `DATETIME2` holds.
 - **`DatePart`** also takes `"ms"`, `"mcs"` and `"ns"`: the millisecond, microsecond and nanosecond of the time.
 - **`DateAdd`** also takes `"ms"`.
-- **`DateDiff`** also takes `"ms"` — Returns an Int32
+- **`DateDiff`** also takes `"ms"` — an Int32, and past a Long a Double, as every interval's count is
 - **`DateDiff_Big(interval, date1, date2, …)`**, Returns an Int64
 
 ACE's interval list stops at `"s"`.

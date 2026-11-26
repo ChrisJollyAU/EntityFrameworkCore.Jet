@@ -255,15 +255,27 @@ public class DateFunctionTests(DateFunctionTests.Database database)
     public void Values_past_their_type_overflow(string expression) =>
         Assert.Throws<OverflowException>(() => Scalar(expression));
 
-    // DATEDIFF counts into a Long Integer and gives Null for a span that will not fit — what ACE's result
-    // column gives, measured over OLE DB, rather than an error. Minutes and seconds are the intervals that
-    // can pass it; DATEDIFF_BIG is the one that counts the same span in an Int64.
+    // A DATEDIFF count past a Long Integer is a Double, which a plain Long result column cannot hold: as a bare result
+    // it is the overflow (measured against ACE 2010 and Microsoft 365, on this table). Minutes and seconds are the
+    // intervals that can pass it, and LibRed's 'ms' (ACE has no such interval) follows the same rule; DATEDIFF_BIG is
+    // the one that counts the same span in an Int64.
     [Theory]
     [InlineData("DATEDIFF('s', #0100-01-01#, #9999-12-31#)")]
     [InlineData("DATEDIFF('n', #0100-01-01#, #9999-12-31#)")]
     [InlineData("DATEDIFF('ms', #0100-01-01#, #9999-12-31#)")]
-    public void A_count_past_a_long_integer_is_null(string expression) =>
-        Assert.Null(Scalar(expression));
+    public void A_count_past_a_long_integer_overflows_a_long_result(string expression) =>
+        Assert.Throws<OverflowException>(() => Scalar(expression));
+
+    // Inside an expression the count past a Long is that Double, and compares, divides and converts as it (measured
+    // against ACE 2010 and Microsoft 365: VarType 5, -58979923200, half of it, not Null, and less than 0).
+    [Theory]
+    [InlineData("VarType(DATEDIFF('s', #1970-01-01#, #0101-01-01#))", "5")]
+    [InlineData("CDbl(DATEDIFF('s', #1970-01-01#, #0101-01-01#))", "-58979923200")]
+    [InlineData("DATEDIFF('s', #1970-01-01#, #0101-01-01#) / 2", "-29489961600")]
+    [InlineData("IsNull(DATEDIFF('s', #1970-01-01#, #0101-01-01#))", "False")]
+    [InlineData("DATEDIFF('s', #1970-01-01#, #0101-01-01#) < 0", "True")]
+    public void A_count_past_a_long_integer_is_a_double(string expression, string expected) =>
+        Assert.Equal(expected, Convert.ToString(Scalar(expression), CultureInfo.InvariantCulture));
 
     [Theory]
     [InlineData("DATEDIFF_BIG('s', #0100-01-01#, #9999-12-31#)")]

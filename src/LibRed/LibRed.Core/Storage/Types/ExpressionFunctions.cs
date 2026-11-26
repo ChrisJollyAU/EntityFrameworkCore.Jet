@@ -1615,47 +1615,21 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// number of interval boundaries from date1 to date2, as a Long Integer. "w" is whole weeks of days, "ww" counts
     /// the weeks' first days, and "h", "n" and "s" count hour, minute and second boundaries. The first day of the
     /// week matters only to "ww", and the first week of the year to none.
-    /// <para>A count past a Long Integer is Null</para>
+    /// <para>A count past a Long Integer is a Double, as Long arithmetic past its range is (verified vs ACE 2010 and
+    /// Microsoft 365: <c>VarType(DateDiff("s", #1970-01-01#, #0101-01-01#))</c> is 5, and the value compares, divides and
+    /// converts as that number); a plain Long result column cannot hold it, so a bare one is the overflow.</para>
     /// </summary>
-    private int? DateDiff(Call f)
+    private object? DateDiff(Call f) => DateDiffBig(f) switch
     {
-        if (Evaluate(f.Arguments[0]) is not { } intervalV || Evaluate(f.Arguments[1]) is not { } d1V
-            || Evaluate(f.Arguments[2]) is not { } d2V)
-            return null;
-        DateTime d1 = ToDate(d1V), d2 = ToDate(d2V);
-        string interval = ConcatText(intervalV).ToLowerInvariant();
-
-        if (interval == "ww")
-        {
-            if (FirstDayOfWeek(f, 3) is not { } first)
-                return null;
-            return (d2.Date.AddDays(-DaysIntoWeek(d2, first)) - d1.Date.AddDays(-DaysIntoWeek(d1, first))).Days / 7;
-        }
-
-        return interval switch
-        {
-            "yyyy" => d2.Year - d1.Year,
-            "q" => (d2.Year - d1.Year) * 4 + (d2.Month - 1) / 3 - (d1.Month - 1) / 3,
-            "m" => (d2.Year - d1.Year) * 12 + d2.Month - d1.Month,
-            "y" or "d" => (d2.Date - d1.Date).Days,
-            "w" => (d2.Date - d1.Date).Days / 7,
-            // Hours cannot pass a Long Integer between any two dates Access represents. Minutes and seconds
-            // can, and a count that does is Null — what ACE's result column gives, measured over OLE DB.
-            "h" => (int)(d2.Ticks / TimeSpan.TicksPerHour - d1.Ticks / TimeSpan.TicksPerHour),
-            "n" => d2.Ticks / TimeSpan.TicksPerMinute - d1.Ticks / TimeSpan.TicksPerMinute
-                is >= int.MinValue and <= int.MaxValue and var minutes ? (int)minutes : null,
-            "s" => d2.Ticks / TimeSpan.TicksPerSecond - d1.Ticks / TimeSpan.TicksPerSecond
-                is >= int.MinValue and <= int.MaxValue and var seconds ? (int)seconds : null,
-            "ms" => (long)(d2 - d1).TotalMilliseconds
-                is >= int.MinValue and <= int.MaxValue and var milliseconds ? (int)milliseconds : null,
-            _ => throw UnknownInterval(intervalV),
-        };
-    }
+        null => null,
+        long count when count is >= int.MinValue and <= int.MaxValue => (int)count,
+        long count => (double)count,
+    };
 
     /// <summary>
-    /// <c>DateDiff_Big(interval, date1, date2, [firstdayofweek], [firstweekofyear])</c> — the same
-    /// boundaries <see cref="DateDiff"/> counts, over the same interval table, counted into an <b>Int64</b>. A
-    /// LibRed extension: ACE has no such function, and the Jet-dialect generator never emits it.
+    /// <c>DateDiff_Big(interval, date1, date2, [firstdayofweek], [firstweekofyear])</c> — the boundaries
+    /// <see cref="DateDiff"/> counts, counted into an <b>Int64</b>. A LibRed extension: ACE has no such function, and
+    /// the Jet-dialect generator never emits it.
     /// </summary>
     private long? DateDiffBig(Call f)
     {

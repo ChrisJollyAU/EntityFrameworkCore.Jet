@@ -1544,9 +1544,10 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
     /// written out later. Anything else holding a choice, a Variant or a Mixed value becomes the type it declares,
     /// which its values need not already have — a Mixed value becomes text, a Variant date plus 1 a Double, and
     /// <c>IIF(…, D, 2) + 1</c> a date where the choice picks the 2. A choice with an arm of unknown type declares
-    /// nothing, so nothing is converted. Neither is anything else, but for Long arithmetic, which past a Long is a Double
-    /// (ExpressionFunctions.Arithmetic) that its Long column cannot hold: storing it there is the overflow (verified vs
-    /// ACE: <c>SELECT [Qty]*1000000000</c> over 7 fails, where <c>([Qty]*1000000000) &amp; ''</c> is 7000000000). And
+    /// nothing, so nothing is converted. Neither is anything else, but for Long arithmetic and DateDiff, which past a Long
+    /// are a Double (ExpressionFunctions.Arithmetic and DateDiff) that their Long column cannot hold: storing it there is
+    /// the overflow (verified vs ACE: <c>SELECT [Qty]*1000000000</c> over 7 fails, where <c>([Qty]*1000000000) &amp; ''</c>
+    /// is 7000000000, and <c>SELECT DateDiff('s', #1970-01-01#, #0101-01-01#)</c> fails the same way). And
     /// anything computed that declares a Byte — CByte, whose value is an Integer as ACE's is, and Max or Min over it —
     /// since its column is declared a Byte, the type the cast CByte stands for asks for.
     /// </summary>
@@ -1557,6 +1558,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
                 || expression is BinaryExpression { Operator: BinaryOperator.Add or BinaryOperator.Subtract or BinaryOperator.Multiply }
                     && DeclaredType(expression, columns) == typeof(int)
                     && ExpressionEvaluator.NumberTypeOf(expression, columns, e => DeclaredType(e, columns)).Class == NumberClass.Whole
+                || expression is FunctionCall call && call.Name.Equals("DATEDIFF", StringComparison.OrdinalIgnoreCase)
                 || expression is not ColumnReference && DeclaredType(expression, columns) == typeof(byte)
                 ? DeclaredType(expression, columns) : null, false);
 

@@ -7,9 +7,9 @@ namespace LibRed.Engine.Tests;
 // DATEDIFF("ms", a, b) — a LibRed extension. ACE's interval list stops at "s", but LibRed stores the full OA
 // double instead of truncating to whole seconds, so a millisecond difference is both meaningful and exact.
 //
-// It counts into a Long Integer like every other interval, and gives Null for a span that will not fit — a
-// millisecond count passes Int32 after about 25 days. DATEDIFF_BIG is the one that counts the same span in an
-// Int64, and is what DateTimeOffset.ToUnixTimeMilliseconds emits.
+// It counts into a Long Integer like every other interval, and a span that will not fit is a Double, which a plain
+// Long result column cannot hold — a millisecond count passes Int32 after about 25 days. DATEDIFF_BIG is the one that
+// counts the same span in an Int64, and is what DateTimeOffset.ToUnixTimeMilliseconds emits.
 public class DateDiffMillisecondTests : TempDatabaseTest
 {
     private static QueryEngine Fresh()
@@ -32,14 +32,15 @@ public class DateDiffMillisecondTests : TempDatabaseTest
         => Assert.Equal(expected, Convert.ToInt64(Eval(Fresh(), $"DATEDIFF('ms', {from}, {to})")));
 
     // A millisecond span passes Int32 after ~25 days, and the caller that emits this interval measures from
-    // 1970: past the Long Integer, DATEDIFF is Null and DATEDIFF_BIG carries the count.
+    // 1970: past the Long Integer, DATEDIFF is a Double its Long result cannot hold, and DATEDIFF_BIG carries the count.
     [Fact]
     public void Spans_beyond_int32()
     {
         const string span = "#1970-01-01 00:00:00#, #2020-01-01 00:00:00#";
         QueryEngine engine = Fresh();
 
-        Assert.Null(Eval(engine, $"DATEDIFF('ms', {span})"));
+        Assert.Throws<OverflowException>(() => Eval(engine, $"DATEDIFF('ms', {span})"));
+        Assert.Equal("1577836800000", Eval(engine, $"DATEDIFF('ms', {span}) & ''"));
 
         long value = Convert.ToInt64(Eval(engine, $"DATEDIFF_BIG('ms', {span})"));
         Assert.Equal((long)(new DateTime(2020, 1, 1) - new DateTime(1970, 1, 1)).TotalMilliseconds, value);
