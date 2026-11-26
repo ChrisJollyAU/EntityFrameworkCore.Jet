@@ -145,6 +145,9 @@ decides that is not known, and LibRed writes what Microsoft 365 writes.
 `StrReverse` `StrComp` `StrConv` `Str` `Val` `Chr` `Asc` `Hex` `Oct`
 
 - `Trim`/`LTrim`/`RTrim` strip the space and the ideographic space U+3000 — nothing else.
+- **`UCase`, `LCase`, `StrConv` 1–3 and `Format`'s `<` and `>` case by ACE's own table**, the one `LIKE` folds by
+  (verified vs ACE over every BMP character but the surrogates): 973 pairs, and every other character left as it
+  is — Cherokee, `ı`, `İ`, `ß`, `µ`, `ǅ` and `ς` among them, which a runtime's casing changes.
 - **`LTrim(x, characters)` / `RTrim(x, characters)`** (a LibRed extension, SQL Server 2022's): the second
   argument is a **set** of characters, not a substring — every leading (or trailing) character that appears
   anywhere in it is removed, stopping at the first that does not. An empty set strips nothing; either argument

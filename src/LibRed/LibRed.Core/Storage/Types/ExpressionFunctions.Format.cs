@@ -224,7 +224,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
             }
         }
         if (lower != upper)
-            text = lower ? text.ToLowerInvariant() : text.ToUpperInvariant();
+            text = lower ? TextFold.Lower(text) : TextFold.Fold(text, TextFold.Letters.None, out _);
 
         int placeholders = items.Count(item => item.Placeholder != '\0');
         var output = new StringBuilder();

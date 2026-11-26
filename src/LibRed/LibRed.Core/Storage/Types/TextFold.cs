@@ -7,7 +7,8 @@ namespace LibRed.Storage.Types;
 /// Text as ACE's <c>LIKE</c>, <c>InStr</c>, <c>InStrRev</c> and <c>Replace</c> compare it (verified vs ACE): case
 /// folded by ACE's own table, and certain letters spelt out as two. None of them compares in a collation, so what a
 /// collation folds or ignores — accents, width, kana, hyphens, apostrophes, ignorable characters, trailing spaces —
-/// all counts here.
+/// all counts here. The same table is ACE's UCase and LCase (verified vs ACE over every BMP character but the
+/// surrogates: each changes exactly the 973 characters of its pairs, and no other).
 /// </summary>
 /// <remarks>
 /// <para>The case table is narrower than any runtime's: 973 pairs, leaving out the micro sign, long s, final sigma,
@@ -43,17 +44,19 @@ internal static class TextFold
         EszettAsSz = 16,
     }
 
-    /// <summary>What each character folds to, and the characters spelt out as several — ACE's own table.</summary>
-    private static readonly (char[] Fold, string?[] Expansions) Table = LoadTable();
+    /// <summary>What each character folds to, the character that folds to it, and the characters spelt out as
+    /// several — ACE's own table.</summary>
+    private static readonly (char[] Fold, char[] Lower, string?[] Expansions) Table = LoadTable();
 
     /// <remarks>Laid out as the sort-key tables are: the two counts, then each section deflated on its own — the
     /// case pairs as (character, what it folds to), the expansions as (character, letter count, letters). Both are
     /// held as arrays indexed by character — the expansions only as far as the highest one — because every
     /// character of every value tested is looked up in each.</remarks>
-    private static (char[] Fold, string?[] Expansions) LoadTable()
+    private static (char[] Fold, char[] Lower, string?[] Expansions) LoadTable()
     {
         var fold = new char[char.MaxValue + 1];
         for (int c = 0; c <= char.MaxValue; c++) fold[c] = (char)c;
+        var lower = (char[])fold.Clone();
         var spelt = new Dictionary<char, string>();
 
         using Stream stream = typeof(TextFold).Assembly.GetManifestResourceStream("LibRed.Resources.LikeFold.bin")
@@ -64,7 +67,11 @@ internal static class TextFold
         var expansionStream = new BinaryReader(new MemoryStream(Inflate(reader)));
 
         for (int i = 0; i < caseCount; i++)
-            fold[cases.ReadUInt16()] = (char)cases.ReadUInt16();
+        {
+            char from = (char)cases.ReadUInt16(), to = (char)cases.ReadUInt16();
+            fold[from] = to;
+            lower[to] = from;
+        }
         for (int i = 0; i < expansionCount; i++)
         {
             char c = (char)expansionStream.ReadUInt16();
@@ -75,7 +82,7 @@ internal static class TextFold
 
         var expansions = new string?[spelt.Count == 0 ? 0 : spelt.Keys.Max() + 1];
         foreach ((char c, string letters) in spelt) expansions[c] = letters;
-        return (fold, expansions);
+        return (fold, lower, expansions);
 
         static byte[] Inflate(BinaryReader reader)
         {
@@ -87,8 +94,22 @@ internal static class TextFold
         }
     }
 
-    /// <summary>A character folded by ACE's case table.</summary>
+    /// <summary>A character folded by ACE's case table, which is its upper case as UCase gives it.</summary>
     public static char FoldChar(char c) => Table.Fold[c];
+
+    /// <summary>A character's lower case as LCase gives it: the one that folds to it in ACE's case table, else
+    /// itself.</summary>
+    public static char LowerChar(char c) => Table.Lower[c];
+
+    /// <summary>Text in lower case as LCase gives it, by ACE's case table; <see cref="Fold"/> with
+    /// <see cref="Letters.None"/> is its upper case, as UCase gives it.</summary>
+    public static string Lower(string text) => Mapped(text, Table.Lower);
+
+    /// <summary>Each character of <paramref name="text"/> replaced by its entry in <paramref name="map"/>.</summary>
+    private static string Mapped(string text, char[] map) => string.Create(text.Length, (text, map), static (span, state) =>
+    {
+        for (int i = 0; i < span.Length; i++) span[i] = state.map[state.text[i]];
+    });
 
     /// <summary>The letters a character is spelt out as, already folded (ß as SS), or null for itself. Every one the
     /// table holds when <paramref name="letters"/> is <see cref="Letters.All"/>, as LIKE spells them.</summary>
@@ -192,11 +213,7 @@ internal static class TextFold
         if (extra == 0)
         {
             source = null;
-            return string.Create(text.Length, text, static (span, from) =>
-            {
-                char[] fold = Table.Fold;
-                for (int i = 0; i < span.Length; i++) span[i] = fold[from[i]];
-            });
+            return Mapped(text, Table.Fold);
         }
 
         var folded = new StringBuilder(text.Length + extra);

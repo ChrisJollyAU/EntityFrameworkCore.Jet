@@ -102,8 +102,9 @@ internal abstract partial class ExpressionFunctions<TExpression>
             // a compare argument of 0 asks for a binary comparison; InStr, InStrRev and Replace search as TextFold
             // searches, in no sort order.
             "LEN" => Convert1(f, v => ConcatText(v).Length),
-            "LCASE" => Convert1(f, v => ConcatText(v).ToLowerInvariant()),
-            "UCASE" => Convert1(f, v => ConcatText(v).ToUpperInvariant()),
+            // By ACE's own case table, not the runtime's (TextFold).
+            "LCASE" => Convert1(f, v => TextFold.Lower(ConcatText(v))),
+            "UCASE" => Convert1(f, v => TextFold.Fold(ConcatText(v), TextFold.Letters.None, out _)),
             "TRIM" => Convert1(f, v => ConcatText(v).Trim(TrimmedSpaces)),
             "LTRIM" => Trim(f, static (s, chars) => s.TrimStart(chars)),
             "RTRIM" => Trim(f, static (s, chars) => s.TrimEnd(chars)),
@@ -678,7 +679,8 @@ internal abstract partial class ExpressionFunctions<TExpression>
 
     /// <summary>
     /// Access <c>StrConv(string, conversion, [LCID])</c> (verified vs ACE). 0 leaves the text as it is. 1, 2 and 3
-    /// work in the ANSI code page, so a character it lacks becomes its best fit or '?': 1 is upper case, 2 lower case,
+    /// work in the ANSI code page, so a character it lacks becomes its best fit or '?', and case it by ACE's own table
+    /// as UCase and LCase do (TextFold): 1 is upper case, 2 lower case,
     /// and 3 upper-cases the first letter and each letter after a space, tab, line break, form feed or NUL and
     /// lower-cases the rest. 64 (vbUnicode) reads the text's UTF-16 bytes as ANSI characters, and 128 (vbFromUnicode)
     /// packs the text's ANSI bytes two to a character. The East Asian conversions (4 to 32) and other combinations are
@@ -713,8 +715,8 @@ internal abstract partial class ExpressionFunctions<TExpression>
         return mode switch
         {
             0 => s,
-            1 => ansi.GetString(ansi.GetBytes(s)).ToUpperInvariant(),
-            2 => ansi.GetString(ansi.GetBytes(s)).ToLowerInvariant(),
+            1 => TextFold.Fold(ansi.GetString(ansi.GetBytes(s)), TextFold.Letters.None, out _),
+            2 => TextFold.Lower(ansi.GetString(ansi.GetBytes(s))),
             3 => ProperCase(ansi.GetString(ansi.GetBytes(s))),
             64 => ansi.GetString(Encoding.Unicode.GetBytes(s)),
             _ => FromBytes(ansi.GetBytes(s)),
@@ -727,7 +729,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
         bool wordStart = true;
         for (int i = 0; i < s.Length; i++)
         {
-            chars[i] = wordStart ? char.ToUpperInvariant(s[i]) : char.ToLowerInvariant(s[i]);
+            chars[i] = wordStart ? TextFold.FoldChar(s[i]) : TextFold.LowerChar(s[i]);
             wordStart = s[i] is ' ' or '\t' or '\n' or '\v' or '\f' or '\r' or '\0';
         }
         return new string(chars);

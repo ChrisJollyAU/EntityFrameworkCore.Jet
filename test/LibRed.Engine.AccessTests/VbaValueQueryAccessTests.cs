@@ -45,6 +45,10 @@ public class VbaValueQueryAccessTests(ITestOutputHelper output) : AceQueryParity
         "StrConv(IsNull([A]),1)", "AscW(IsNull([A]))", "AscB(IsNull([A]))", "LenB(IsNull([A]))", "LeftB(IsNull([A]),2)",
         "MidB(IsNull([A]),3,2)", "InStrB(1,IsNull([A]),'e')", "FormatNumber(IsNull([A]))", "FormatCurrency(IsNull([A]))",
         "FormatPercent(IsNull([A]))", "Partition(IsNull([A]),-5,5,2)", "Chr(IsNull([A])+66)",
+        // Case by ACE's own table, as UCase and LCase case (CalculatedExpressionQueryAccessTests.CaseSample).
+        .. ((string[])["StrConv({0}, 1)", "StrConv({0}, 2)", "StrConv({0}, 3)", "Format({0}, '<')", "Format({0}, '>')"])
+            .SelectMany(f => (string[])[string.Format(System.Globalization.CultureInfo.InvariantCulture, f, "[A]"),
+                string.Format(System.Globalization.CultureInfo.InvariantCulture, f, CalculatedExpressionQueryAccessTests.CaseSample)]),
         // Out of a subquery or a derived table.
         "(SELECT IsNull(X.A) FROM M AS X WHERE X.Id = M.Id)", "Str((SELECT IsNull(X.A) FROM M AS X WHERE X.Id = M.Id))",
         "(SELECT X.B FROM (SELECT Y.Id, IsNull(Y.A) AS B FROM M AS Y) AS X WHERE X.Id = M.Id)",
