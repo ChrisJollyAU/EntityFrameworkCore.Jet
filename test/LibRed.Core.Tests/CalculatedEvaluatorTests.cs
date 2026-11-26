@@ -24,7 +24,7 @@ public class CalculatedEvaluatorTests
     }
 
     // Written whole numbers are Longs, and so is their arithmetic, as ACE types it (measured: VarType(1+1) and
-    // VarType(2*3+1) are 3, in CalculatedExpressionQueryAccessTests).
+    // VarType(2*3+1) are 3, in VbaValueQueryAccessTests).
     [Theory]
     [InlineData("1+1", 2)]
     [InlineData("2*3+1", 7)]

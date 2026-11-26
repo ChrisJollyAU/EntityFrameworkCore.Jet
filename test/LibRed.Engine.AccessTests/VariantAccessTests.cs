@@ -1,5 +1,4 @@
 using System.Data.OleDb;
-using System.Globalization;
 using Xunit;
 
 namespace LibRed.Engine.Tests;
@@ -10,10 +9,8 @@ namespace LibRed.Engine.Tests;
 /// types and every value must agree — which covers where each becomes text (a result, a derived table, a scalar
 /// subquery, a union), where it counts as a Double, and where it sorts, groups and takes Max as its text.
 /// </summary>
-/// <remarks>ACE writes a date out in the Windows user locale, so LibRed runs under that culture here; the rest of the
-/// suite pins en-US.</remarks>
 [Collection(AceCollection.Name)]
-public class VariantAccessTests(ITestOutputHelper output) : TempDatabaseTest
+public class VariantAccessTests(ITestOutputHelper output) : AceQueryParityTest(output)
 {
     private static readonly string[] Setup =
     [
@@ -93,11 +90,11 @@ public class VariantAccessTests(ITestOutputHelper output) : TempDatabaseTest
     [Theory]
     [MemberData(nameof(Expressions))]
     public void An_expression_is_typed_and_valued_as_ace_does(string expression) =>
-        Matches($"SELECT {expression} FROM V");
+        Matches("variant-", Setup, [$"SELECT {expression} FROM V"]);
 
     [Theory]
     [MemberData(nameof(Queries))]
-    public void A_query_is_typed_and_valued_as_ace_does(string query) => Matches(query);
+    public void A_query_is_typed_and_valued_as_ace_does(string query) => Matches("variant-", Setup, [query]);
 
     // A make-table query writes a Variant or a Mixed value out as text, into a Text(255) column; a value over one that
     // counts as a number keeps its number column.
@@ -118,14 +115,14 @@ public class VariantAccessTests(ITestOutputHelper output) : TempDatabaseTest
             return new QueryEngine(database).ExecuteNonQuery(query);
         }));
 
-        output.WriteLine($"ACE    {ace}\nLibRed {libred}");
+        Output.WriteLine($"ACE    {ace}\nLibRed {libred}");
         Assert.Equal(ace, libred);
     }
 
     /// <summary>Table W as a make-table query left it: each column's type and length, and its rows.</summary>
     private static string MadeTable(Func<string, int> run)
     {
-        string path = Seeded();
+        string path = Seeded("variant-", Setup);
         try
         {
             run(path);
@@ -136,78 +133,4 @@ public class VariantAccessTests(ITestOutputHelper output) : TempDatabaseTest
         }
         finally { TemporaryDatabase.Delete(path); }
     }
-
-    private void Matches(string query)
-    {
-        string path = Seeded();
-        try
-        {
-            string ace;
-            using (OleDbConnection connection = AceTestDatabase.Open(path))
-            using (OleDbCommand command = connection.CreateCommand())
-            {
-                command.CommandText = query;
-                using OleDbDataReader reader = command.ExecuteReader();
-                var types = Enumerable.Range(0, reader.FieldCount).Select(reader.GetFieldType).ToList();
-                var rows = new List<object?[]>();
-                while (reader.Read())
-                    rows.Add([.. Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? null : reader.GetValue(i))]);
-                ace = Describe(types, rows);
-            }
-
-            string libred = UnderUserCulture(() =>
-            {
-                using var database = JetDatabase.Open(path, readOnly: true);
-                var result = new QueryEngine(database).ExecuteQuery(query);
-                return Describe(result.ColumnTypes, result.Rows);
-            });
-
-            output.WriteLine($"ACE    {ace}\nLibRed {libred}");
-            Assert.Equal(ace, libred);
-        }
-        finally { TemporaryDatabase.Delete(path); }
-    }
-
-    /// <summary>A copy of Northwind with table V made and filled through ACE.</summary>
-    private static string Seeded()
-    {
-        string path = TemporaryDatabase.CopyPath(Path.Combine(AppContext.BaseDirectory, "Data", "Northwind.accdb"), "variant-");
-        using OleDbConnection connection = AceTestDatabase.Open(path);
-        foreach (string statement in Setup)
-        {
-            using OleDbCommand setup = connection.CreateCommand();
-            setup.CommandText = statement;
-            setup.ExecuteNonQuery();
-        }
-        return path;
-    }
-
-    /// <summary>Runs LibRed under the Windows user's own locale and formats, which ACE writes a date out in.</summary>
-    private static T UnderUserCulture<T>(Func<T> run)
-    {
-        CultureInfo previous = CultureInfo.CurrentCulture;
-        CultureInfo.CurrentCulture =
-            Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\International")?.GetValue("LocaleName") is string name
-                ? new CultureInfo(name, useUserOverride: true)
-                : CultureInfo.InstalledUICulture;
-        try { return run(); }
-        finally { CultureInfo.CurrentCulture = previous; }
-    }
-
-    private static string Describe(IReadOnlyList<Type> types, IEnumerable<object?[]> rows) =>
-        $"[{string.Join(", ", types.Select(t => t.Name))}] " + Rows(rows);
-
-    private static string Rows(IEnumerable<object?[]> rows) =>
-        string.Join(" | ", rows.Select(row => string.Join(", ", row.Select(Value))));
-
-    private static string Value(object? value) => value switch
-    {
-        null => "NULL",
-        byte[] bytes => $"{Convert.ToHexString(bytes)}:Byte[]",
-        DateTime date => $"{date:o}:DateTime",
-        double d => $"{d.ToString("R", CultureInfo.InvariantCulture)}:Double",
-        // A Decimal's scale is not compared: LibRed's Currency sums keep .NET's (21.0) where ACE's do not (21).
-        decimal m => $"{(m / 1.0000000000000000000000000000m).ToString(CultureInfo.InvariantCulture)}:Decimal",
-        _ => $"{Convert.ToString(value, CultureInfo.InvariantCulture)}:{value.GetType().Name}",
-    };
 }
