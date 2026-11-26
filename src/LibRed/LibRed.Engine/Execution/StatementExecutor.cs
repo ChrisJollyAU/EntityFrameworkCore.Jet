@@ -23,7 +23,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
 
     // What the constraint checks look up, resolved once per statement rather than once per row: CHECK expressions
     // parsed, each table's enforced relationships from either end, and each relationship's identity.
-    private readonly Dictionary<string, Expression> _checkExpressions = [];
+    private readonly Dictionary<string, (Expression Parsed, ExpressionEvaluator.Check Kind)> _checkExpressions = [];
     private readonly Dictionary<string, ForeignKey[]> _foreignKeysOf = new([], StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ForeignKey[]> _referencesTo = new([], StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<ForeignKey, RelationshipIdentity?> _identities = [];
@@ -110,7 +110,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         Expression parsed;
         try
         {
-            parsed = ParsedCheck(expression);
+            parsed = ParsedCheck(expression).Parsed;
         }
         catch (SqlParseException)
         {
@@ -197,10 +197,9 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         if (!BareWord.IsMatch(t))
         {
             Expression expression = _parser.ParseExpression(t);
-            _ = Planning.ColumnPruning.Walk(expression, node => node is ScalarSubquery or ExistsExpression or InSubqueryExpression
+            return ReadsTables(expression)
                 ? throw new SqlParseException($"A default value cannot read a table or query: '{text}'.")
-                : true);
-            return expression;
+                : expression;
         }
         Expression? parsed;
         try { parsed = _parser.ParseExpression(t); }
@@ -273,15 +272,15 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         // The row is named as ACE names it, by CheckConstraint.RowQualifier — not by the table's name, which inside a
         // subquery could be the subquery's own table.
         List<OutputColumn> row = [.. definition.Columns.Select(c => OutputColumn.Of(CheckConstraint.RowQualifier, definition, c))];
-        var evaluator = new ExpressionEvaluator(new EvalScope(row, values, null),
-            new QueryExecutor(_database, parameters, _session), _parameters, _session);
+        var scope = new EvalScope(row, values, null);
+        var runner = new QueryExecutor(_database, parameters, _session);
         foreach (var (name, expression) in definition.CheckConstraints)
         {
-            Expression parsed = ParsedCheck(expression);
+            var (parsed, kind) = ParsedCheck(expression);
             object? holds;
             try
             {
-                holds = evaluator.Evaluate(parsed);
+                holds = new ExpressionEvaluator(scope, runner, _parameters, _session, kind).Evaluate(parsed);
             }
             catch (Exception e) when (ExpressionEvaluator.IsExpressionError(e))
             {
@@ -295,11 +294,26 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         }
     }
 
-    private Expression ParsedCheck(string expression)
+    /// <summary>A CHECK's text parsed, and which rules ACE compares in it by (<see cref="ExpressionEvaluator.Check"/>):
+    /// a CHECK holding a subquery is a query's, one without works out as a calculated column does.</summary>
+    private (Expression Parsed, ExpressionEvaluator.Check Kind) ParsedCheck(string expression)
     {
-        if (!_checkExpressions.TryGetValue(expression, out Expression? parsed))
-            _checkExpressions[expression] = parsed = _parser.ParseExpression(expression);
-        return parsed;
+        if (!_checkExpressions.TryGetValue(expression, out var check))
+        {
+            Expression parsed = _parser.ParseExpression(expression);
+            _checkExpressions[expression] = check =
+                (parsed, ReadsTables(parsed) ? ExpressionEvaluator.Check.ReadsTables : ExpressionEvaluator.Check.RowOnly);
+        }
+        return check;
+    }
+
+    /// <summary>Whether an expression holds a subquery, and so reads a table: a default may not, and a CHECK that does
+    /// is worked out as a query.</summary>
+    private static bool ReadsTables(Expression expression)
+    {
+        bool reads = false;
+        _ = Planning.ColumnPruning.Walk(expression, node => !(reads |= node is ScalarSubquery or ExistsExpression or InSubqueryExpression));
+        return reads;
     }
 
     /// <summary>The relationship a parsed foreign key creates, for CREATE TABLE and ALTER TABLE alike. A

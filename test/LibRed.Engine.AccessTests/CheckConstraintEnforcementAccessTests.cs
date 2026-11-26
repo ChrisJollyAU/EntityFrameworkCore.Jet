@@ -63,6 +63,31 @@ public class CheckConstraintEnforcementAccessTests(ITestOutputHelper output)
     [InlineData("CREATE TABLE T (A LONG, CONSTRAINT ck CHECK (CInt(A) > 0))", "INSERT INTO T VALUES (100000)")]
     [InlineData("CREATE TABLE T (S TEXT(10), CONSTRAINT ck CHECK (S > 5))", "INSERT INTO T VALUES ('10')", "INSERT INTO T VALUES ('abc')")]
     [InlineData(Parent, "CREATE TABLE T (A LONG, P LONG REFERENCES P (Id) ON DELETE CASCADE, CONSTRAINT ck CHECK (1 / (SELECT COUNT(*) FROM T) > 0))", "INSERT INTO P VALUES (1)", "INSERT INTO T VALUES (1, 1)", "DELETE FROM P")]
+    // A CHECK that reads no table compares as a calculated column does: = True against -1, False as written, an IN list
+    // skipping a Null item, a column beside text as its text, a written number beside text as the number the text is.
+    [InlineData("CREATE TABLE T (S TEXT(10), CONSTRAINT ck CHECK (S = 7.5))", "INSERT INTO T VALUES ('7.50')", "INSERT INTO T VALUES ('abc')")]
+    [InlineData("CREATE TABLE T (A LONG, CONSTRAINT ck CHECK (A = True))", "INSERT INTO T VALUES (-1)", "INSERT INTO T VALUES (2)")]
+    [InlineData("CREATE TABLE T (S TEXT(10), CONSTRAINT ck CHECK (S = True))", "INSERT INTO T VALUES ('-1')", "INSERT INTO T VALUES ('0')", "INSERT INTO T VALUES ('abc')")]
+    [InlineData("CREATE TABLE T (S TEXT(10), CONSTRAINT ck CHECK (S <> False))", "INSERT INTO T VALUES ('5')", "INSERT INTO T VALUES ('0')", "INSERT INTO T VALUES ('abc')")]
+    [InlineData("CREATE TABLE T (A LONG, CONSTRAINT ck CHECK (A IN (1, NULL) OR A > 100))", "INSERT INTO T VALUES (1)", "INSERT INTO T VALUES (2)")]
+    [InlineData("CREATE TABLE T (S TEXT(10), A LONG, CONSTRAINT ck CHECK (S = A))", "INSERT INTO T VALUES ('7', 7)", "INSERT INTO T VALUES ('7.0', 7)", "INSERT INTO T VALUES ('abc', 7)")]
+    [InlineData("CREATE TABLE T (S TEXT(10), A LONG, CONSTRAINT ck CHECK ('7' = A))", "INSERT INTO T VALUES ('x', 7)", "INSERT INTO T VALUES ('x', 8)")]
+    [InlineData("CREATE TABLE T (S TEXT(10), A LONG, CONSTRAINT ck CHECK (S = IIf(A > 0, A, 0)))", "INSERT INTO T VALUES ('7', 7)", "INSERT INTO T VALUES ('7.0', 7)")]
+    [InlineData("CREATE TABLE T (S TEXT(10), A LONG, CONSTRAINT ck CHECK (S = IIf(A > 0, 7, 0)))", "INSERT INTO T VALUES ('7.0', 7)", "INSERT INTO T VALUES ('abc', 7)")]
+    [InlineData("CREATE TABLE T (S TEXT(10), CONSTRAINT ck CHECK (S IN (5, 7)))", "INSERT INTO T VALUES ('7.0')", "INSERT INTO T VALUES ('abc')")]
+    [InlineData("CREATE TABLE T (S TEXT(10), CONSTRAINT ck CHECK (S BETWEEN 1 AND 9))", "INSERT INTO T VALUES ('5')", "INSERT INTO T VALUES ('10')", "INSERT INTO T VALUES ('abc')")]
+    // A CHECK holding a subquery compares as a query does, but for a subquery's value, which is taken as a column, and
+    // an IN list, which skips a Null item.
+    [InlineData("CREATE TABLE T (S TEXT(10), A LONG, CONSTRAINT ck CHECK (S > 5 AND EXISTS (SELECT * FROM Employees)))", "INSERT INTO T VALUES ('10', 1)")]
+    [InlineData("CREATE TABLE T (S TEXT(10), A LONG, CONSTRAINT ck CHECK (A = True AND EXISTS (SELECT * FROM Employees)))", "INSERT INTO T VALUES ('x', 2)")]
+    [InlineData("CREATE TABLE T (S TEXT(10), A LONG, CONSTRAINT ck CHECK (S = A AND EXISTS (SELECT * FROM Employees)))", "INSERT INTO T VALUES ('7', 7)")]
+    [InlineData("CREATE TABLE T (A LONG, CONSTRAINT ck CHECK (A IN (1, NULL) OR A > 100 OR NOT EXISTS (SELECT * FROM Employees)))", "INSERT INTO T VALUES (2)")]
+    [InlineData("CREATE TABLE U (S TEXT(10), N LONG)", "INSERT INTO U VALUES ('10', 7)",
+        "CREATE TABLE T (S TEXT(10), CONSTRAINT ck CHECK (S = (SELECT MAX(N) FROM U)))", "INSERT INTO T VALUES ('7')", "INSERT INTO T VALUES ('7.0')")]
+    [InlineData("CREATE TABLE U (S TEXT(10), N LONG)", "INSERT INTO U VALUES ('10', 7)",
+        "CREATE TABLE T (A LONG, CONSTRAINT ck CHECK ((SELECT MAX(S) FROM U) > 5))", "INSERT INTO T VALUES (1)")]
+    [InlineData("CREATE TABLE U (S TEXT(10), N LONG)", "INSERT INTO U VALUES ('10', 2)",
+        "CREATE TABLE T (A LONG, CONSTRAINT ck CHECK ((SELECT MAX(N) FROM U) = True))", "INSERT INTO T VALUES (1)")]
     // A backtick name, a 0x literal and an integer literal past a Long, each as ACE evaluates it.
     [InlineData("CREATE TABLE T (S TEXT(10), CONSTRAINT ck CHECK (`S` <> 'x'))", "INSERT INTO T VALUES ('x')", "INSERT INTO T VALUES ('y')")]
     [InlineData("CREATE TABLE T (Qty LONG)", "ALTER TABLE T ADD CONSTRAINT ck CHECK (`Qty` > 0)", "INSERT INTO T VALUES (5)", "INSERT INTO T VALUES (-5)")]

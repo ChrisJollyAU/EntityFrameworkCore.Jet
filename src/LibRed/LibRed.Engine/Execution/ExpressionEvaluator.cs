@@ -21,8 +21,26 @@ internal sealed partial class ExpressionEvaluator(
     EvalScope scope,
     IScalarSubqueryRunner subqueries,
     ParameterBag? parameters = null,
-    SessionState? session = null) : ExpressionFunctions<Expression>
+    SessionState? session = null,
+    ExpressionEvaluator.Check check = ExpressionEvaluator.Check.None) : ExpressionFunctions<Expression>
 {
+    /// <summary>What a CHECK constraint is to ACE, which compares in it by other rules than a query's (verified vs ACE:
+    /// CheckConstraintEnforcementAccessTests). Its own subqueries are queries, and compare as one does.</summary>
+    internal enum Check
+    {
+        /// <summary>Not a CHECK: a statement's expression.</summary>
+        None,
+
+        /// <summary>A CHECK that reads no table, which ACE works out in its expression service as it does a calculated
+        /// column: a comparison is <see cref="CompareInService"/>'s, so <c>= True</c> compares with -1 rather than testing
+        /// the truth, and an IN list skips a Null item.</summary>
+        RowOnly,
+
+        /// <summary>A CHECK holding a subquery, which ACE works out as a query, but for two things: a subquery's value
+        /// is taken as a column is, not as a value the statement computes, and an IN list skips a Null item.</summary>
+        ReadsTables,
+    }
+
     /// <summary>Rebinds this evaluator's scope to a new row of the same schema and returns the evaluator, so a
     /// hot loop can reuse one evaluator across rows instead of allocating a fresh evaluator + scope per row.</summary>
     public ExpressionEvaluator Rebind(object?[] row)
@@ -263,8 +281,9 @@ internal sealed partial class ExpressionEvaluator(
     /// list can't overflow the stack. Null when x is; otherwise whether an item equals x, with each pair brought to a
     /// common kind as <c>=</c> does (verified vs ACE). A miss is Null when an item is Null, as the standard has it:
     /// <c>5 IN (1, NULL)</c> and <c>5 NOT IN (1, NULL)</c> are both Null. This departs from ACE, which skips a Null
-    /// item and makes them False and True. A <c>True</c> or <c>False</c> item is compared as -1 or 0, not as a truth
-    /// test.</summary>
+    /// item and makes them False and True — except in a CHECK, which skips it as ACE does (<see cref="Check"/>; verified
+    /// vs ACE: <c>A IN (1, NULL) OR A &gt; 100</c> refuses 2, with a subquery beside it or without). A <c>True</c> or
+    /// <c>False</c> item is compared as -1 or 0, not as a truth test.</summary>
     private object? EvaluateInList(InListExpression inl)
     {
         object? val = Evaluate(inl.Value);
@@ -276,7 +295,7 @@ internal sealed partial class ExpressionEvaluator(
             if (Evaluate(itemExpr) is not { } item) hasNull = true;
             else if (CompareAsKinds(inl.Value, val, itemExpr, item) == 0) { found = true; break; }
         }
-        return !found && hasNull ? null : found != inl.Negated;
+        return !found && hasNull && check == Check.None ? null : found != inl.Negated;
     }
 
     /// <summary><c>x [NOT] BETWEEN a AND b</c>: whether x lies between the two bounds inclusive, in whichever order
@@ -480,7 +499,8 @@ internal sealed partial class ExpressionEvaluator(
     // DELIBERATE DUPLICATE (the owner's decision, 2026-11-23; CLAUDE.md "One copy of every function"): EvaluateUnary,
     // EvaluateBinary, EvaluateInList and CompareAsKinds dispatch the operators over the SQL AST as CalculatedEvaluator's
     // Unary, Binary, In and CompareAsKinds do over a CalcNode, calling the same ExpressionFunctions helpers; where they
-    // differ, and why, is listed at CalculatedEvaluator.Unary. A change to one is made to the other.
+    // differ, and why, is listed at CalculatedEvaluator.Unary. A change to one is made to the other. A CHECK that reads
+    // no table (Check.RowOnly) takes the calculated column's side of the comparison differences there, LIKE aside.
     private object? EvaluateUnary(UnaryExpression u)
     {
         // NOT EXISTS is not the lookup EXISTS is: ACE compares its correlation as written (ExecuteExists).
@@ -602,7 +622,8 @@ internal sealed partial class ExpressionEvaluator(
                 left, right, b.Operator == BinaryOperator.Divide, IsCurrency(b.Left), IsCurrency(b.Right));
         }
 
-        if (b.Operator is BinaryOperator.Equal or BinaryOperator.NotEqual && TruthTest(b, left, right) is bool truth)
+        if (b.Operator is BinaryOperator.Equal or BinaryOperator.NotEqual && check != Check.RowOnly
+            && TruthTest(b, left, right) is bool truth)
             return Boxed(b.Operator == BinaryOperator.Equal ? truth : !truth);
 
         // A result that is a Currency (NumberTypeOf) is one at every step (CurrencyStep).
@@ -741,7 +762,8 @@ internal sealed partial class ExpressionEvaluator(
 
     /// <summary>
     /// <c>=</c> or <c>&lt;&gt;</c> against the literal <c>True</c> or <c>False</c> tests the other side's truth
-    /// rather than comparing it (verified vs ACE): a value that reads as 0 is False and anything else is True, so
+    /// rather than comparing it (verified vs ACE), except in a CHECK that reads no table (<see cref="Check.RowOnly"/>),
+    /// which compares it as -1 or 0: a value that reads as 0 is False and anything else is True, so
     /// <c>2 = True</c> and <c>0.0 = False</c> are True. Text is False only as the text "0", compared as text is, as a
     /// GUID or binary value is (verified vs ACE 2010 and Microsoft 365: <c>'0' = False</c> and <c>'0 ' = False</c> are
     /// True, <c>'0.0'</c>, <c>' 0'</c>, <c>'00'</c>, <c>'-0'</c> and <c>''</c> are not, and each is <c>= True</c>).
@@ -809,6 +831,11 @@ internal sealed partial class ExpressionEvaluator(
     /// BETWEEN's bounds and IS [NOT] DISTINCT FROM compare through here.</summary>
     private int CompareAsKinds(Expression leftOperand, object left, Expression rightOperand, object right)
     {
+        // A CHECK that reads no table compares as a calculated column does (Check.RowOnly).
+        if (check == Check.RowOnly)
+            return CompareInService(leftOperand, left, rightOperand, right, ServiceWritten, Text);
+        bool subqueryAsColumn = check == Check.ReadsTables;
+
         // Text as written — a text column or written text — beside a number, date or Boolean that is not computed
         // either — a column, a written number or True, an aggregate, an IIf choosing one — is ACE's
         // type mismatch, whichever operator compares them (verified vs ACE 2010 and Microsoft 365: [q] = [a], 7 = '7',
@@ -839,13 +866,13 @@ internal sealed partial class ExpressionEvaluator(
             is var beside && (left is byte[] || right is byte[])
             && (beside.Number is decimal && IsCurrency(beside.NumberOperand)
                 || IsNumeric(beside.Number)
-                    && (beside.Number is not long && IsComputed(beside.NumberOperand, Arm) || beside.NumberOperand is ParameterExpression)))
+                    && (beside.Number is not long && IsComputed(beside.NumberOperand, Arm, subqueryAsColumn) || beside.NumberOperand is ParameterExpression)))
             (left, right) = (ConcatText(left), ConcatText(right));
 
         bool textOnRight = right is string;
         var (textSide, other, otherOperand) = textOnRight ? (right, left, leftOperand) : (left, right, rightOperand);
         if (textSide is string && other is not string
-            && (otherOperand is ParameterExpression || (IsNumeric(other) && IsComputed(otherOperand, Arm))))
+            && (otherOperand is ParameterExpression || (IsNumeric(other) && IsComputed(otherOperand, Arm, subqueryAsColumn))))
         {
             object converted = ConcatText(other);
             (left, right) = textOnRight ? (converted, right) : (left, converted);
@@ -869,12 +896,20 @@ internal sealed partial class ExpressionEvaluator(
         // Written once with the GUID first; the order is the other way round when it is on the right.
         bool keyOnLeft = left is Guid;
         var (key, number, numberOperand) = keyOnLeft ? (left, right, rightOperand) : (right, left, leftOperand);
-        if (key is Guid && IsNumeric(number) && (numberOperand is ParameterExpression || IsComputed(numberOperand, Arm)))
+        if (key is Guid && IsNumeric(number) && (numberOperand is ParameterExpression || IsComputed(numberOperand, Arm, subqueryAsColumn)))
             return keyOnLeft ? -1 : 1;
         return CompareValues(left, right, Text);
 
         Expression? Arm(FunctionCall iif) => IifArm(iif.Arguments);
-        bool Written(Expression operand) => operand is not ParameterExpression && !IsComputed(operand, Arm);
+        bool Written(Expression operand) => operand is not ParameterExpression && !IsComputed(operand, Arm, subqueryAsColumn);
+        // The operands ACE's expression service takes as written: a literal, or the arm an IIf takes when that is one.
+        bool ServiceWritten(Expression operand) => operand switch
+        {
+            LiteralExpression => true,
+            FunctionCall call when call.Name.Equals("IIF", StringComparison.OrdinalIgnoreCase) =>
+                Arm(call) is { } arm && ServiceWritten(arm),
+            _ => false,
+        };
 
         // Each rule is written with the column first; the caller asks it both ways round.
         bool CurrencyBeside(object column, Expression columnOperand, object given, Expression givenOperand) =>
@@ -894,12 +929,16 @@ internal sealed partial class ExpressionEvaluator(
     /// <c>Choose(1, V)</c> and <c>SUM(V) + 0</c> nowhere; in a WHERE a subquery's value is computed, beside a text column
     /// or a number one). An IIf is what the arm it takes is, as <paramref name="iifArm"/> names it (verified vs ACE: beside text
     /// <c>IIf(q &gt; 0, q + 0, 0)</c> compares as text, <c>IIf(q &gt; 0, q, 0)</c> and <c>IIf(q &gt; 0, 7, 0)</c> as a
-    /// column and a written number do); without a row to choose by, it is taken as a column.</summary>
-    internal static bool IsComputed(Expression operand, Func<FunctionCall, Expression?>? iifArm = null) => operand switch
+    /// column and a written number do); without a row to choose by, it is taken as a column. A CHECK holding a subquery
+    /// (<paramref name="subqueryAsColumn"/>) takes a subquery's value as a column too (verified vs ACE: there
+    /// <c>S = (SELECT MAX(N) …)</c> and <c>(SELECT MAX(S) …) &gt; 5</c> are a type mismatch).</summary>
+    internal static bool IsComputed(Expression operand, Func<FunctionCall, Expression?>? iifArm = null,
+        bool subqueryAsColumn = false) => operand switch
     {
         LiteralExpression { Value: not false } or ColumnReference or ParameterExpression => false,
+        ScalarSubquery when subqueryAsColumn => false,
         FunctionCall call when call.Name.Equals("IIF", StringComparison.OrdinalIgnoreCase) =>
-            iifArm?.Invoke(call) is { } arm && IsComputed(arm, iifArm),
+            iifArm?.Invoke(call) is { } arm && IsComputed(arm, iifArm, subqueryAsColumn),
         FunctionCall call => !Planning.QueryPlanner.IsAggregate(call.Name),
         _ => true,
     };

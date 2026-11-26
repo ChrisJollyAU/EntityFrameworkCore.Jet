@@ -1913,6 +1913,28 @@ internal abstract partial class ExpressionFunctions<TExpression>
         return Compare(l, r, text);
     }
 
+    /// <summary>The order of two sides of a comparison as ACE's expression service orders them, where a calculated
+    /// column's expression and a CHECK that reads no table are worked out (verified vs ACE: CalculatedColumnAccessTests,
+    /// CheckConstraintEnforcementAccessTests). Booleans are as <see cref="ComparedBooleans"/> has them, and a number
+    /// beside text compares by what the number is: one the expression writes — a literal, or the arm an IIf takes when
+    /// that arm is one (<paramref name="written"/>) — as the number the text reads as, any other, a column's among them,
+    /// as its text; and written text beside a written number is a type mismatch.</summary>
+    internal static int CompareInService(TExpression leftNode, object left, TExpression rightNode, object right,
+        Func<TExpression, bool> written, JetTextComparer text)
+    {
+        (left, right) = ComparedBooleans(left, right);
+        if (left is string && IsNumeric(right))
+            right = WrittenBesideText(rightNode, leftNode) ? right : ConcatText(right);
+        else if (right is string && IsNumeric(left))
+            left = WrittenBesideText(leftNode, rightNode) ? left : ConcatText(left);
+        return CompareValues(left, right, text);
+
+        bool WrittenBesideText(TExpression number, TExpression textNode) =>
+            written(number) && (written(textNode)
+                ? throw new InvalidCastException("Type mismatch: a number and text both written in the expression.")
+                : true);
+    }
+
     /// <summary>Whether <paramref name="e"/> is an error an expression raised — a division by zero, an overflow, an
     /// invalid procedure call, a type mismatch — which a statement reports as that expression's error.</summary>
     internal static bool IsExpressionError(Exception e) =>

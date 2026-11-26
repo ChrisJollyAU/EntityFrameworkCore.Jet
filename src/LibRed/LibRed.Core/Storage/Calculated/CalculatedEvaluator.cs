@@ -71,7 +71,9 @@ internal static class CalculatedEvaluator
     // with a Null item is Null where this is False (LibRed's decision for queries); a query's bare number column and
     // IIf compare with text as numbers, where here a column is computed and an IIf takes the kind of the arm it
     // chooses; and a written number beside written text, which a query compares as numbers, is here an error ACE
-    // caches (see CompareAsKinds). A change to one is made to the other.
+    // caches (see CompareAsKinds). A change to one is made to the other. A CHECK that reads no table compares as this
+    // side does, its = True, False, IN and text-beside-a-number rules (measured; ExpressionEvaluator.Check.RowOnly), but
+    // matches LIKE as a query does.
     private static object? Unary(CalcUnary node, Func<string, object?> value, Collation? databaseCollation,
         Func<string, ColumnDef?> definition)
     {
@@ -176,33 +178,18 @@ internal static class CalculatedEvaluator
             _ => false,
         };
 
-    /// <summary>The order of two operands of a comparison or an <c>In</c>, brought to a kind they compare as (as a query's
-    /// are: ExpressionEvaluator.CompareAsKinds). Text beside a number the expression computes, a column's included,
-    /// compares as text (verified vs ACE: <c>[A] In ([Qty]+0)</c> over 'hello' and 7 is False, <c>[Qty]+10 &gt; "9"</c>
-    /// False, and <c>[Qty] = [Qty] &amp; ".0"</c> False). A written number beside text the expression computes, or a
-    /// text column, compares as the number the text reads as (<c>IIf([Qty]&gt;=0,[Qty],0) = [Qty] &amp; ".0"</c> is True
-    /// for a Null Qty); beside written text it is a type mismatch ACE caches as an error, which its own reader then
-    /// refuses — so LibRed refuses the write (<c>IIf([Qty]&gt;=0,0,1) = "0.0"</c>).</summary>
+    /// <summary>The order of two operands of a comparison or an <c>In</c>, as ACE's expression service orders them
+    /// (<see cref="Operators.CompareInService"/>, which a CHECK that reads no table compares through too). Text beside a
+    /// number the expression computes, a column's included, compares as text (verified vs ACE: <c>[A] In ([Qty]+0)</c>
+    /// over 'hello' and 7 is False, <c>[Qty]+10 &gt; "9"</c> False, and <c>[Qty] = [Qty] &amp; ".0"</c> False). A written
+    /// number beside text the expression computes, or a text column, compares as the number the text reads as
+    /// (<c>IIf([Qty]&gt;=0,[Qty],0) = [Qty] &amp; ".0"</c> is True for a Null Qty); beside written text it is a type
+    /// mismatch ACE caches as an error, which its own reader then refuses — so LibRed refuses the write
+    /// (<c>IIf([Qty]&gt;=0,0,1) = "0.0"</c>).</summary>
     private static int CompareAsKinds(CalcNode leftNode, object left, CalcNode rightNode, object right,
-        Func<string, object?> value, Collation? databaseCollation, Func<string, ColumnDef?> definition)
-    {
-        (left, right) = Operators.ComparedBooleans(left, right);
-        if (left is string && Operators.IsNumeric(right))
-            right = WrittenBesideText(rightNode, leftNode) ? right : Operators.ConcatText(right);
-        else if (right is string && Operators.IsNumeric(left))
-            left = WrittenBesideText(leftNode, rightNode) ? left : Operators.ConcatText(left);
-        return Operators.CompareValues(left, right, TextIn(databaseCollation));
-
-        bool WrittenBesideText(CalcNode number, CalcNode text)
-        {
-            if (!Written(number, value, databaseCollation, definition)) return false;
-            if (Written(text, value, databaseCollation, definition))
-                throw new CalculatedExpressionException(
-                    "A number and text both written in the expression compare as a type mismatch, which ACE caches "
-                    + "as an error its own reader refuses.");
-            return true;
-        }
-    }
+        Func<string, object?> value, Collation? databaseCollation, Func<string, ColumnDef?> definition) =>
+        Operators.CompareInService(leftNode, left, rightNode, right,
+            node => Written(node, value, databaseCollation, definition), TextIn(databaseCollation));
 
     private static bool? In(CalcIn node, Func<string, object?> value, Collation? databaseCollation,
         Func<string, ColumnDef?> definition)
