@@ -44,10 +44,12 @@ string and the process ID. Commands are read from stdin, one per line.
 | `ddl-alter` | `ALTER TABLE LockT ADD COLUMN` (a new column each time). |
 | `ddl-drop` | Create `LockScratch` if absent, then `DROP TABLE` it. |
 | `sql <statement>` | Any SQL: a reader when it starts with `SELECT`, otherwise `ExecuteNonQuery`. |
+| `reader-open [sql]` | `ExecuteReader` (default `SELECT * FROM LockT`), read one row, and keep the command and reader open across later commands. An error if a reader is already open. |
+| `reader-close` | Dispose the held reader and its command. An error if none is open. |
 | `idle <seconds>` | Sleep. |
 | `mark <label>` | Emit a marker only. |
 | `kill` | Terminate the process at once, closing nothing: a crash, mid-transaction if one is open. |
-| `close` / `quit` | Close the connection and exit. |
+| `close` / `quit` | Dispose a held reader, close the connection and exit. |
 | `help` | List the commands. |
 
 Every command prints what it ran and the time it took. An error prints the full exception text and, for an

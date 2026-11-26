@@ -126,6 +126,8 @@ Console.WriteLine($"bitness    : {(Environment.Is64BitProcess ? "x64" : "x86")}"
 Console.WriteLine("type 'help' for commands.");
 
 OleDbTransaction? transaction = null;
+OleDbCommand? heldCommand = null;
+OleDbDataReader? heldReader = null;
 int sequence = 0;
 int alterCounter = 0;
 Random random = new(12345);
@@ -165,6 +167,8 @@ while (true)
             ddl-alter              ALTER TABLE LockT ADD COLUMN (a new one each time)
             ddl-drop               create LockScratch, then DROP TABLE it
             sql <statement>        arbitrary SQL (a reader if it starts with SELECT)
+            reader-open [sql]      ExecuteReader (default SELECT * FROM LockT), read one row, keep the reader open
+            reader-close           dispose the held reader and its command
             idle <seconds>         sleep
             mark <label>           emit a trace marker only
             kill                   terminate this process at once, closing nothing (simulates a crash)
@@ -249,6 +253,12 @@ while (true)
                 }
 
                 break;
+            case "reader-open":
+                OpenReader(rest.Length == 0 ? "SELECT * FROM LockT" : rest);
+                break;
+            case "reader-close":
+                CloseReader();
+                break;
             case "idle":
                 Console.WriteLine($"sleeping {rest} s");
                 Thread.Sleep(TimeSpan.FromSeconds(double.Parse(rest, System.Globalization.CultureInfo.InvariantCulture)));
@@ -286,6 +296,12 @@ while (true)
             if (transaction is not null)
             {
                 Console.WriteLine("closing with a transaction still open (it is rolled back by the close)");
+            }
+
+            if (heldReader is not null)
+            {
+                Console.WriteLine("closing with a reader still open (it is disposed first)");
+                CloseReader();
             }
 
             connection.Close();
@@ -377,6 +393,47 @@ void Execute(string sql)
     using OleDbCommand cmd = NewCommand(sql);
     int affected = cmd.ExecuteNonQuery();
     Console.WriteLine($"rows affected: {affected}");
+}
+
+void OpenReader(string sql)
+{
+    if (heldReader is not null)
+    {
+        throw new InvalidOperationException("A reader is already open; reader-close it first.");
+    }
+
+    Console.WriteLine($"run: {sql}");
+    OleDbCommand cmd = NewCommand(sql);
+    try
+    {
+        OleDbDataReader reader = cmd.ExecuteReader();
+        heldCommand = cmd;
+        heldReader = reader;
+        Console.WriteLine($"reader open; first row read: {reader.Read()} ({reader.FieldCount} columns)");
+    }
+    catch
+    {
+        if (heldReader is null)
+        {
+            cmd.Dispose();
+        }
+
+        throw;
+    }
+}
+
+void CloseReader()
+{
+    if (heldReader is null)
+    {
+        throw new InvalidOperationException("No reader is open.");
+    }
+
+    heldReader.Dispose();
+    heldCommand!.Dispose();
+    heldReader = null;
+    heldCommand = null;
+    Console.WriteLine("reader closed");
 }
 
 int ReadAll(string sql)

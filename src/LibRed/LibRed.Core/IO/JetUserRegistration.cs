@@ -326,10 +326,14 @@ internal sealed class JetUserRegistration : IDisposable
     /// <para>Windows refuses an exclusive range overlapping a byte the same handle holds. So the connection's own
     /// shared and exclusive holders of one window never stand in each other's way: a shared holder joins an exclusive
     /// lock the connection holds, and an exclusive lock taken while the connection holds its shared byte is ACE's
-    /// upgrade — the other users' bytes (<see cref="JetLockLayout.UpgradeRanges"/>) on top of its own. In the
-    /// table-read region, where both kinds are taken, an exclusive lock is always taken that way — its own byte, then
-    /// the upgrade — so a shared holder arriving or leaving while it is held never takes or gives back the byte under
-    /// it. To every other user's lock it conflicts as ACE's single range does: all their bytes are covered. Which of
+    /// upgrade — the other users' bytes (<see cref="JetLockLayout.UpgradeRanges"/>) on top of its own. An exclusive
+    /// lock taken while the connection holds no byte of its own is ACE's single range, in every region, the table-read
+    /// region included (a design change takes it so); a shared holder that joins it has no byte under it. In the
+    /// table-read region the range then stays held, with no byte taken, until the last shared holder lets go — as ACE
+    /// keeps a design lock while a reader of the connection outlives it (measured) — and an exclusive lock asked for
+    /// meanwhile joins it. In the other regions, not measured, the shared holders take their byte as the range is let
+    /// go. To every other user's lock either form conflicts as ACE's single range does:
+    /// all their bytes are covered. Which of
     /// its own holders refuse a connection's design change, as ACE refuses it, is <see cref="PageChannel.LockTable"/>'s
     /// to say.</para>
     /// </remarks>
@@ -387,18 +391,20 @@ internal sealed class JetUserRegistration : IDisposable
                     UnlockUpgrade(region, page);
                     if (held.Shared == 0) UnlockByte(ref held, region, page);
                 }
-                else
+                else if (region != JetLockRegion.TableRead || held.Shared == 0)
                 {
-                    (long offset, long length) = JetLockLayout.ExclusiveRange(region, page, User);
-                    _lockFile.Unlock(offset, length);
+                    UnlockRange(ref held, region, page);
                     // Shared holders that joined the single range — a long-value read of a page the connection was
                     // writing — have no byte of their own under it, and take it now.
                     if (held.Shared > 0) held.ByteHeld = _lockFile.TryLock(JetLockLayout.SharedByte(region, page, User), 1);
                 }
+                // else: a table's design lock with readers of the connection that joined it. ACE keeps the whole range
+                // and lets it go when the last of them closes (measured), taking no byte of its own.
             }
-            else if (!exclusive && --held.Shared == 0 && held is { Exclusive: 0, ByteHeld: true })
+            else if (!exclusive && --held.Shared == 0 && held.Exclusive == 0)
             {
-                UnlockByte(ref held, region, page);
+                if (held.ByteHeld) UnlockByte(ref held, region, page);
+                else if (held.RangeHeld) UnlockRange(ref held, region, page);
             }
 
             if (held is { Shared: 0, Exclusive: 0 }) _held.Remove((region, page));
@@ -426,11 +432,20 @@ internal sealed class JetUserRegistration : IDisposable
             return false;
         }
 
-        if (!held.ByteHeld && region != JetLockRegion.TableRead)
+        if (held.RangeHeld)
+        {
+            // The range is still held for readers that outlived the last exclusive holder: this one joins it, as
+            // Windows refuses the same handle an overlapping range.
+            held.Exclusive = 1;
+            return false;
+        }
+
+        if (!held.ByteHeld)
         {
             (long offset, long length) = JetLockLayout.ExclusiveRange(region, page, User);
             if (!_lockFile.TryLock(offset, length)) return null;
             held.Exclusive = 1;
+            held.RangeHeld = true;
             return true;
         }
 
@@ -466,13 +481,23 @@ internal sealed class JetUserRegistration : IDisposable
         held.ByteHeld = false;
     }
 
-    // How many holders in the connection have a lock, by kind, and whether it holds its own shared byte under them:
-    // with shared holders, and under an exclusive lock taken as an upgrade.
+    private void UnlockRange(ref Holders held, JetLockRegion region, int page)
+    {
+        (long offset, long length) = JetLockLayout.ExclusiveRange(region, page, User);
+        _lockFile.Unlock(offset, length);
+        held.RangeHeld = false;
+    }
+
+    // How many holders in the connection have a lock, by kind, and what it holds of the operating system's under them:
+    // its own shared byte (with shared holders, and under an exclusive lock taken as an upgrade), or the single
+    // exclusive range (under an exclusive lock taken as one, and — in the table-read region — under the shared holders
+    // that outlast it).
     private struct Holders
     {
         public int Shared;
         public int Exclusive;
         public bool ByteHeld;
+        public bool RangeHeld;
     }
 
     /// <summary>Deregisters as ACE does at close: tries every other user's group-0 byte and lets them go, releases

@@ -5,8 +5,9 @@ using Xunit;
 namespace LibRed.Core.Tests;
 
 // A connection's lock table (docs/format/locking.md §2, §4): one user per connection, whose holders of one lock share
-// the operating-system lock, and its own shared byte never stands in the way of its own exclusive lock — which it takes as
-// ACE takes an upgrade, the other users' bytes on top of its own. "The other user" is a second JetLockFile handle as
+// the operating-system lock, and its own shared byte never stands in the way of its own exclusive lock — which, with no
+// byte of its own held, is ACE's single range, and only when the connection holds its byte is an upgrade: the other
+// users' bytes on top of its own. "The other user" is a second JetLockFile handle as
 // user 2, which conflicts with LibRed's own exactly as another process's would.
 public class TableLockTests
 {
@@ -49,7 +50,35 @@ public class TableLockTests
     }
 
     [Fact]
-    public void An_exclusive_table_lock_takes_the_processs_own_byte_first_so_a_reader_can_join_and_outlast_it()
+    public void An_exclusive_table_lock_taken_without_the_processs_byte_is_ACEs_single_range_and_is_kept_whole_until_a_reader_that_joined_it_lets_go()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-tablelock-");
+        using JetUserRegistration registration = JetUserRegistration.Connect(copy.Path)!;
+        using JetLockFile other = OtherUserOf(copy.Path);
+        long window = JetLockLayout.PageWindow(JetLockRegion.TableRead, Page);
+
+        // One range from window + 1, 256 + n long (257 for user 1), as ACE takes a design change's.
+        Assert.True(registration.Lock(JetLockRegion.TableRead, Page, exclusive: true, JetLockPurpose.Table, "T"));
+        Assert.False(IsFree(other, window + 1, 1));
+        Assert.False(IsFree(other, window + 257, 1));
+        Assert.True(IsFree(other, window + 258, 1));
+        Assert.False(registration.Lock(JetLockRegion.TableRead, Page, exclusive: false, JetLockPurpose.Table, "T"));   // joined, no OS call
+        Assert.False(SharedIsFree(other));
+
+        // When the exclusive lock is released, the whole range stays held for the reader that joined it, as ACE
+        // keeps it, and goes with the reader.
+        registration.Unlock(JetLockRegion.TableRead, Page, exclusive: true);
+        Assert.False(IsFree(other, window + 1, 1));
+        Assert.False(IsFree(other, window + 257, 1));
+        Assert.False(SharedIsFree(other));
+        registration.Unlock(JetLockRegion.TableRead, Page, exclusive: false);
+        Assert.True(ExclusiveIsFree(other));
+        Assert.True(IsFree(other, window + 1, 257));
+    }
+
+    [Fact]
+    public void An_exclusive_table_lock_asked_for_while_the_range_is_kept_for_a_reader_joins_it()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
         using var copy = TemporaryDatabase.CopyOf(TestDatabases.NorthwindAccdb, "libred-tablelock-");
@@ -58,15 +87,16 @@ public class TableLockTests
         long window = JetLockLayout.PageWindow(JetLockRegion.TableRead, Page);
 
         Assert.True(registration.Lock(JetLockRegion.TableRead, Page, exclusive: true, JetLockPurpose.Table, "T"));
-        Assert.False(registration.Lock(JetLockRegion.TableRead, Page, exclusive: false, JetLockPurpose.Table, "T"));   // joined, no OS call
-        Assert.False(IsFree(other, window + 1, 1));
-        Assert.False(SharedIsFree(other));
-
+        Assert.False(registration.Lock(JetLockRegion.TableRead, Page, exclusive: false, JetLockPurpose.Table, "T"));
         registration.Unlock(JetLockRegion.TableRead, Page, exclusive: true);
-        Assert.False(IsFree(other, window + 1, 1));   // the reader's byte, never given up
-        Assert.True(SharedIsFree(other));
+
+        // Taken again with the range kept for the reader: joined, no operating-system call, nothing refused.
+        Assert.False(registration.Lock(JetLockRegion.TableRead, Page, exclusive: true, JetLockPurpose.Table, "T"));
+        Assert.False(IsFree(other, window + 1, 1));
         registration.Unlock(JetLockRegion.TableRead, Page, exclusive: false);
-        Assert.True(ExclusiveIsFree(other));
+        Assert.False(IsFree(other, window + 1, 1));   // the exclusive holder still has it
+        registration.Unlock(JetLockRegion.TableRead, Page, exclusive: true);
+        Assert.True(IsFree(other, window + 1, 257));
     }
 
     [Fact]
