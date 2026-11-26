@@ -64,7 +64,15 @@ capabilities.
    (all verified).
 
 2. **The expression *service*** (used to *evaluate* a stored default at insert, and by field validation rules)
-   handles the full expression language.
+   handles the full expression language. It compares as it does in a calculated column, not as a query does
+   (verified, on a default ACE applies; the same text in an ACE `SELECT` gives the query's answer):
+   - `IIf(2 = True, 1, 0)` inserts 0: `= True` compares with -1, where a query tests the truth and gives 1.
+   - `IIf(IsNull(2 IN (1, NULL)), 1, 0)` inserts 0: the IN list skips the Null item.
+   - Written text beside a written number or `False` is "Type mismatch": `IIf('abc' <> False, 1, 0)`,
+     `IIf('0' <> False, 1, 0)` and `IIf('5' = 5, 1, 0)` fail the insert, where a query gives 1 and 0 for the first
+     two. ACE's DDL evaluates the default when it is declared, and refuses these there with the same error.
+   - `IIf(Trim('10') > 5, 1, 0)` inserts 1 and `IIf(5 + 0 = '5.0', 1, 0)` inserts 0, as in a query: text a
+     function returns reads as a number, and a computed number beside text compares as its text.
 
 > **They do not even share a lexer.** ACE's SQL parser accepts `` `backtick` `` identifier quoting — it is
 > what EF Core's Jet provider emits for every identifier — and the expression service does **not**. It reads
@@ -171,15 +179,17 @@ they are otherwise valid expressions (see the table below).
 ## LibRed specifics
 
 - **One evaluator.** Defaults, `SELECT` projections, `WHERE`, and `ORDER BY` share `ExpressionEvaluator`. Adding
-  a function for defaults makes it available everywhere (and vice-versa).
+  a function for defaults makes it available everywhere (and vice-versa). A default is evaluated as a stored
+  expression (`ExpressionEvaluator.Stored.RowOnly`), so it compares as a calculated column does, as above.
 - **Row scope decides row-awareness.** A query evaluates against a **row scope** (so `IIf(N>10,…)` can read the
   column `N`); a default evaluates against an **empty scope** (so a column reference throws "Column 'A' was not
   found"). Same function, different scope — that is exactly the "row-blind default vs row-aware query" line.
 - **Rejection timing.** ACE rejects forbidden defaults (columns, aggregates, bad types) at **CREATE**. LibRed
   refuses at declaration — `CREATE TABLE`, `ADD COLUMN`, `ALTER COLUMN` alike — a default it can evaluate
   there and its column cannot take (`DEFAULT 300` or `DEFAULT 'abc'` on a `BYTE`, `DEFAULT True` on a GUID;
-  `StatementExecutor.CheckDefault`); one it cannot evaluate when declared — a column reference, an aggregate —
-  it stores, and refuses at **INSERT**, when the default is applied. Net behaviour matches (both refuse); for
+  `StatementExecutor.CheckDefault`); one it cannot evaluate when declared — a column reference, an aggregate, a
+  comparison that is a type mismatch (`IIf('5' = 5, 1, 0)`) — it stores, and refuses at **INSERT**, when the
+  default is applied. Net behaviour matches (both refuse); for
   those the messages and timing differ.
 - **Superset grammar.** LibRed's ANTLR front-end parses compound/nested defaults ACE's DDL parser rejects; ACE
   still reads and applies them from `LvProp`. That includes the leading `=`: LibRed takes it before any default,

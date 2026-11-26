@@ -23,7 +23,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
 
     // What the constraint checks look up, resolved once per statement rather than once per row: CHECK expressions
     // parsed, each table's enforced relationships from either end, and each relationship's identity.
-    private readonly Dictionary<string, (Expression Parsed, ExpressionEvaluator.Check Kind)> _checkExpressions = [];
+    private readonly Dictionary<string, (Expression Parsed, ExpressionEvaluator.Stored Kind)> _checkExpressions = [];
     private readonly Dictionary<string, ForeignKey[]> _foreignKeysOf = new([], StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ForeignKey[]> _referencesTo = new([], StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<ForeignKey, RelationshipIdentity?> _identities = [];
@@ -209,6 +209,12 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             : new LiteralExpression(t);
     }
 
+    /// <summary>What a column's DEFAULT is worked out by, when it is declared and when a row takes it: no row, and the
+    /// rules of ACE's expression service, which works out an expression stored on a column as it does a calculated
+    /// column (<see cref="ExpressionEvaluator.Stored.RowOnly"/>).</summary>
+    private ExpressionEvaluator DefaultEvaluator() => new(new EvalScope([], [], null), _scalarRunner,
+        parameters: _parameters, stored: ExpressionEvaluator.Stored.RowOnly);
+
     /// <summary>Refuses a DEFAULT its column cannot take when it is declared, rather than when a row first needs it
     /// (verified vs ACE, for CREATE TABLE, ADD COLUMN and ALTER COLUMN alike: <c>DEFAULT 300</c>, <c>DEFAULT True</c>
     /// and <c>DEFAULT 'abc'</c> on a BYTE fail the statement, as <c>DEFAULT True</c> does on a GUID). It is converted
@@ -226,8 +232,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         try
         {
             expression = ParseDefaultExpression(defaultSql);
-            value = new ExpressionEvaluator(new EvalScope([], [], null), _scalarRunner, parameters: _parameters)
-                .Evaluate(expression);
+            value = DefaultEvaluator().Evaluate(expression);
         }
 #pragma warning disable CA1031 // a default that cannot be evaluated when declared is evaluated, and refused, when a row takes it
         catch (Exception) { return; }
@@ -294,15 +299,15 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         }
     }
 
-    /// <summary>A CHECK's text parsed, and which rules ACE compares in it by (<see cref="ExpressionEvaluator.Check"/>):
+    /// <summary>A CHECK's text parsed, and which rules ACE compares in it by (<see cref="ExpressionEvaluator.Stored"/>):
     /// a CHECK holding a subquery is a query's, one without works out as a calculated column does.</summary>
-    private (Expression Parsed, ExpressionEvaluator.Check Kind) ParsedCheck(string expression)
+    private (Expression Parsed, ExpressionEvaluator.Stored Kind) ParsedCheck(string expression)
     {
         if (!_checkExpressions.TryGetValue(expression, out var check))
         {
             Expression parsed = _parser.ParseExpression(expression);
             _checkExpressions[expression] = check =
-                (parsed, ReadsTables(parsed) ? ExpressionEvaluator.Check.ReadsTables : ExpressionEvaluator.Check.RowOnly);
+                (parsed, ReadsTables(parsed) ? ExpressionEvaluator.Stored.ReadsTables : ExpressionEvaluator.Stored.RowOnly);
         }
         return check;
     }
@@ -1350,7 +1355,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     /// over the record of them all (spec §5).</remarks>
     private object? InsertNewRow(string tableName, Table table, RowDefaults defaults, object?[] values, List<int> provided)
     {
-        var evaluator = new ExpressionEvaluator(new EvalScope([], [], null), _scalarRunner, parameters: _parameters);
+        var evaluator = DefaultEvaluator();
         var defaultRecord = new object?[values.Length];
         foreach (var (index, expression) in defaults.Columns)
         {

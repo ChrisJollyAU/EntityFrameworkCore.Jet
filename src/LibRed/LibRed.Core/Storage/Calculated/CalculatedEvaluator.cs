@@ -71,9 +71,9 @@ internal static class CalculatedEvaluator
     // with a Null item is Null where this is False (LibRed's decision for queries); a query's bare number column and
     // IIf compare with text as numbers, where here a column is computed and an IIf takes the kind of the arm it
     // chooses; and a written number beside written text, which a query compares as numbers, is here an error ACE
-    // caches (see CompareAsKinds). A change to one is made to the other. A CHECK that reads no table compares as this
-    // side does, its = True, False, IN and text-beside-a-number rules (measured; ExpressionEvaluator.Check.RowOnly), but
-    // matches LIKE as a query does.
+    // caches (see CompareAsKinds). A change to one is made to the other. A CHECK that reads no table, and a DEFAULT,
+    // compare as this side does, its = True, False, IN and text-beside-a-number rules (measured;
+    // ExpressionEvaluator.Stored.RowOnly), but match LIKE as a query does.
     private static object? Unary(CalcUnary node, Func<string, object?> value, Collation? databaseCollation,
         Func<string, ColumnDef?> definition)
     {

@@ -65,6 +65,13 @@ public class DefaultValueParityAccessTests
     [InlineData("TEXT(20)", "=Left('abc', 2)")]
     [InlineData("TEXT(20)", "=Yes")]
     [InlineData("DATETIME", "=#2020-01-02 10:00:00#")]
+    // A default compares as a calculated column does, not as a query: = True against -1, an IN list skipping a Null
+    // item, a computed number beside text as its text. ACE's DDL refuses the IN one.
+    [InlineData("LONG", "IIf(2 = True, 1, 0)")]
+    [InlineData("LONG", "IIf(-1 = True, 1, 0)")]
+    [InlineData("LONG", "IIf(IsNull(2 IN (1, NULL)), 1, 0)")]
+    [InlineData("LONG", "IIf(Trim('10') > 5, 1, 0)")]
+    [InlineData("LONG", "IIf(5 + 0 = '5.0', 1, 0)")]
     public void A_default_LibRed_wrote_is_stored_as_written_and_inserts_what_ACE_inserts(string type, string defaultSql)
     {
         string path = TemporaryDatabase.CreatePath("default-libred-");
@@ -107,6 +114,28 @@ public class DefaultValueParityAccessTests
             Assert.Throws<OleDbException>(() => Ace(path, "INSERT INTO T (K) VALUES (1)"));
             using var libred = JetDatabase.Open(path, readOnly: false);
             Assert.Throws<SqlParseException>(() => new QueryEngine(libred).ExecuteNonQuery("INSERT INTO T (K) VALUES (2)"));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // Written text beside a written number or False is a type mismatch in a default, as in a calculated column, where a
+    // query compares 'abc' <> False as text: the insert taking that default is refused.
+    [Theory]
+    [InlineData("IIf('abc' <> False, 1, 0)")]
+    [InlineData("IIf('0' <> False, 1, 0)")]
+    [InlineData("IIf('5' = 5, 1, 0)")]
+    public void A_default_comparing_written_text_with_a_written_number_is_refused_on_insert(string text)
+    {
+        string path = TemporaryDatabase.CreatePath("default-mismatch-");
+        try
+        {
+            JetDatabase.Create(path);
+            using (var db = JetDatabase.Open(path, readOnly: false))
+                new QueryEngine(db).ExecuteNonQuery($"CREATE TABLE T (K LONG, V LONG DEFAULT {text})");
+
+            Assert.Throws<OleDbException>(() => Ace(path, "INSERT INTO T (K) VALUES (1)"));
+            using var libred = JetDatabase.Open(path, readOnly: false);
+            Assert.Throws<InvalidCastException>(() => new QueryEngine(libred).ExecuteNonQuery("INSERT INTO T (K) VALUES (2)"));
         }
         finally { TemporaryDatabase.Delete(path); }
     }

@@ -22,18 +22,20 @@ internal sealed partial class ExpressionEvaluator(
     IScalarSubqueryRunner subqueries,
     ParameterBag? parameters = null,
     SessionState? session = null,
-    ExpressionEvaluator.Check check = ExpressionEvaluator.Check.None) : ExpressionFunctions<Expression>
+    ExpressionEvaluator.Stored stored = ExpressionEvaluator.Stored.None) : ExpressionFunctions<Expression>
 {
-    /// <summary>What a CHECK constraint is to ACE, which compares in it by other rules than a query's (verified vs ACE:
-    /// CheckConstraintEnforcementAccessTests). Its own subqueries are queries, and compare as one does.</summary>
-    internal enum Check
+    /// <summary>What an expression stored on a table or column is to ACE, which compares in it by other rules than a
+    /// query's (verified vs ACE: CheckConstraintEnforcementAccessTests, DefaultValueParityAccessTests). A CHECK's own
+    /// subqueries are queries, and compare as one does.</summary>
+    internal enum Stored
     {
-        /// <summary>Not a CHECK: a statement's expression.</summary>
+        /// <summary>Not stored: a statement's expression.</summary>
         None,
 
-        /// <summary>A CHECK that reads no table, which ACE works out in its expression service as it does a calculated
-        /// column: a comparison is <see cref="CompareInService"/>'s, so <c>= True</c> compares with -1 rather than testing
-        /// the truth, and an IN list skips a Null item.</summary>
+        /// <summary>A stored expression that reads no table — a column's DEFAULT, or a CHECK without a subquery — which
+        /// ACE works out in its expression service as it does a calculated column: a comparison is
+        /// <see cref="CompareInService"/>'s, so <c>= True</c> compares with -1 rather than testing the truth, and an IN
+        /// list skips a Null item.</summary>
         RowOnly,
 
         /// <summary>A CHECK holding a subquery, which ACE works out as a query, but for two things: a subquery's value
@@ -295,7 +297,7 @@ internal sealed partial class ExpressionEvaluator(
             if (Evaluate(itemExpr) is not { } item) hasNull = true;
             else if (CompareAsKinds(inl.Value, val, itemExpr, item) == 0) { found = true; break; }
         }
-        return !found && hasNull && check == Check.None ? null : found != inl.Negated;
+        return !found && hasNull && stored == Stored.None ? null : found != inl.Negated;
     }
 
     /// <summary><c>x [NOT] BETWEEN a AND b</c>: whether x lies between the two bounds inclusive, in whichever order
@@ -500,7 +502,8 @@ internal sealed partial class ExpressionEvaluator(
     // EvaluateBinary, EvaluateInList and CompareAsKinds dispatch the operators over the SQL AST as CalculatedEvaluator's
     // Unary, Binary, In and CompareAsKinds do over a CalcNode, calling the same ExpressionFunctions helpers; where they
     // differ, and why, is listed at CalculatedEvaluator.Unary. A change to one is made to the other. A CHECK that reads
-    // no table (Check.RowOnly) takes the calculated column's side of the comparison differences there, LIKE aside.
+    // no table, and a DEFAULT (Stored.RowOnly), take the calculated column's side of the comparison differences there,
+    // LIKE aside.
     private object? EvaluateUnary(UnaryExpression u)
     {
         // NOT EXISTS is not the lookup EXISTS is: ACE compares its correlation as written (ExecuteExists).
@@ -622,7 +625,7 @@ internal sealed partial class ExpressionEvaluator(
                 left, right, b.Operator == BinaryOperator.Divide, IsCurrency(b.Left), IsCurrency(b.Right));
         }
 
-        if (b.Operator is BinaryOperator.Equal or BinaryOperator.NotEqual && check != Check.RowOnly
+        if (b.Operator is BinaryOperator.Equal or BinaryOperator.NotEqual && stored != Stored.RowOnly
             && TruthTest(b, left, right) is bool truth)
             return Boxed(b.Operator == BinaryOperator.Equal ? truth : !truth);
 
@@ -762,8 +765,8 @@ internal sealed partial class ExpressionEvaluator(
 
     /// <summary>
     /// <c>=</c> or <c>&lt;&gt;</c> against the literal <c>True</c> or <c>False</c> tests the other side's truth
-    /// rather than comparing it (verified vs ACE), except in a CHECK that reads no table (<see cref="Check.RowOnly"/>),
-    /// which compares it as -1 or 0: a value that reads as 0 is False and anything else is True, so
+    /// rather than comparing it (verified vs ACE), except in a CHECK that reads no table and a DEFAULT
+    /// (<see cref="Stored.RowOnly"/>), which compare it as -1 or 0: a value that reads as 0 is False and anything else is True, so
     /// <c>2 = True</c> and <c>0.0 = False</c> are True. Text is False only as the text "0", compared as text is, as a
     /// GUID or binary value is (verified vs ACE 2010 and Microsoft 365: <c>'0' = False</c> and <c>'0 ' = False</c> are
     /// True, <c>'0.0'</c>, <c>' 0'</c>, <c>'00'</c>, <c>'-0'</c> and <c>''</c> are not, and each is <c>= True</c>).
@@ -831,10 +834,10 @@ internal sealed partial class ExpressionEvaluator(
     /// BETWEEN's bounds and IS [NOT] DISTINCT FROM compare through here.</summary>
     private int CompareAsKinds(Expression leftOperand, object left, Expression rightOperand, object right)
     {
-        // A CHECK that reads no table compares as a calculated column does (Check.RowOnly).
-        if (check == Check.RowOnly)
+        // A CHECK that reads no table, and a DEFAULT, compare as a calculated column does (Stored.RowOnly).
+        if (stored == Stored.RowOnly)
             return CompareInService(leftOperand, left, rightOperand, right, ServiceWritten, Text);
-        bool subqueryAsColumn = check == Check.ReadsTables;
+        bool subqueryAsColumn = stored == Stored.ReadsTables;
 
         // Text as written — a text column or written text — beside a number, date or Boolean that is not computed
         // either — a column, a written number or True, an aggregate, an IIf choosing one — is ACE's
