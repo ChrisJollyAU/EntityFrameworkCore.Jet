@@ -85,6 +85,8 @@ internal static class JetTextCollationV1
         // primary still counts once (a Lao vowel then a hyphen is 0x0B), so this is not a byte count halved.
         List<(int Position, byte ScriptMember, byte Weight)> inline = scratch.Inline;
         int hanMarkers = 0;
+        // Whether the first slot is combining marks' with no weight before them (JetTextCollation.AppendSections).
+        bool leadingMark = false;
 
         // The kana small/normal flags and mark codes, and the running state the prolonged mark needs.
         List<bool> kana = scratch.Kana;
@@ -383,7 +385,8 @@ internal static class JetTextCollationV1
             //   U+FB30  ACE 7F 28 02 01 30 00, where the parts weigh 0x02 and 0x2E and 0x02 + 0x2E = 0x30.
             if (alphabetic == 0)
             {
-                if (secondaries.Count == 0) secondaries.Add(diacritic);
+                // With nothing before it, it takes the first slot, which stands in for the first weight's default (AppendSections).
+                if (secondaries.Count == 0) { secondaries.Add(diacritic); leadingMark = true; }
                 else secondaries[^1] = (byte)(secondaries[^1] + diacritic);
                 return true;
             }
@@ -399,7 +402,7 @@ internal static class JetTextCollationV1
         // section. Latent — the one order that sets it (French) is v0 — but the two versions now write the
         // trailing sections through one method, so they cannot differ there again.
         JetTextCollation.AppendSections(output, primaries, secondaries, tailoring?.ReverseDiacritics == true,
-            kana, marks, inline);
+            kana, marks, inline, leadingMark);
         return true;
     }
 

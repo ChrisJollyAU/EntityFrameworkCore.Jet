@@ -277,10 +277,23 @@ internal static class JetTextCollation
     /// <param name="kana">Per kana, whether it is a small form.</param>
     /// <param name="marks">Per kana, its mark code.</param>
     /// <param name="inline">The inline records: each one's position in primary weights, script member and weight.</param>
+    /// <param name="leadingMark">Whether the first secondary is combining marks' with no weight before them. It stands
+    /// in for the first weight's when that is the default (U+0301 + a is 0C, U+0301 twice + a 18) and beside it when
+    /// not (U+0301 + á is 0C 0E), and the marks take no position of their own: an apostrophe after U+0301 + a is at
+    /// position 1, not 2 (measured, both versions).</param>
     internal static void AppendSections(List<byte> output, List<byte> primaries, List<byte> secondaries,
         bool reverseDiacritics, List<bool> kana, List<byte> marks,
-        List<(int Position, byte ScriptMember, byte Weight)> inline)
+        List<(int Position, byte ScriptMember, byte Weight)> inline, bool leadingMark)
     {
+        if (leadingMark)
+        {
+            if (secondaries.Count > 1 && secondaries[1] == DefaultSecondary)
+                secondaries.RemoveAt(1);
+            // Only the records counted after the marks' slot: one before it (an apostrophe first) was counted at 0.
+            for (int i = 0; i < inline.Count; i++)
+                if (inline[i].Position > 0) inline[i] = inline[i] with { Position = inline[i].Position - 1 };
+        }
+
         output.AddRange(primaries);
         output.Add(SectionSeparator);
 
@@ -413,6 +426,8 @@ internal static class JetTextCollation
         // double.
         CopiedPrimary lastWeight = default;
         bool lastWeightIsKana = false;
+        // Whether the first slot is combining marks' with no weight before them (AppendSections).
+        bool leadingMark = false;
 
         // What an iteration mark copies: the one weight — or the one inline record — the character before it
         // contributed, and whether that was a kana. A character contributing two weights (ß, æ, a ligature) or a
@@ -598,7 +613,7 @@ internal static class JetTextCollation
                 return false; // not handled yet
         }
 
-        AppendSections(output, primaries, secondaries, tailoring?.ReverseDiacritics == true, kana, marks, inline);
+        AppendSections(output, primaries, secondaries, tailoring?.ReverseDiacritics == true, kana, marks, inline, leadingMark);
         return true;
 
         // One character's weights, with no contraction and no tailoring: the path a ligature's components
@@ -697,6 +712,8 @@ internal static class JetTextCollation
                 secondaries[^1] = (byte)(secondaries[^1] + secondary);
                 return;
             }
+            // With nothing before it, it takes the first slot, which stands in for the first weight's default (AppendSections).
+            leadingMark |= weight.IsEmpty;
 
             foreach (byte b in weight) primaries.Add(b);
             secondaries.Add(secondary);

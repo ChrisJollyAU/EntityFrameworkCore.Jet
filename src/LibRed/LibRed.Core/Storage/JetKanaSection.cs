@@ -16,10 +16,13 @@ internal static class JetKanaSection
     /// <summary>The page byte every kana primary starts with: a kana weighs <c>7F &lt;sound&gt;</c>.</summary>
     public const byte KanaPage = 0x7F;
 
-    /// <summary>Closes the kana section, after the mark codes.
-    /// Constant across hiragana, katakana, halfwidth, small and voiced forms in every string measured, so it
-    /// is emitted literally; what it denotes is not established.</summary>
-    private static ReadOnlySpan<byte> Tail => [0x02, 0x80, IndexKeyCodec.KanaRunSeparator, 0x80];
+    /// <summary>One byte of the section that closes the kana section, after the mark codes: <c>02</c>, then a
+    /// <c>80</c> for every seven kana or part of seven, <c>FF</c>, and the same <c>80</c>s again — one up to seven
+    /// kana, two up to fourteen, three up to 21 (measured to 44). Counted over the kana alone, a prolonged sound
+    /// mark among them, whatever else the string holds; the same across hiragana, katakana, halfwidth, small and
+    /// voiced forms. Each <c>80</c> reads as seven one-bit codes under the marker bit, all clear in every string
+    /// measured; what they record is not established.</summary>
+    private const byte TailGroup = 0x80;
 
     /// <summary>The mark code of a kana that is a letter in its own right.</summary>
     public const byte Letter = 0b01;
@@ -81,7 +84,7 @@ internal static class JetKanaSection
     }
 
     /// <summary>
-    /// Appends <c>01 01</c>, the packed small/normal flags, the mark codes and the closing constant.
+    /// Appends <c>01 01</c>, the packed small/normal flags, the mark codes and the closing section (<see cref="TailGroup"/>).
     /// Emitted whenever the string holds any kana at all, even if every one of them is a normal form.
     /// </summary>
     /// <param name="output">The key being built.</param>
@@ -94,7 +97,11 @@ internal static class JetKanaSection
         AddCodes(output, small.Count, i => small[i] ? (byte)0b10 : (byte)0b11, unmarked: 0b11);
         output.Add(IndexKeyCodec.KanaRunSeparator);
         AddCodes(output, marks.Count, i => marks[i], unmarked: Letter);
-        output.AddRange(Tail);
+        int groups = (small.Count + 6) / 7;
+        output.Add(0x02);
+        for (int i = 0; i < groups; i++) output.Add(TailGroup);
+        output.Add(IndexKeyCodec.KanaRunSeparator);
+        for (int i = 0; i < groups; i++) output.Add(TailGroup);
     }
 
     /// <summary>

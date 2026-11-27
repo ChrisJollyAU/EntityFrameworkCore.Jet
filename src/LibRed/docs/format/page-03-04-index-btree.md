@@ -374,6 +374,14 @@ to `n` bytes, as page-01 stores it. LibRed builds the row and every key from one
   > `£-` puts the hyphen at `0x0B` (`0x07 + 4×1`) although `£` is `34 A7`, and `©`, `½`, `Ω`, `б` all behave
   > the same, while `£A-` is `0x0F`. So both the secondary section and this one index by weight.
   >
+  > **A combining mark with nothing before it takes no position.** Its secondary goes to the first weight in
+  > place of that weight's default — U+0301 + `a` is `7F 4A 01 0C`, U+0301 twice + `a` is `… 01 18`, and U+0301
+  > alone `7F 01 0C 00`. A first letter with an accent of its own keeps it, and the marks' secondary stands before
+  > it as a slot of its own: U+0301 + `á` is `… 01 0C 0E`, U+0301 + `ä` `… 01 0C 13`, U+0308 twice + `á`
+  > `… 01 22 0E`. Either way an apostrophe or hyphen after U+0301 + `a` sits at `0x0B`, as after `a` alone
+  > (measured, both orders). A mark after a base folds into it and takes none either (`x`+U+0301+`a'b` puts the apostrophe
+  > at `0x0F`).
+  >
   > **Except a version-1 Han character, which counts twice here.** Its four-byte `FD FF AW DW` primary takes
   > two positions — `人-` puts the hyphen at `0x0F`, `人人-` at `0x17` — though it takes a single secondary
   > slot. It is not a byte count halved: a one-byte version-1 primary (a Lao vowel) still counts once, and a
@@ -545,7 +553,12 @@ to `n` bytes, as page-01 stores it. LibRed builds the row and every key from one
   >   iteration marks, the lone prolonged mark and the double hyphen, which are not kana letters at all and
   >   which ACE gives the unweighted `FF FF` primary and no kana section when they stand alone.
   >
-  > What `02 80 FF 80` denotes is still not established; it never varies, so it is emitted as a literal.
+  > **The closing `02 80 FF 80` grows with the kana** (measured to 44 kana, both orders): `02`, then one `80`
+  > for every seven kana or part of seven, `FF`, and the same `80`s again — `02 80 FF 80` up to seven kana,
+  > `02 8080 FF 8080` up to fourteen, `02 808080 FF 808080` up to 21. The count is of the kana entries alone, a
+  > prolonged `ー` among them (`(かー)×8` is 16 entries and three `80`s), whatever else the string holds
+  > (`a` + seven kana keeps one). Each `80` reads as seven one-bit codes under the `10` marker, all clear in every
+  > string measured — hiragana, katakana, halfwidth, small and voiced alike; what they record is not established.
   >
   > Three categories that the Latin-1 range does not show:
   > - **Ignorable** — ACE stores *nothing at all* (key `7F 01 00`): no primary, not even a secondary slot.

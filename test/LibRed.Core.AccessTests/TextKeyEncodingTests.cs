@@ -72,6 +72,68 @@ public class TextKeyEncodingTests
         finally { TemporaryDatabase.Delete(path); }
     }
 
+    // Two things only a longer string shows, in both General orders. A run of kana closes with 02, a 80 for every seven
+    // kana or part of seven, FF and the 80s again — counted over the kana, a prolonged mark among them, not the
+    // characters. A combining mark with nothing before it gives its secondary to the first weight, or sets it beside
+    // the first letter's own accent, and takes no position: an apostrophe after U+0301 + a sits at 0B, as after a alone.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Kana_runs_and_leading_marks_match_access(bool version1)
+    {
+        string R(string s, int n) => string.Concat(Enumerable.Repeat(s, n));
+        string[] values =
+        [
+            R("あ", 7), R("あ", 8), R("あ", 14), R("あ", 15), R("あ", 22), R("ア", 8), R("ぁ", 15), R("が", 8),
+            "a" + R("あ", 7), "a" + R("あ", 8), R("あa", 8), R("a", 14) + "あ", R("かー", 4), R("かー", 8),
+            "́", "́a", "́́a", "́a'b", "́'b", "́a-b", "̀a'b", "́a'b'c",
+            "́ab'c", "á'b", "x́a'b", "'́a", "-́a", "'́a'b",
+            "́é", "́é'b", "́が", "́がa", "́ア'b", "々́a", "́ß", "́Ä-b", "́̀é",
+            "́́ä-b", "̈̈á-b", "́ǖ-b", "̧ç-b",
+        ];
+
+        string path = TemporaryDatabase.CreatePath("libred-textkey-tail-");
+        JetDatabase.Create(path, collation: version1 ? Collation.General : Collation.GeneralLegacy);
+        try
+        {
+            using (var conn = OpenOleDb(path))
+            {
+                using (var c = conn.CreateCommand())
+                { c.CommandText = "CREATE TABLE TKey (V int, K varchar(60))"; c.ExecuteNonQuery(); }
+                using (var c = conn.CreateCommand())
+                { c.CommandText = "CREATE INDEX IK ON TKey (K)"; c.ExecuteNonQuery(); }
+                for (int i = 0; i < values.Length; i++)
+                {
+                    using var c = conn.CreateCommand();
+                    c.CommandText = "INSERT INTO TKey (V, K) VALUES (?, ?)";
+                    c.Parameters.AddWithValue("v", i);
+                    c.Parameters.AddWithValue("k", values[i]);
+                    c.ExecuteNonQuery();
+                }
+            }
+            OleDbConnection.ReleaseObjectPool();
+
+            using var db = JetDatabase.Open(path);
+            var table = db.OpenTable("TKey");
+            IndexDef index = table.Definition.Indexes.Single(i => i.Name == "IK");
+            var byRow = table.RowsWhere([0, 1], _ => true).ToDictionary(r => r.Id, r => r.Values);
+            int checkd = 0;
+            foreach (var (accessKey, rowId) in new IndexCursor(table.Channel, index.RootPage).RawEntries())
+            {
+                byte[] ours = IndexKeyCodec.Encode(index.Columns, byRow[rowId]);
+                Assert.True(accessKey.AsSpan().SequenceEqual(ours),
+                    $"'{byRow[rowId][1]}': access={Convert.ToHexString(accessKey)} ours={Convert.ToHexString(ours)}");
+                checkd++;
+            }
+            Assert.Equal(values.Length, checkd);
+        }
+        finally
+        {
+            OleDbConnection.ReleaseObjectPool();
+            TemporaryDatabase.Delete(path);
+        }
+    }
+
     [Fact]
     public void Encoded_descending_text_keys_match_access_byte_for_byte()
     {
