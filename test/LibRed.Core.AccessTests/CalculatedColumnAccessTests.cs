@@ -1594,6 +1594,7 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
             Assert.NotEmpty(created);
 
             var mismatches = new List<string>();
+            var olderThan365 = new Lazy<bool>(() => !AceTestDatabase.EnforcesBacktickCheck(TestDatabases.NorthwindAccdb));
             var aceCannotReadItself = new List<string>();
             var aceRefusesItself = new List<string>();
             foreach ((string name, string expression) in created)
@@ -1677,8 +1678,10 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
                     }
                     // Nothing else may be refused.
                     if (refused.Contains(row.Id)) mismatches.Add($"{name} [{expression}] row {row.Id}: ACE {ace}, LibRed refused it");
-                    // LibRed writes a negative zero as Microsoft 365 does, "-0", where ACE 2010 writes "0" (Str " 0").
-                    bool negativeZero = name.StartsWith("PNegZero", StringComparison.Ordinal) && ace is "\"0\"" or "\" 0\"" && libred == "\"-0\"";
+                    // LibRed writes a negative zero as Microsoft 365 does, "-0", where ACE 2010 writes "0" (Str " 0"); only
+                    // an engine older than Microsoft 365, which a backtick CHECK tells apart, may differ there.
+                    bool negativeZero = name.StartsWith("PNegZero", StringComparison.Ordinal) && olderThan365.Value
+                        && ace is "\"0\"" or "\" 0\"" && libred == "\"-0\"";
                     if (ace != libred && !negativeZero) mismatches.Add($"{name} [{expression}] row {row.Id}: ACE {ace}, LibRed {libred}");
                 }
             }
