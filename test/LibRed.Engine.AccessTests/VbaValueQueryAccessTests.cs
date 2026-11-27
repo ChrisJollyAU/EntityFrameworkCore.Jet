@@ -86,10 +86,17 @@ public class VbaValueQueryAccessTests(ITestOutputHelper output) : AceQueryParity
         "SELECT VarType([I]*[I]), ([I]*[I]) & '' FROM O", "SELECT VarType(CInt(200)*CInt(200)), (CInt(200)*CInt(200)) & '' FROM O",
         "SELECT VarType([I]+32767), ([I]+32767) & '' FROM O", "SELECT VarType([Qty]*[Qty]), ([Qty]*[Qty]) & '' FROM O",
         "SELECT IIf([Qty]>0, [Qty]*1000000000, 0) FROM O",
-        // CByte gives an Integer, inside an aggregate and arithmetic too. (Its negation and sum are not asked: whole-number
-        // arithmetic takes C#'s types, an Integer a Long — ExpressionFunctions.Arithmetic and Negate.)
+        // CByte gives an Integer, inside an aggregate and arithmetic too. (Its sum is not asked: whole-number arithmetic
+        // takes C#'s types, an Integer a Long — ExpressionFunctions.Arithmetic.)
         "SELECT VarType(CByte([Qty])), TypeName(CByte([Qty])) FROM O", "SELECT VarType(Max(CByte([Qty]))), Max(CByte([Qty])) & '' FROM O",
         "SELECT VarType(CByte([Qty]) * 1.5), (CByte([Qty]) * 1.5) & '' FROM O",
+        // The date parts, Asc and AscW are Integers, as Sgn is.
+        "SELECT Year(#2003-09-29 10:20:30#), Month(#2003-09-29#), Day(#2003-09-29#), Hour(#2003-09-29 10:20:30#), "
+            + "Minute(#2003-09-29 10:20:30#), Second(#2003-09-29 10:20:30#), Weekday(#2003-09-29#), Asc('A'), AscW('A') FROM O",
+        "SELECT Sgn([Qty]), Sgn(-2.5), Sgn([I]), VarType(Sgn([Qty])) FROM O",
+        // The negation of an Integer or a Boolean is an Integer.
+        "SELECT -[I], -True, -CInt(3), -CByte([Qty]), VarType(-[I]), VarType(-True) FROM O",
+        "SELECT -[YN], -[Qty], -'2.5', VarType(-[YN]), VarType(-[Qty]) FROM M ORDER BY Id",
         // StrConv gives text.
         "SELECT StrConv([A], 1), StrConv([A], 3) FROM G ORDER BY Id",
         // A VBA Boolean as a grouping key and an ordering key is the plain number.

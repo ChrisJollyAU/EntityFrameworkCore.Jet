@@ -1531,9 +1531,13 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
             ? Variance.Mixed : Variance.None;
     }
 
-    /// <summary>The type an expression counts as where it is an operand: a Variant or a Mixed value as a Double.</summary>
+    /// <summary>The type an expression counts as where it is an operand: a Variant or a Mixed value as a Double, and a
+    /// computed Byte — CByte, and Max or Min over it — as the Integer it holds, as ACE's does (verified vs ACE: -CByte(7)
+    /// is an Integer, where a Byte column negates to a Long).</summary>
     private Type? OperandType(Expression expression, IReadOnlyList<OutputColumn> columns) =>
-        VarianceOf(expression, columns) != Variance.None ? typeof(double) : DeclaredType(expression, columns);
+        VarianceOf(expression, columns) != Variance.None ? typeof(double)
+        : DeclaredType(expression, columns) is var declared && declared == typeof(byte) && expression is not ColumnReference
+            ? typeof(short) : declared;
 
     /// <summary>Whether <paramref name="expression"/> is text that is neither a Variant nor a Mixed value.</summary>
     private bool IsPlainText(Expression expression, IReadOnlyList<OutputColumn> columns) =>
@@ -1567,7 +1571,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
                     && DeclaredType(expression, columns) == typeof(int)
                     && ExpressionEvaluator.NumberTypeOf(expression, columns, _database.Catalog.Names, e => DeclaredType(e, columns)).Class == NumberClass.Whole
                 || expression is FunctionCall call && TextFold.Fold(call.Name.TrimEnd('$'), TextFold.Letters.None, out _) is "DATEDIFF"
-                || expression is not ColumnReference && DeclaredType(expression, columns) == typeof(byte)
+                || DeclaredType(expression, columns) == typeof(byte) && OperandType(expression, columns) == typeof(short)
                 ? DeclaredType(expression, columns) : null, false);
 
     /// <summary>Which of <paramref name="keys"/> compare as text: a Variant or a Mixed value sorts, groups and takes
@@ -1847,9 +1851,9 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
         return typeof(int);
     }
 
-    /// <summary>The type of <c>-x</c> or <c>BNOT x</c>. Keep in lock-step with ExpressionEvaluator.Negate and BitNot:
-    /// negation reads text as a Double and widens an Integer, Byte or Boolean to a Long; BNOT gives an Integer from
-    /// an Integer or a Boolean, an Int64 from an Int64, and otherwise a Long.</summary>
+    /// <summary>The type of <c>-x</c> or <c>BNOT x</c>. Keep in lock-step with ExpressionFunctions.Negate and BitNot:
+    /// negation reads text as a Double, keeps an Integer or a Boolean an Integer and widens a Byte to a Long; BNOT
+    /// gives an Integer from an Integer or a Boolean, an Int64 from an Int64, and otherwise a Long.</summary>
     private static Type? DeclaredUnaryType(UnaryOperator op, Type? operand)
     {
         if (operand is null)

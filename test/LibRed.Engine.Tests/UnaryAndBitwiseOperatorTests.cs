@@ -215,6 +215,20 @@ public class UnaryAndBitwiseOperatorTests(UnaryAndBitwiseOperatorTests.Database 
     public void Minus_negates_the_value_read_as_a_number(string expression, double expected) =>
         Assert.Equal(expected, Convert.ToDouble(Scalar(expression), CultureInfo.InvariantCulture));
 
+    // An Integer or a Boolean stays an Integer through minus (-True is the Integer 1); a Byte column, a Long and text
+    // negate to a Long, a Long and a Double (measured vs ACE).
+    [Theory]
+    [InlineData("-TRUE", typeof(short))]
+    [InlineData("-YN", typeof(short))]
+    [InlineData("-SI", typeof(short))]
+    [InlineData("-CINT(3)", typeof(short))]
+    [InlineData("-CBYTE(7)", typeof(short))]
+    [InlineData("-BT", typeof(int))]
+    [InlineData("-LG", typeof(int))]
+    [InlineData("-'2.5'", typeof(double))]
+    public void Minus_keeps_an_integer_or_a_boolean_an_integer(string expression, Type expected) =>
+        Assert.IsType(expected, Scalar(expression));
+
     [Theory]
     [InlineData("-#2020-01-02#", "1779-12-27 00:00:00")]
     [InlineData("-DT", "1779-12-27 12:00:00")]
