@@ -58,13 +58,9 @@ public class CalculatedExpressionQueryAccessTests(ITestOutputHelper output) : Ac
         "[A] Like '%'", "[A] Like '%%'",
         // A Yes/No column is a number, not a VBA Boolean.
         "[YN]", "Str([YN])", "Len([YN])", "UCase([YN])", "Asc([YN])", "[YN] = '-1'", "-[YN]", "IIf([YN],'y','n')",
-        // Case by ACE's own table, which leaves Cherokee, dotless and dotted i, ß, µ, ǅ and final sigma as they are.
-        "UCase([A])", "LCase([A])", $"UCase({CaseSample})", $"LCase({CaseSample})",
+        // Case by ACE's own table (VbaValueQueryAccessTests asks the letters ACE leaves as they are).
+        "UCase([A])", "LCase([A])",
     ];
-
-    /// <summary>Cherokee Ꭰ and ꭰ, ı, İ, ß, µ, ǅ and ς, then a space, ÿ and Ÿ, and letters ACE does case.</summary>
-    internal const string CaseSample = "(ChrW(5024) & ChrW(43888) & ChrW(305) & ChrW(304) & ChrW(223) & ChrW(181) & ChrW(453) "
-        + "& ChrW(962) & ' ' & ChrW(255) & ChrW(376) & 'aZ xY')";
 
     // Each row on its own, so one row's error hides no other, its value written out as text so a Variant compares by
     // what it says. The column's type is not compared here: ACE's OLE DB reader types a Boolean Integer (Int16) and a

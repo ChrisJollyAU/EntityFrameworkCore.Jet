@@ -54,16 +54,22 @@ public class VbaValueQueryAccessTests(ITestOutputHelper output) : AceQueryParity
         // A function's name is matched by ACE's own case table, the same on every platform: a long s is no s and a
         // dotless i no i, so these are no functions.
         "Abſ(-3)", "Mıd('abc', 2)", "aBS(-3)",
-        // Case by ACE's own table, as UCase and LCase case (CalculatedExpressionQueryAccessTests.CaseSample).
+        // Case by ACE's own table, which leaves Cherokee, dotless and dotted i, ß, µ, ǅ and final sigma as they are.
+        $"UCase({CaseSample})", $"LCase({CaseSample})",
         .. ((string[])["StrConv({0}, 1)", "StrConv({0}, 2)", "StrConv({0}, 3)", "Format({0}, '<')", "Format({0}, '>')"])
             .SelectMany(f => (string[])[string.Format(System.Globalization.CultureInfo.InvariantCulture, f, "[A]"),
-                string.Format(System.Globalization.CultureInfo.InvariantCulture, f, CalculatedExpressionQueryAccessTests.CaseSample)]),
+                string.Format(System.Globalization.CultureInfo.InvariantCulture, f, CaseSample)]),
         // Out of a subquery or a derived table.
         "(SELECT IsNull(X.A) FROM M AS X WHERE X.Id = M.Id)", "Str((SELECT IsNull(X.A) FROM M AS X WHERE X.Id = M.Id))",
         "(SELECT X.B FROM (SELECT Y.Id, IsNull(Y.A) AS B FROM M AS Y) AS X WHERE X.Id = M.Id)",
         "Str((SELECT X.B FROM (SELECT Y.Id, IsNull(Y.A) AS B FROM M AS Y) AS X WHERE X.Id = M.Id))",
         "IsNull([A]) In (SELECT X.A FROM M AS X)", "IsNull([A]) In (SELECT X.YN FROM M AS X)",
     ];
+
+    /// <summary>Cherokee Ꭰ and ꭰ, ı, İ, ß, µ, ǅ and ς, then a space, ÿ and Ÿ, and letters ACE does case. ChrW is refused
+    /// in a calculated column, so these are asked here.</summary>
+    private const string CaseSample = "(ChrW(5024) & ChrW(43888) & ChrW(305) & ChrW(304) & ChrW(223) & ChrW(181) & ChrW(453) "
+        + "& ChrW(962) & ' ' & ChrW(255) & ChrW(376) & 'aZ xY')";
 
     public static TheoryData<string> Queries =>
     [
