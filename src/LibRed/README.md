@@ -245,6 +245,10 @@ Treat the number as of its date — an EF Core version bump moves it.
   **A column's nullability follows ACE's OLE DB schema, not DAO's:** DAO reports a Yes/No column and a COUNTER
   column with `Required = False`; ACE's OLE DB Columns rowset reports both not nullable, and so does LibRed's
   `IsNullable`.
+  **A column a name would share with another is deliberately refused:** ACE's `ADD COLUMN` and `CREATE TABLE` accept
+  a column whose name the database's collation keys equal to one the table has (`pre` and `preț`), after which every
+  reference reaches only the first. LibRed refuses such a column, and a reference that matches two columns of a table
+  ACE made, rather than read or write the wrong one (docs/format/system-catalog.md).
   `WITH OWNERACCESS OPTION` is taken wherever ACE takes it and changes nothing — LibRed has no users to act for —
   but a stored query keeps it.
   **`TRANSFORM … PIVOT … [IN (…)]`**, the crosstab, with ACE's column naming and ordering, its fixed headings, row

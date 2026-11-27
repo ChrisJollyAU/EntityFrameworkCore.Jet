@@ -106,10 +106,10 @@ public static class PropertyBlob
         public ushort? Block { get; init; }
 
         /// <summary>Whether this is a property of the column named <paramref name="owner"/>, or of the table for
-        /// <c>""</c> — and not of an index that shares the name.</summary>
+        /// <c>""</c> — and not of an index that shares the name. <paramref name="owner"/> is the column's name as its
+        /// table stores it, which is the owner's exactly (every block of every fixture file) — not a name as typed.</summary>
         public bool IsOwnedBy(string owner) =>
-            BlockType == (owner.Length == 0 ? TableBlock : ColumnBlock)
-            && string.Equals(Owner, owner, StringComparison.OrdinalIgnoreCase);
+            BlockType == (owner.Length == 0 ? TableBlock : ColumnBlock) && string.Equals(Owner, owner, StringComparison.Ordinal);
 
         internal ushort BlockType => Block ?? (Owner.Length == 0 ? TableBlock : ColumnBlock);
 
@@ -298,8 +298,7 @@ public static class PropertyBlob
         foreach (ParsedBlock block in parsed.Blocks)
         {
             // Only the column's own block: an index's can carry the same name.
-            bool drop = block.Type == ColumnBlock
-                && string.Equals(ReadOwner(block.Body), owner, StringComparison.OrdinalIgnoreCase);
+            bool drop = block.Type == ColumnBlock && string.Equals(ReadOwner(block.Body), owner, StringComparison.Ordinal);
             if (!drop) result.AddRange(block.Raw);
         }
         return [.. result];
@@ -322,8 +321,7 @@ public static class PropertyBlob
         result.AddRange(blob[..SignatureSize]);
         foreach (ParsedBlock block in parsed.Blocks)
         {
-            if (block.Type != ColumnBlock
-                || !string.Equals(ReadOwner(block.Body), oldOwner, StringComparison.OrdinalIgnoreCase))
+            if (block.Type != ColumnBlock || !string.Equals(ReadOwner(block.Body), oldOwner, StringComparison.Ordinal))
             {
                 result.AddRange(block.Raw);
                 continue;
@@ -357,7 +355,7 @@ public static class PropertyBlob
     /// is not a default: ACE ignores it (verified).</summary>
     public static IReadOnlyDictionary<string, string> ReadColumnDefaults(IReadOnlyList<Property> properties)
     {
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (Property p in properties)
             if (p.BlockType == ColumnBlock && p.Name == DefaultValueProperty && (p.Flags & DdlFlag) != 0)
                 result[p.Owner] = p.Value;
@@ -371,7 +369,7 @@ public static class PropertyBlob
     /// for <c>Required</c>).</summary>
     public static IReadOnlySet<string> ReadColumnsWith(IReadOnlyList<Property> properties, string name, bool value)
     {
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new HashSet<string>(StringComparer.Ordinal);
         string text = value ? "1" : "0";
         foreach (Property p in properties)
             if (p.BlockType == ColumnBlock && p.Name == name && p.Value == text && (p.Flags & DdlFlag) != 0)

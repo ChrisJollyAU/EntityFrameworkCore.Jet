@@ -68,7 +68,8 @@ internal static class SubqueryCorrelation
             return null; // Unplannable here is not our problem to report; let the normal path raise it.
         }
 
-        HashSet<string> innerAliases = QueryPlanner.SubtreeAliases(plan);
+        IEqualityComparer<string> names = database.Catalog.Names;
+        HashSet<string> innerAliases = QueryPlanner.SubtreeAliases(plan, names);
 
         var innerKeys = new List<Expression>();
         var outerKeys = new List<Expression>();
@@ -98,7 +99,7 @@ internal static class SubqueryCorrelation
             (Expression Left, Expression Right)? operands = conjunct switch
             {
                 BinaryExpression { Operator: BinaryOperator.Equal } eq => (eq.Left, eq.Right),
-                _ => NullSafeEquality(conjunct),
+                _ => NullSafeEquality(conjunct, names),
             };
 
             if (operands is var (left, right)
@@ -183,12 +184,12 @@ internal static class SubqueryCorrelation
     ///     <c>HAVING d.B &gt; 1</c> where d's A and B both read ID is refused under GROUP BY d.A).
     /// </summary>
     internal static bool IsGroupingKey(Expression inner, IReadOnlyList<Expression> groupBy, PlanNode from, JetDatabase database)
-        => groupBy.Any(k => SameOperand(k, inner)
+        => groupBy.Any(k => SameOperand(k, inner, database.Catalog.Names)
             || (k is ColumnReference key && inner is ColumnReference column
-                && string.Equals(key.Column, column.Column, StringComparison.OrdinalIgnoreCase)
+                && database.Catalog.Names.Equals(key.Column, column.Column)
                 && IndexSelection.ResolveColumn(key, from, database) is { } a
                 && IndexSelection.ResolveColumn(column, from, database) is { } b
-                && string.Equals(a.Alias, b.Alias, StringComparison.OrdinalIgnoreCase)));
+                && database.Catalog.Names.Equals(a.Alias, b.Alias)));
 
     /// <summary>
     ///     Recognises EF's null-safe equality — <c>a = b OR (a IS NULL AND b IS NULL)</c> — returning the two
@@ -205,7 +206,7 @@ internal static class SubqueryCorrelation
     ///         is true exactly when both are non-null and equal, or both are null.
     ///     </para>
     /// </remarks>
-    private static (Expression Left, Expression Right)? NullSafeEquality(Expression conjunct)
+    private static (Expression Left, Expression Right)? NullSafeEquality(Expression conjunct, IEqualityComparer<string> names)
     {
         if (conjunct is not BinaryExpression { Operator: BinaryOperator.Or } or)
         {
@@ -221,8 +222,8 @@ internal static class SubqueryCorrelation
                 continue;
             }
 
-            if ((IsNullTestOf(and.Left, eq.Left) && IsNullTestOf(and.Right, eq.Right))
-                || (IsNullTestOf(and.Left, eq.Right) && IsNullTestOf(and.Right, eq.Left)))
+            if ((IsNullTestOf(and.Left, eq.Left, names) && IsNullTestOf(and.Right, eq.Right, names))
+                || (IsNullTestOf(and.Left, eq.Right, names) && IsNullTestOf(and.Right, eq.Left, names)))
             {
                 return (eq.Left, eq.Right);
             }
@@ -232,20 +233,18 @@ internal static class SubqueryCorrelation
     }
 
     /// <summary>Whether <paramref name="test" /> is <c>operand IS NULL</c> for that same operand.</summary>
-    private static bool IsNullTestOf(Expression test, Expression operand)
-        => test is UnaryExpression { Operator: UnaryOperator.IsNull, Operand: { } tested } && SameOperand(tested, operand);
+    private static bool IsNullTestOf(Expression test, Expression operand, IEqualityComparer<string> names)
+        => test is UnaryExpression { Operator: UnaryOperator.IsNull, Operand: { } tested } && SameOperand(tested, operand, names);
 
     /// <summary>
-    ///     Whether two operands of the null-safe form are the same expression. Column references compare
-    ///     case-insensitively, since SQL identifiers are; anything else falls back to the AST's own structural
-    ///     equality (the expression records are value types by construction).
+    ///     Whether two operands of the null-safe form are the same expression. Column references compare by
+    ///     <paramref name="names" />, the database's <see cref="LibRed.Catalog.JetCatalog.Names" />; anything else falls
+    ///     back to the AST's own structural equality (the expression records are value types by construction).
     /// </summary>
-    private static bool SameOperand(Expression a, Expression b)
+    private static bool SameOperand(Expression a, Expression b, IEqualityComparer<string> names)
         => (a, b) switch
         {
-            (ColumnReference x, ColumnReference y) =>
-                string.Equals(x.Column, y.Column, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(x.Table, y.Table, StringComparison.OrdinalIgnoreCase),
+            (ColumnReference x, ColumnReference y) => names.Equals(x.Column, y.Column) && names.Equals(x.Table, y.Table),
             _ => a.Equals(b),
         };
 
@@ -295,7 +294,7 @@ internal static class SubqueryCorrelation
         }
 
         // An outer name more than one outer column has is the evaluator's ambiguity to report, row by row.
-        if (OutputColumn.Find(outerColumns, outerCol) is not { } outerColumn)
+        if (OutputColumn.Find(outerColumns, outerCol, database.Catalog.Names) is not { } outerColumn)
         {
             return false;
         }

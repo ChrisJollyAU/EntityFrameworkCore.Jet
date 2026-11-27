@@ -103,7 +103,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // below are refused as read-only (verified vs ACE).
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, name);
 
-        var relationshipNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var relationshipNames = new HashSet<string>(_catalog.Names);
         foreach (RelationshipSpec r in relationships)
             if (!relationshipNames.Add(r.Name)) throw RelationshipNameTaken(r.Name);
             else EnsureRelationshipNameFree(r.Name);
@@ -129,18 +129,18 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         RejectOleIndexColumns(
             (primaryKey ?? []).Concat(uniqueConstraints.SelectMany(u => u.Columns))
                 .Concat(relationships.SelectMany(r => r.Columns.Select(c => c.Column))),
-            n => columns.FirstOrDefault(c => string.Equals(c.Name, n, StringComparison.OrdinalIgnoreCase))?.Type);
+            n => columns.FirstOrDefault(c => _catalog.Names.Equals(c.Name, n))?.Type);
 
         relationships = relationships.Select(fk => ResolvePrimaryKeyReference(fk, creatingTable: name)).ToList();
         foreach (RelationshipSpec fk in relationships)
-            EnsureSameDataTypes(fk, ColumnOf(columns), string.Equals(fk.ReferencedTable, name, StringComparison.OrdinalIgnoreCase)
+            EnsureSameDataTypes(fk, ColumnOf(columns), _catalog.Names.Equals(fk.ReferencedTable, name)
                 ? ColumnOf(columns)
                 : ColumnOf(_catalog.FindTable(fk.ReferencedTable)));
 
         // Built before anything is written, since a default can be refused.
-        var defaults = new Dictionary<string, PropertyBlob.Property>(StringComparer.OrdinalIgnoreCase);
+        var defaults = new Dictionary<string, PropertyBlob.Property>(_catalog.Names);
         foreach ((string column, string defaultSql) in columnDefaults)
-            if (columns.FirstOrDefault(c => string.Equals(c.Name, column, StringComparison.OrdinalIgnoreCase)) is { } spec)
+            if (columns.FirstOrDefault(c => _catalog.Names.Equals(c.Name, column)) is { } spec)
                 defaults.TryAdd(spec.Name, PropertyBlob.DefaultValue(spec.Name, spec.Type, defaultSql));
 
         RaiseFormatFor(columns);
@@ -189,7 +189,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             RejectCalculatedIndexColumns(plan.Name, plan.Columns,
                 n => columns.FirstOrDefault(
                     c => c.CalculatedExpression is not null
-                         && string.Equals(c.Name, n, StringComparison.OrdinalIgnoreCase))?.Name);
+                         && _catalog.Names.Equals(c.Name, n))?.Name);
 
         // Usage-map layout (verified vs ACE): the primary page holds row 0 = table owned, row 1 = table
         // free, then one row per index, then two rows (owned + free) per long-value (memo/OLE) column — as
@@ -206,7 +206,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         {
             var plan = indexPlans[i];
             int match = owners.FindIndex(o => indexPlans[o].IsPk == plan.IsPk && indexPlans[o].IsUnique == plan.IsUnique
-                && indexPlans[o].Columns.SequenceEqual(plan.Columns, StringComparer.OrdinalIgnoreCase));
+                && indexPlans[o].Columns.SequenceEqual(plan.Columns, _catalog.Names));
             dataOrdinal[i] = match >= 0 ? match : owners.Count;
             if (match < 0) owners.Add(i);
         }
@@ -296,7 +296,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
 
             // A self-referencing FK: the table is not in the catalog yet (we are creating it), so resolve
             // the referenced index within the plans we are building and host both ends here.
-            if (string.Equals(fk.ReferencedTable, name, StringComparison.OrdinalIgnoreCase))
+            if (_catalog.Names.Equals(fk.ReferencedTable, name))
             {
                 // Only a key declared before the reference serves: ACE refuses one declared after it (verified).
                 int refOrdinal = dataOrdinal[SelfReferencedOrdinal(indexPlans.GetRange(0, i), fk)];
@@ -527,15 +527,15 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         }
     }
 
-    private static Func<string, JetDataType?> ColumnOf(IReadOnlyList<ColumnSpec> columns) =>
-        name => columns.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))?.Type;
+    private Func<string, JetDataType?> ColumnOf(IReadOnlyList<ColumnSpec> columns) =>
+        name => columns.FirstOrDefault(c => _catalog.Names.Equals(c.Name, name))?.Type;
 
     private static Func<string, JetDataType?> ColumnOf(TableDefinition? table) => name => table?.FindColumn(name)?.Type;
 
     /// <summary>The data-block ordinal of a self-reference's parent-side key, found among the indexes being
     /// created for this table (the table is not in the catalog yet) on <see cref="FindParentKeyIndex"/>'s terms:
     /// ACE refuses one over another relationship's non-unique index (verified).</summary>
-    private static int SelfReferencedOrdinal(
+    private int SelfReferencedOrdinal(
         List<(string Name, IReadOnlyList<string> Columns, bool IsPk, bool IsUnique, RelationshipSpec? Fk,
             int DeclaredAfter)> indexPlans,
         RelationshipSpec fk) =>
@@ -611,7 +611,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     {
         if (!fk.ReferencesPrimaryKey) return fk;
         bool selfInCreate = creatingTable is not null
-                            && string.Equals(fk.ReferencedTable, creatingTable, StringComparison.OrdinalIgnoreCase);
+                            && _catalog.Names.Equals(fk.ReferencedTable, creatingTable);
         IndexDef primaryKey = (selfInCreate ? null : DesignTable(fk.ReferencedTable).Indexes.FirstOrDefault(i => i.IsPrimaryKey))
             ?? throw new InvalidOperationException(
                 $"Cannot create relationship. Referenced table '{fk.ReferencedTable}' does not have a primary key.");
@@ -640,7 +640,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// share it. Checked before anything is written.</summary>
     private void EnsureRelationshipNameFree(string name)
     {
-        if (_catalog.Relationships.Any(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)))
+        if (_catalog.Relationships.Any(r => _catalog.Names.Equals(r.Name, name)))
             throw RelationshipNameTaken(name);
     }
 
@@ -704,7 +704,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, table.Name);
         RejectCalculatedIndexColumns(indexName, columns.Select(c => c.Column),
             n => table.Columns.FirstOrDefault(
-                c => c.IsCalculated && string.Equals(c.Name, n, StringComparison.OrdinalIgnoreCase))?.Name);
+                c => c.IsCalculated && _catalog.Names.Equals(c.Name, n))?.Name);
         RejectOleIndexColumns(columns.Select(c => c.Column), n => table.FindColumn(n)?.Type);
         var slots = ResolveSlots(table, columns.Select(c => (c.Column, Ascending: !c.Descending)));
         // A table has one primary key, and ACE refuses a second (verified).
@@ -758,8 +758,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// operations pick an arbitrary block — a DROP that removes the wrong one.</summary>
     private void RejectDuplicateIndexName(TableDefinition table, string indexName)
     {
-        JetTextComparer names = JetTextComparer.For(_collation);
-        if (table.LogicalIndexes.Any(l => names.Equals(l.Name, indexName)))
+        if (table.LogicalIndexes.Any(l => _catalog.Names.Equals(l.Name, indexName)))
             throw new InvalidOperationException(
                 $"Table '{table.Name}' already has an index named '{indexName}'.");
     }
@@ -1037,7 +1036,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // lowest free number and the incoming block the next free one above it (verified vs ACE: with 1 free
         // below a live 2, the outgoing block is 1 and the incoming 3).
         (int parentPage, int refOrdinal, int parentNum) =
-            string.Equals(fk.ReferencedTable, childTable, StringComparison.OrdinalIgnoreCase)
+            _catalog.Names.Equals(fk.ReferencedTable, childTable)
                 ? (child.DefinitionPage, ReferencedOrdinalIn(child, fk),
                     NextLogicalIndexNumber(child.DefinitionPage, above: NextLogicalIndexNumber(child.DefinitionPage)))
                 : ResolveParent(fk, child.DefinitionPage);
@@ -1079,13 +1078,12 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     public bool DropConstraint(string childTable, string name)
     {
         ForeignKey? rel = _catalog.Relationships.FirstOrDefault(r =>
-            string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(r.Table, childTable, StringComparison.OrdinalIgnoreCase));
+            _catalog.Names.Equals(r.Name, name) && _catalog.Names.Equals(r.Table, childTable));
         if (rel is null) return false;
 
         TableDefinition child = DesignTable(childTable);
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, child.Name);
-        bool selfRef = string.Equals(rel.ReferencedTable, childTable, StringComparison.OrdinalIgnoreCase);
+        bool selfRef = _catalog.Names.Equals(rel.ReferencedTable, childTable);
 
         var owned = new HashSet<int>();
         var retire = new List<MapRetirement>();
@@ -1102,7 +1100,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             // any other: its B-tree is released whole and its usage-map record retired, unless another index
             // shares its data block and keeps it.
             if (TableDefinition.RemoveIndexBlocks(_channel.Format, childParts, removeDataOrdinal: fkIndex.RealIndexOrdinal, removeLogical: b =>
-                    NameOf(b.Name).Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                    _catalog.Names.Equals(NameOf(b.Name), name) ||
                     (selfRef && IsIncomingBlockFor(b, outgoing, child.DefinitionPage))))
                 QueueIndexMap(fkIndex, maps, owned, retire);
             WriteTdef(child.DefinitionPage, childParts);
@@ -1123,7 +1121,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// unenforced).</summary>
     private int? OutgoingBlockNumber(TableDefinition.Parts childParts, string name) =>
         childParts.Logical.Select(b => TableDefinition.ReadInfoBlock(b.Info, _channel.Format, NameOf(b.Name)))
-            .FirstOrDefault(b => b.IsOutgoing(name))?.Number;
+            .FirstOrDefault(b => b.IsOutgoing(name, _catalog.Names))?.Number;
 
     /// <summary>
     /// What removing relationship <paramref name="rel"/> takes from outside the child's own definition, for both a
@@ -1136,7 +1134,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     private void DetachRelationship(ForeignKey rel, TableDefinition child, int? childBlockNum)
     {
         if (childBlockNum is { } number
-            && !string.Equals(rel.ReferencedTable, child.Name, StringComparison.OrdinalIgnoreCase))
+            && !_catalog.Names.Equals(rel.ReferencedTable, child.Name))
         {
             TableDefinition parent = _catalog.FindTable(rel.ReferencedTable)
                 ?? throw new InvalidOperationException($"Table '{rel.ReferencedTable}' was not found.");
@@ -1180,15 +1178,15 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // where it is enforced. They are detached once the table itself is gone, below.
         TableDefinition.Parts ownParts = TableDefinition.ReadParts(_channel, table.DefinitionPage);
         var ownRelationships = _catalog.Relationships
-            .Where(r => string.Equals(r.Table, tableName, StringComparison.OrdinalIgnoreCase))
+            .Where(r => _catalog.Names.Equals(r.Table, tableName))
             .Select(r => (Relationship: r, Block: OutgoingBlockNumber(ownParts, r.Name)))
             .ToList();
 
         // A table still referenced by a surviving child (as the parent) cannot be dropped. One it references
         // itself is its own, and goes with it.
         if (_catalog.Relationships.Any(r =>
-                string.Equals(r.ReferencedTable, tableName, StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(r.Table, tableName, StringComparison.OrdinalIgnoreCase)))
+                _catalog.Names.Equals(r.ReferencedTable, tableName)
+                && !_catalog.Names.Equals(r.Table, tableName)))
             throw new InvalidOperationException(
                 $"Cannot drop table '{tableName}': it is referenced by a relationship — drop the referencing table first.");
 
@@ -1202,7 +1200,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // with it (measured: dropping complex1.accdb's Table1 through ACE leaves neither, where LibRed left
         // four of each). Each flat table goes the ordinary way, which is why this runs before the drop proper.
         var complexColumns = _catalog.ComplexColumns
-            .Where(c => string.Equals(c.OwnerTable.Name, tableName, StringComparison.OrdinalIgnoreCase))
+            .Where(c => _catalog.Names.Equals(c.OwnerTable.Name, tableName))
             .Select(c => (c.FlatTable.Name, c.ComplexId))
             .ToList();
         foreach ((string flatTable, int complexId) in complexColumns)
@@ -1478,13 +1476,13 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     public bool RenameColumn(string tableName, string oldName, string newName)
     {
         TableDefinition table = DesignTable(tableName);
-        ColumnDef? col = table.Columns.FirstOrDefault(c => string.Equals(c.Name, oldName, StringComparison.OrdinalIgnoreCase));
+        ColumnDef? col = table.FindColumn(oldName);
         if (col is null) return false;
         JetName.Validate(newName, "column name");   // see RenameTable: unchecked, this corrupts the file
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, table.Name);
         // The column being renamed is not a collision with itself: to its own name, or a case-only change, ACE
         // allows it, as for a table (measured through DAO's Field.Name).
-        if (table.Columns.Any(c => c.ColumnId != col.ColumnId && string.Equals(c.Name, newName, StringComparison.OrdinalIgnoreCase)))
+        if (table.Columns.Any(c => c.ColumnId != col.ColumnId && _catalog.Names.Equals(c.Name, newName)))
             throw new InvalidOperationException(
                 $"ALTER TABLE '{tableName}' RENAME COLUMN '{oldName}' TO '{newName}': the table already has a column named '{newName}'.");
         // Nor one a CHECK reads, to the same name too; after a taken name (measured through DAO's Field.Name).
@@ -1495,14 +1493,15 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // whose name the owning table no longer has — so a rename that left the row behind did not merely
         // misname the column, it disconnected it from its values. Read before the TDEF is rewritten, while
         // the catalog still resolves the old name.
-        int? complexId = _catalog.FindComplexColumn(tableName, oldName)?.ComplexId;
+        int? complexId = _catalog.FindComplexColumn(tableName, col.Name)?.ComplexId;
 
         TableDefinition.Parts parts = TableDefinition.ReadParts(_channel, table.DefinitionPage); // stitches continuation pages for a multi-page TDEF
         // Only the name entry changes; the descriptor stays as it is, and WriteTdef re-lays the names after it.
         parts.Columns[col.Index] = (parts.Columns[col.Index].Descriptor, TableDefinition.NameEntry(newName, _channel.Format));
         WriteTdef(table.DefinitionPage, parts);
-        RenameColumnProperties(table.DefinitionPage, oldName, newName);
-        RepointRelationships(columnOf: tableName, oldName, newName);
+        // The column's own name from here on: what the calculated expressions, properties and relationships hold.
+        RenameColumnProperties(table.DefinitionPage, col.Name, newName);
+        RepointRelationships(columnOf: tableName, col.Name, newName);
         if (complexId is int id) SetComplexColumnName(id, newName);
         _catalog.Invalidate();
         return true;
@@ -1518,7 +1517,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     public bool RenameIndex(string tableName, string oldName, string newName)
     {
         TableDefinition table = DesignTable(tableName);
-        JetTextComparer names = JetTextComparer.For(_collation);
+        IEqualityComparer<string> names = _catalog.Names;
         TableDefinition.Parts parts = TableDefinition.ReadParts(_channel, table.DefinitionPage); // stitches continuation pages for a multi-page TDEF
         int at = parts.Logical.FindIndex(b => names.Equals(NameOf(b.Name), oldName));
         if (at < 0) return false;
@@ -1733,8 +1732,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             && (row.Values[idIndex] is null || Convert.ToInt32(row.Values[idIndex], CultureInfo.InvariantCulture) != exceptObjectId);
     }
 
-    private static bool NameMatches(object? value, string name) =>
-        value is string s && string.Equals(s, name, StringComparison.OrdinalIgnoreCase);
+    private bool NameMatches(object? value, string name) => value is string s && _catalog.Names.Equals(s, name);
 
     /// <summary>Rewrites some columns of one catalog row, keeping any index whose key covers a changed column in
     /// step — MSysObjects is uniquely indexed on (ParentId, Name), so a rename has to move that entry rather
@@ -1861,7 +1859,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         var maps = new UsageMap(_channel, table);
         // Its B-tree goes with its data block, which another index sharing it keeps.
         if (TableDefinition.RemoveIndexBlocks(_channel.Format, parts, removeDataOrdinal: index.RealIndexOrdinal,
-                removeLogical: b => NameOf(b.Name).Equals(indexName, StringComparison.OrdinalIgnoreCase)))
+                removeLogical: b => _catalog.Names.Equals(NameOf(b.Name), indexName)))
             QueueIndexMap(index, maps, owned, retire);
         WriteTdef(table.DefinitionPage, parts);
 
@@ -1887,15 +1885,15 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     private bool IndexParticipatesInRelationship(TableDefinition table, IndexDef index, string name)
     {
         var cols = index.Columns.Select(c => c.Column.Name).ToList();
-        bool SameCols(IEnumerable<string> other) =>
-            other.OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
-                 .SequenceEqual(cols.OrderBy(x => x, StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
+        // An index names a column once, and so does a relationship, so the two are the same columns when they are
+        // the same set.
+        bool SameCols(IEnumerable<string> other) => new HashSet<string>(other, _catalog.Names).SetEquals(cols);
 
         // The parent side matches a unique/primary index only, which is exactly the set FindParentKeyIndex
         // will accept as a parent key — ACE refuses a relationship over anything else, so no file this engine
         // writes can have one.
         return IsRelationshipIndex(table, name) || _catalog.Relationships.Any(r =>
-            string.Equals(r.ReferencedTable, table.Name, StringComparison.OrdinalIgnoreCase)
+            _catalog.Names.Equals(r.ReferencedTable, table.Name)
                 && (index.IsUnique || index.IsPrimaryKey)
                 && SameCols(r.Columns.Select(c => c.ReferencedColumn)));
     }
@@ -1905,8 +1903,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// parent renames (verified).</summary>
     private bool IsRelationshipIndex(TableDefinition table, string name) =>
         _catalog.Relationships.Any(r =>
-            string.Equals(r.Table, table.Name, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(name, r.Name, StringComparison.OrdinalIgnoreCase));
+            _catalog.Names.Equals(r.Table, table.Name) && _catalog.Names.Equals(name, r.Name));
 
     /// <summary>
     /// Adds a column — <c>ALTER TABLE t ADD COLUMN c type</c>. A metadata TDEF edit (probed vs ACE, the
@@ -1927,7 +1924,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         TableDefinition table = DesignTable(tableName);
         // A taken column name included (verified vs ACE).
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, table.Name);
-        if (table.Columns.Any(c => string.Equals(c.Name, spec.Name, StringComparison.OrdinalIgnoreCase)))
+        if (table.FindColumn(spec.Name) is not null)
             return false;
         JetFormatBase format = _channel.Format;
         if (table.Columns.Count >= format.MaxColumnsPerTable)
@@ -2215,16 +2212,16 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     public void SetColumnDefault(string tableName, string columnName, string defaultSql)
         => MutateLvPropForColumn(tableName, columnName, (props, column) =>
         {
-            props.RemoveAll(p => p.IsOwnedBy(columnName) && p.Name == PropertyBlob.DefaultValueProperty);
-            props.Add(PropertyBlob.DefaultValue(columnName, column.Type, defaultSql));
+            props.RemoveAll(p => p.IsOwnedBy(column.Name) && p.Name == PropertyBlob.DefaultValueProperty);
+            props.Add(PropertyBlob.DefaultValue(column.Name, column.Type, defaultSql));
         });
 
     /// <summary>Removes a column's <c>DefaultValue</c> from the table's <c>MSysObjects.LvProp</c> blob —
     /// ALTER TABLE … ALTER COLUMN … DROP DEFAULT. Drops only that property, so the column's type and its
     /// <c>Required</c> (NOT NULL) property survive — ACE-verified. A no-op if the column had no default.</summary>
     public void DropColumnDefault(string tableName, string columnName)
-        => MutateLvPropForColumn(tableName, columnName, (props, _) =>
-            props.RemoveAll(p => p.IsOwnedBy(columnName) && p.Name == PropertyBlob.DefaultValueProperty));
+        => MutateLvPropForColumn(tableName, columnName, (props, column) =>
+            props.RemoveAll(p => p.IsOwnedBy(column.Name) && p.Name == PropertyBlob.DefaultValueProperty));
 
     /// <summary>Sets or clears a column's <c>Required</c> (NOT NULL) property in the table's
     /// <c>MSysObjects.LvProp</c> blob — ALTER TABLE … ALTER COLUMN … NOT NULL / NULL. A required column carries
@@ -2233,10 +2230,10 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// <see cref="ColumnDef.IsNullable"/>). ACE-verified: ACE writes the same property for
     /// <c>ALTER COLUMN … NOT NULL</c> and enforces it.</summary>
     public void SetColumnRequired(string tableName, string columnName, bool required)
-        => MutateLvPropForColumn(tableName, columnName, (props, _) =>
+        => MutateLvPropForColumn(tableName, columnName, (props, column) =>
         {
-            props.RemoveAll(p => p.IsOwnedBy(columnName) && p.Name == PropertyBlob.RequiredProperty);
-            if (required) props.Add(PropertyBlob.Bool(columnName, PropertyBlob.RequiredProperty, true));
+            props.RemoveAll(p => p.IsOwnedBy(column.Name) && p.Name == PropertyBlob.RequiredProperty);
+            if (required) props.Add(PropertyBlob.Bool(column.Name, PropertyBlob.RequiredProperty, true));
         });
 
     /// <summary>Reads the table's <c>MSysObjects.LvProp</c> property blob, applies <paramref name="mutate"/>,
@@ -2354,16 +2351,16 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// </summary>
     private string? CheckReading(string table, string? column, bool exceptOwnTable)
     {
-        const StringComparison oic = StringComparison.OrdinalIgnoreCase;
+        IEqualityComparer<string> names = _catalog.Names;
         TableDefinition mo = _catalog.RequireTable("MSysObjects");
         int idIndex = mo.RequireColumn("Id").Index, readsIndex = mo.RequireColumn("Database").Index;
         return _catalog.UserTables
-            .Where(t => !exceptOwnTable || !string.Equals(t.Name, table, oic))
+            .Where(t => !exceptOwnTable || !names.Equals(t.Name, table))
             .SelectMany(t => t.CheckConstraints)
             .Select(check => (check.Name, Row: _catalog.FindObjectRow(JetCatalog.RelationshipContainerParentId, check.Name, mo)))
             .Where(check => check.Row?.Values[readsIndex] is string reads
-                && ReadCheckReads(reads).Any(read => string.Equals(read.Table, table, oic)
-                    && (column is null || read.Columns.Any(c => string.Equals(c, column, oic)))))
+                && ReadCheckReads(reads).Any(read => names.Equals(read.Table, table)
+                    && (column is null || read.Columns.Contains(column, names))))
             .OrderBy(check => Convert.ToInt32(check.Row!.Value.Values[idIndex], CultureInfo.InvariantCulture))
             .Select(check => check.Name)
             .FirstOrDefault();
@@ -2387,7 +2384,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
 
         byte[] blob = ReadObjectProperties(tdefPage) ?? [];
         var checks = PropertyBlob.ReadCheckConstraints(PropertyBlob.Read(blob)).ToList();
-        if (checks.RemoveAll(c => string.Equals(c.Name, checkName, StringComparison.OrdinalIgnoreCase)) == 0)
+        if (checks.RemoveAll(c => _catalog.Names.Equals(c.Name, checkName)) == 0)
             return false; // no CHECK of that name — let the caller try FK/PK/unique
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, target.Name);
 
@@ -2511,12 +2508,10 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// they raise, so the rule itself lives here.</summary>
     private bool ColumnIsInRelationship(TableDefinition table, ColumnDef column)
     {
-        const StringComparison oic = StringComparison.OrdinalIgnoreCase;
+        IEqualityComparer<string> names = _catalog.Names;
         return _catalog.Relationships.Any(r =>
-            (string.Equals(r.Table, table.Name, oic) &&
-             r.Columns.Any(c => string.Equals(c.Column, column.Name, oic))) ||
-            (string.Equals(r.ReferencedTable, table.Name, oic) &&
-             r.Columns.Any(c => string.Equals(c.ReferencedColumn, column.Name, oic))));
+            (names.Equals(r.Table, table.Name) && r.Columns.Any(c => names.Equals(c.Column, column.Name))) ||
+            (names.Equals(r.ReferencedTable, table.Name) && r.Columns.Any(c => names.Equals(c.ReferencedColumn, column.Name))));
     }
 
     /// <summary>ACE rejects every type/length alteration of a relationship column, on either the
@@ -3003,7 +2998,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     public bool DropColumn(string tableName, string columnName)
     {
         TableDefinition table = DesignTable(tableName);
-        ColumnDef? col = table.Columns.FirstOrDefault(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
+        ColumnDef? col = table.FindColumn(columnName);
         if (col is null) return false;
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, table.Name);
 
@@ -3038,9 +3033,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // takes both). So neither does this: matching ACE is the rule, and a file where LibRed had removed
         // rows ACE keeps is a file that differs from the one Access would have produced. Those indexes are dropped
         // only once every refusal below has passed, so a refused drop writes nothing.
-        bool complex = _catalog.ComplexColumns.Any(c =>
-            string.Equals(c.OwnerTable.Name, tableName, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(c.ColumnName, columnName, StringComparison.OrdinalIgnoreCase));
+        bool complex = _catalog.FindComplexColumn(tableName, columnName) is not null;
         var droppedWithColumn = complex
             ? table.Indexes.Where(ix => ix.Columns.All(c => c.Column.ColumnId == col.ColumnId)).ToList()
             : [];
@@ -3062,7 +3055,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
             foreach (string index in droppedWithColumn.Select(ix => ix.Name))
                 DropIndex(tableName, index);
             table = _catalog.FindTable(tableName)!;
-            col = table.Columns.First(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
+            col = table.RequireColumn(columnName);
         }
 
         // A long-value column's maps, read from the TDEF before it loses them.
@@ -3089,7 +3082,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // and when this is the table's last append-only memo its table-level AppendOnly leaves in the same property
         // rewrite as the memo's own block — one rewrite, as ACE makes it.
         VersionHistory? history = VersionHistoryOf(tableName, columnName);
-        RemoveColumnProperties(table.DefinitionPage, columnName, history is { IsLast: true }); // ACE drops its properties
+        RemoveColumnProperties(table.DefinitionPage, col.Name, history is { IsLast: true }); // ACE drops its properties
         _catalog.Invalidate();
         if (history is { } h) DropVersionHistory(tableName, columnName, h);
         return true;
@@ -3112,12 +3105,12 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     private VersionHistory? VersionHistoryOf(string tableName, string memoName)
     {
         if (_catalog.ComplexColumns.FirstOrDefault(c =>
-                string.Equals(c.OwnerTable.Name, tableName, StringComparison.OrdinalIgnoreCase)
+                _catalog.Names.Equals(c.OwnerTable.Name, tableName)
                 && c.OwnerTable.FindColumn(c.ColumnName)?.IsVersionHistory == true) is not { } history)
             return null;
         var values = _catalog.RequireTable(history.ElementTypeName!).Columns
             .Where(c => !c.Name.StartsWith(VersionHistoryTimestampPrefix, StringComparison.Ordinal)).ToList();
-        if (!values.Any(c => string.Equals(c.Name, memoName, StringComparison.OrdinalIgnoreCase))) return null;
+        if (!values.Any(c => _catalog.Names.Equals(c.Name, memoName))) return null;
         return new VersionHistory(history.ColumnName, history.ComplexId, history.FlatTable.Name, history.ElementTypeName!,
             IsLast: values.Count == 1);
     }
@@ -3147,7 +3140,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         DeleteCatalogRows("MSysComplexColumns", "ComplexID", history.ComplexId);
         DropTable(history.Template, keepPermissions: true);
 
-        if (!_catalog.ComplexColumns.Any(c => string.Equals(c.OwnerTable.Name, tableName, StringComparison.OrdinalIgnoreCase))
+        if (!_catalog.ComplexColumns.Any(c => _catalog.Names.Equals(c.OwnerTable.Name, tableName))
             && _catalog.RequireTable(tableName).ObjectFlags is var flags && (flags & ObjectAttributes.OwnsComplexColumns) != 0)
             UpdateCatalogRows("MSysObjects", "Id", tdefPage, required: true,
                 ("Flags", unchecked((int)(flags & ~ObjectAttributes.OwnsComplexColumns))));
@@ -3186,7 +3179,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         // down). Flagging the slot alone also left the index entries standing, pointing at a dead row.
         var table = new Table(_channel, msys, _catalog, databaseCollation: null);
         var rows = table.RowsWhere([nameIdx],
-            values => string.Equals(values[nameIdx] as string, name, StringComparison.OrdinalIgnoreCase)).ToList();
+            values => _catalog.Names.Equals(values[nameIdx] as string, name)).ToList();
         foreach ((RowId id, object?[] values) in rows)
         {
             foreach (IndexDef index in msys.RealIndexes)
@@ -3219,7 +3212,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
 
     /// <summary>The data-block ordinal of a table's own index over the FK's referenced columns (for a
     /// self-reference — normally the primary key).</summary>
-    private static int ReferencedOrdinalIn(TableDefinition table, RelationshipSpec fk) =>
+    private int ReferencedOrdinalIn(TableDefinition table, RelationshipSpec fk) =>
         FindParentKeyIndex(table.Indexes, fk.Columns.Select(c => c.ReferencedColumn).ToList(), table.Name)
             .RealIndexOrdinal;
 
@@ -3232,7 +3225,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// a relationship ACE would not have created — and one whose backing index could then be dropped, since
     /// the DROP INDEX guard was looking for a unique one.
     /// </remarks>
-    private static IndexDef FindParentKeyIndex(
+    private IndexDef FindParentKeyIndex(
         IReadOnlyList<IndexDef> candidates, IReadOnlyList<string> refColumns, string parentTable) =>
         candidates[ParentKeyPosition(
             [.. candidates.Select(ix => (ix.Columns.Select(c => c.Column.Name), ix.IsUnique || ix.IsPrimaryKey))],
@@ -3240,12 +3233,12 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
 
     /// <summary>Where among <paramref name="candidates"/> — each an index's columns and whether it is unique or
     /// primary — the parent-side key of <see cref="FindParentKeyIndex"/> is.</summary>
-    private static int ParentKeyPosition(
+    private int ParentKeyPosition(
         IReadOnlyList<(IEnumerable<string> Columns, bool IsKey)> candidates, IReadOnlyList<string> refColumns,
         string parentTable)
     {
         bool MatchesColumns((IEnumerable<string> Columns, bool IsKey) ix) =>
-            ix.Columns.SequenceEqual(refColumns, StringComparer.OrdinalIgnoreCase);
+            ix.Columns.SequenceEqual(refColumns, _catalog.Names);
 
         for (int i = 0; i < candidates.Count; i++)
             if (MatchesColumns(candidates[i]) && candidates[i].IsKey) return i;

@@ -33,7 +33,7 @@ public sealed class JetDatabase : IDisposable
 
         // Find MSysObjects via the page-0 bootstrap pointer: its page is also its own MSysObjects Id, but that row
         // can only be read once the table has been found.
-        Catalog = new JetCatalog(channel, DefinitionPage.CatalogRootPage);
+        Catalog = new JetCatalog(channel, DefinitionPage);
     }
 
     /// <summary>The decoded database definition page (page 0) — re-read whenever the format version has moved
@@ -80,7 +80,7 @@ public sealed class JetDatabase : IDisposable
     /// <summary>Reads and decodes the table definition (TDEF) page at <paramref name="pageNumber"/>.</summary>
     public TableDefinition ReadTableDefinition(int pageNumber)
     {
-        var tdef = new TableDefinition();
+        var tdef = new TableDefinition { Names = Catalog.Names };
         tdef.Read(_channel, pageNumber);
         return tdef;
     }

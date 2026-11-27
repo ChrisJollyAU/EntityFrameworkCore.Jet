@@ -59,11 +59,27 @@
   > `InvalidDataException`.
 
   > **A name is unique within its container, and only there.** That is the rule the unique `(ParentId, Name)`
-  > index states, and the one ACE applies (verified, case-insensitively): a new table (`CREATE TABLE`,
+  > index states, and the one ACE applies (verified): a new table (`CREATE TABLE`,
   > `SELECT … INTO`, a rename) or query (`CREATE VIEW` / `CREATE PROCEDURE`) is refused when a table, query or
   > linked table already has its name — *"Table 'X' already exists."* and *"Object 'X' already exists."*
   > respectively — and may take the name of a relationship, form, report, macro, module, database document or
   > container. A relationship's name collides only with another relationship's (§ *Relationships* below).
+  >
+  > **Two names are the same name when the database's collation keys them equal** — the index's own rule, which
+  > ACE also applies to finding a table by name and to finding a column by name (verified in a General-Legacy
+  > database; *unverified* in the other collations).
+  > So case, width, kana type and the collation's expansions do not tell names apart (`a`/`ａ`, `ア`/`ｱ`,
+  > `あ`/`ア`, `ss`/`ß`, `ae`/`æ`, `2`/`²`, `å`/`Å` U+212B), nor do trailing spaces or characters of no weight
+  > (`pre`/`preț`, `oraș`/`oraț`, `cd`/`c㐀d`, two names differing only in an emoji); letters the collation weighs
+  > apart are different names even where a simple case fold pairs them (`µ`/`Μ`, `ƀ`/`Ƀ`), as is a soft hyphen.
+  >
+  > **Creating a column does not follow it.** `ALTER TABLE … ADD COLUMN` accepts a column whose name the collation
+  > keys equal to one the table already has, except where the two are also equal ignoring case, width and kana
+  > type (verified for the cases above; the exact predicate is *unverified*); `CREATE TABLE` accepts two such
+  > columns too (verified for names differing only by characters of no weight or by trailing spaces). The table then holds two columns
+  > every reference resolves to the first of: `UPDATE … SET [preț] = 2` writes `[pre]`, and `[preț]` itself is
+  > reachable only by position, as `SELECT *` shows. LibRed refuses such a column on create, and refuses a
+  > reference that matches two columns of one table, rather than read or write the wrong one.
 
   **Writing a table object** (verified against Access-written rows). A complete user-table row sets:
   `Id` = TDEF page; `ParentId` = `0x0F000001` (the database's "Tables" container, constant);

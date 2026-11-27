@@ -2,6 +2,7 @@ using LibRed.Formats;
 using LibRed.IO;
 using LibRed.Pages;
 using LibRed.Storage;
+using System.Collections.Concurrent;
 using System.Globalization;
 
 namespace LibRed.Catalog;
@@ -337,20 +338,37 @@ public sealed class JetCatalog
     // MSysObjects TDEF page — the catalog root, from the page-0 bootstrap pointer.
     private readonly int _catalogPage;
 
-    private static int CatalogRoot(PageChannel channel)
-    {
-        var page0 = new DatabaseDefinitionPage();
-        page0.Read(channel.ReadPage(0), channel.Format);
-        return page0.CatalogRootPage;
-    }
-
     private readonly PageChannel _channel;
 
-    internal JetCatalog(PageChannel channel, int? catalogPage = null)
+    /// <param name="channel">The database's pages.</param>
+    /// <param name="page0">Its decoded page 0, when the caller already has it; read from <paramref name="channel"/>
+    /// otherwise.</param>
+    internal JetCatalog(PageChannel channel, DatabaseDefinitionPage? page0 = null)
     {
-        _catalogPage = catalogPage ?? CatalogRoot(channel);
+        if (page0 is null)
+        {
+            page0 = new DatabaseDefinitionPage();
+            page0.Read(channel.ReadPage(0), channel.Format);
+        }
+        _catalogPage = page0.CatalogRootPage;
         _channel = channel;
+        Names = NamesIn(page0.Collation);
+        _tableDefinitions = new(Names);
+        _relationships = new(Names);
     }
+
+    /// <summary>How ACE tells two object names apart: as text in the database's collation, so a name matches one
+    /// that differs from it only in case, width, kana type, a ligature (<c>ss</c> and <c>ß</c>), a character the
+    /// collation gives no weight or trailing spaces, and not one the collation tells apart, such as <c>µ</c> and
+    /// <c>Μ</c>. Measured for table names on lookup and create, and for column names on lookup; a new column is
+    /// refused on the same terms, which is stricter than ACE (docs/format/system-catalog.md).</summary>
+    public IEqualityComparer<string> Names { get; }
+
+    /// <summary>The <see cref="Names"/> of a database in <paramref name="collation"/>.</summary>
+    /// <remarks>A collation LibRed cannot key yet still names its objects: comparing them case-insensitively keeps
+    /// such a file readable, where its comparer would refuse the first lookup.</remarks>
+    internal static IEqualityComparer<string> NamesIn(Collation collation) =>
+        collation.IsIndexKeyEncodable ? JetTextComparer.ForNames(collation) : StringComparer.OrdinalIgnoreCase;
 
     /// <summary>MSysObjects' own definition, read from the TDEF page page 0's catalog root names — what every
     /// catalog lookup reads it by.</summary>
@@ -371,7 +389,7 @@ public sealed class JetCatalog
 
     /// <summary>A bounded DDL cache. Live table-state snapshots are held weakly, separately from the schema;
     /// row writes refresh those snapshots on demand without discarding the decoded DDL.</summary>
-    private readonly Dictionary<string, DecodedTable> _tableDefinitions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DecodedTable> _tableDefinitions;
     private long _definitionGeneration;
     private WeakReference<IReadOnlyList<TableDefinition>>? _tables;
     private string[]? _tableNames;
@@ -482,7 +500,7 @@ public sealed class JetCatalog
     {
         get
         {
-            Dictionary<string, StoredQuery> queries = [with(StringComparer.OrdinalIgnoreCase)];
+            Dictionary<string, StoredQuery> queries = [with(Names)];
             TableDefinition mo = MSysObjects;
             var columns = mo.Columns.ToDictionary(c => c.Name, c => c.Index, StringComparer.OrdinalIgnoreCase);
             var names = new Dictionary<int, string>();
@@ -533,8 +551,7 @@ public sealed class JetCatalog
     /// column is not a complex one.</summary>
     public ComplexColumn? FindComplexColumn(string table, string column) =>
         ComplexColumns.FirstOrDefault(c =>
-            string.Equals(c.OwnerTable.Name, table, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(c.ColumnName, column, StringComparison.OrdinalIgnoreCase));
+            Names.Equals(c.OwnerTable.Name, table) && Names.Equals(c.ColumnName, column));
 
     /// <summary>
     /// Reads <c>MSysComplexColumns</c> — every row, or only those of the table whose definition page is
@@ -562,7 +579,9 @@ public sealed class JetCatalog
         {
             if (row[name] is not string columnName) continue;
             if (Resolve(row[owner]) is not { } ownerTable || Resolve(row[flat]) is not { } flatTable) continue;
-            if (ownerTable.FindColumn(columnName) is null) continue;
+            // The row holds the column's name as its table stores it (every complex column of every fixture file),
+            // so it is matched exactly: a name looked up as typed could match a twin as well.
+            if (!ownerTable.Columns.Any(c => string.Equals(c.Name, columnName, StringComparison.Ordinal))) continue;
 
             // Structural, never by name: the primary index names the per-value id, and the one non-unique
             // single-column index names the link back to the owning record.
@@ -625,8 +644,8 @@ public sealed class JetCatalog
     }
 
     /// <summary>A relationship's block on its child table.</summary>
-    private static LogicalIndexDef? OutgoingBlock(IEnumerable<LogicalIndexDef>? blocks, string relationship) =>
-        blocks?.FirstOrDefault(l => l.Block.IsOutgoing(relationship));
+    private LogicalIndexDef? OutgoingBlock(IEnumerable<LogicalIndexDef>? blocks, string relationship) =>
+        blocks?.FirstOrDefault(l => l.Block.IsOutgoing(relationship, Names));
 
     /// <summary>The relationships called <paramref name="name"/> — one, unless the catalog is damaged.</summary>
     public IEnumerable<ForeignKey> RelationshipsNamed(string name) => LoadRelationships("szRelationship", name);
@@ -907,7 +926,7 @@ public sealed class JetCatalog
         return null;
 
         bool Matches(object?[] row) => row[parentIndex] is int p && p == container
-            && string.Equals(row[nameIndex] as string, name, StringComparison.OrdinalIgnoreCase);
+            && Names.Equals(row[nameIndex] as string, name);
     }
 
     /// <summary>A catalog table the caller cannot proceed without — <c>MSysObjects</c>, <c>MSysACEs</c> and
@@ -916,7 +935,8 @@ public sealed class JetCatalog
     public TableDefinition RequireTable(string name) =>
         FindTable(name) ?? throw new InvalidOperationException($"{name} catalog table was not found.");
 
-    private readonly Dictionary<string, RelationshipSet> _relationships = new(StringComparer.OrdinalIgnoreCase);
+    // Keyed by the column sought and the name sought in it, compared as names are (Names): µ and Μ are two tables.
+    private readonly Dictionary<string, RelationshipSet> _relationships;
 
     /// <summary>Catalog data-page identities, including the page set so additions cannot hide behind an
     /// unchanged old page. The same validation serves the object directory and relationship rows.</summary>
@@ -1013,7 +1033,7 @@ public sealed class JetCatalog
         int nameIdx = columns["szRelationship"], childTableIdx = columns["szObject"], childColumnIdx = columns["szColumn"],
             parentTableIdx = columns["szReferencedObject"], parentColumnIdx = columns["szReferencedColumn"],
             orderIdx = columns["icolumn"], flagsIdx = columns["grbit"];
-        var dependencies = new Dictionary<string, TableDefinition.DdlMetadata?>(StringComparer.OrdinalIgnoreCase);
+        var dependencies = new Dictionary<string, TableDefinition.DdlMetadata?>(Names);
 
         // One row per column; group by relationship name and order columns by icolumn.
         var groups = new Dictionary<string, (string Child, string Parent, RelationshipFlags Flags,
@@ -1025,7 +1045,7 @@ public sealed class JetCatalog
         // first relationship added later; a cached/live row count is never used to make this decision.
         IEnumerable<object?[]> rows = catalogRows.DataPages.Count == 0 ? [] : key is null ? relationships.Rows()
             : relationships.RowsWithKey([keyIdx], [key],
-                r => string.Equals(r[keyIdx] as string, key, StringComparison.OrdinalIgnoreCase)).Select(r => r.Values);
+                r => Names.Equals(r[keyIdx] as string, key)).Select(r => r.Values);
         foreach (object?[] row in rows)
         {
             // A null where a value belongs, as ACE reads it (measured, one row's column made NULL): a row naming no
@@ -1520,7 +1540,7 @@ public sealed class JetCatalog
     internal TableDefinition ReadTableDefinition(int definitionPage, string name, bool isSystem, out bool reused,
         TableDefinition.DdlMetadata? previous = null)
     {
-        var definition = new TableDefinition { Name = name, IsSystem = isSystem };
+        var definition = new TableDefinition { Name = name, IsSystem = isSystem, Names = Names };
         reused = definition.Read(_channel, definitionPage, previous);
         // The catalog reads these three by column name. A page that decodes as a table but lacks one of their
         // columns — page 0's catalog root, or an MSysObjects Id, pointing at another TDEF — is not that table.

@@ -49,7 +49,7 @@ public class ColumnPruningTests : TempDatabaseTest
     {
         QueryEngine e = Seeded();
         PlanNode plan = QueryPlanner.PlanStatement(new AntlrSqlParser().ParseStatement(
-            "SELECT Id, Label FROM T WHERE Grp = @g ORDER BY Id"));
+            "SELECT Id, Label FROM T WHERE Grp = @g ORDER BY Id"), e.Database);
         List<(int, string)> Execute(int group) => [.. new QueryExecutor(e.Database,
             new Dictionary<string, object?> { ["g"] = group }).ExecuteQuery(plan).Rows
             .Select(row => ((int)row[0]!, (string)row[1]!))];

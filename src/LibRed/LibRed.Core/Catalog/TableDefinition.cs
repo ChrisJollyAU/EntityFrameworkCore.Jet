@@ -79,13 +79,32 @@ public sealed class TableDefinition : Page
         }
     }
 
-    public ColumnDef? FindColumn(string name) =>
-        Columns.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+    /// <summary>How this table's column names compare: the catalog's <see cref="JetCatalog.Names"/>, once it is read
+    /// through a catalog.</summary>
+    public IEqualityComparer<string> Names { get; init; } = StringComparer.OrdinalIgnoreCase;
+
+    /// <summary>The column <paramref name="name"/> names, or null for none.</summary>
+    /// <remarks>ACE can hold two columns whose names its collation keys equal (a name and the same one with a
+    /// character of no weight added) and then resolves both names to the first, reading and writing the wrong column
+    /// for the second. A name that matches two columns is refused here instead.</remarks>
+    public ColumnDef? FindColumn(string name)
+    {
+        ColumnDef? found = null;
+        foreach (ColumnDef column in Columns)
+        {
+            if (!Names.Equals(column.Name, name)) continue;
+            if (found is not null)
+                throw new InvalidOperationException(
+                    $"'{name}' names more than one column of '{Name}': '{found.Name}' and '{column.Name}'.");
+            found = column;
+        }
+        return found;
+    }
 
     /// <summary>The real index the logical index <paramref name="name"/> names. Found through the logical indexes:
     /// a relationship that shares a named index's data block has no entry of its own in <see cref="Indexes"/>.</summary>
     public IndexDef? FindIndex(string name) =>
-        LogicalIndexes.FirstOrDefault(l => string.Equals(l.Name, name, StringComparison.OrdinalIgnoreCase)) is { } logical
+        LogicalIndexes.FirstOrDefault(l => Names.Equals(l.Name, name)) is { } logical
             ? Indexes.First(i => i.RealIndexOrdinal == logical.RealIndexOrdinal)
             : null;
 
@@ -772,9 +791,9 @@ public sealed class TableDefinition : Page
                 isPrimary ? IndexInfoType.Primary : IndexInfoType.Secondary, name);
 
         /// <summary>Whether this is relationship <paramref name="relationship"/>'s block on its child table: the
-        /// outgoing one carrying its name.</summary>
-        public bool IsOutgoing(string relationship) => FkTablePage != 0 && FkType != ForeignKeyType.Incoming
-            && string.Equals(Name, relationship, StringComparison.OrdinalIgnoreCase);
+        /// outgoing one carrying its name, matched as <paramref name="names"/> matches it.</summary>
+        public bool IsOutgoing(string relationship, IEqualityComparer<string> names) =>
+            FkTablePage != 0 && FkType != ForeignKeyType.Incoming && names.Equals(Name, relationship);
 
         /// <summary>Whether this is the incoming block (on the parent) that cross-links to the child block numbered
         /// <paramref name="childBlockNumber"/> in the table at <paramref name="childPage"/>.</summary>
@@ -808,7 +827,8 @@ public sealed class TableDefinition : Page
     {
         indexes ??= [];
         longValueColumns ??= [];
-        ValidateColumnSpecs(format, specs);
+        IEqualityComparer<string> names = JetCatalog.NamesIn(collation);
+        ValidateColumnSpecs(format, specs, names);
         // Jet/ACE caps a table at 32 indexes, counting those backing primary keys, unique constraints
         // and relationships (§3.5 index-data blocks, the 0x33 count). Reject rather than write a bad TDEF.
         if (indexes.Count > format.MaxIndexesPerTable)
@@ -817,7 +837,7 @@ public sealed class TableDefinition : Page
         var columns = ResolveColumns(format, specs, collation);
         IReadOnlyList<LogicalIndexSpec> logical = logicalIndexes
             ?? indexes.Select((ix, i) => LogicalIndexSpec.Plain(i, i, ix.IsPrimaryKey, ix.Name)).ToList();
-        ValidateIndexAndLongValueSpecs(format, collation, columns, indexes, logical, longValueColumns);
+        ValidateIndexAndLongValueSpecs(format, names, columns, indexes, logical, longValueColumns);
 
         int definitionSize = DefinitionSize(format, columns, indexes, logical, longValueColumns);
         var page = new byte[Math.Max(format.PageSize, definitionSize)];
@@ -864,7 +884,7 @@ public sealed class TableDefinition : Page
         WriteColumnDescriptors(page, format, columns, columnBlock);
         int afterNames = WriteColumnNames(page, format, columns, columnBlock + columns.Count * format.ColumnDescriptorSize);
 
-        int definitionEnd = WriteIndexes(page, format, columns, indexes, logical, longValueColumns, afterNames);
+        int definitionEnd = WriteIndexes(page, format, names, columns, indexes, logical, longValueColumns, afterNames);
         if (definitionEnd != definitionSize)
             throw new InvalidOperationException(
                 $"TDEF sizing preflight calculated {definitionSize} bytes but serialization wrote {definitionEnd}.");
@@ -912,14 +932,15 @@ public sealed class TableDefinition : Page
                 + "than the column has in total.");
     }
 
-    private static void ValidateColumnSpecs(JetFormatBase format, IReadOnlyList<ColumnSpec> specs)
+    private static void ValidateColumnSpecs(JetFormatBase format, IReadOnlyList<ColumnSpec> specs,
+        IEqualityComparer<string> columnNames)
     {
         if (specs.Count > format.MaxColumnsPerTable)
             throw new NotSupportedException(
                 $"Table has {specs.Count} columns; a table can have at most {format.MaxColumnsPerTable}.");
 
         var ids = new HashSet<int>();
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var names = new HashSet<string>(columnNames);
         long fixedBytes = 0;
         int variableColumns = 0, highWater = -1;
         for (int i = 0; i < specs.Count; i++)
@@ -955,7 +976,7 @@ public sealed class TableDefinition : Page
 
     private static void ValidateIndexAndLongValueSpecs(
         JetFormatBase format,
-        Collation collation,
+        IEqualityComparer<string> names,
         IReadOnlyList<ColumnDef> columns,
         IReadOnlyList<IndexSpec> indexes,
         IReadOnlyList<LogicalIndexSpec> logical,
@@ -965,7 +986,7 @@ public sealed class TableDefinition : Page
             throw new NotSupportedException(
                 $"Table has {logical.Count} logical indexes; a table can have at most {format.MaxIndexesPerTable}.");
 
-        var columnByName = columns.ToDictionary(c => c.Name, StringComparer.OrdinalIgnoreCase);
+        var columnByName = columns.ToDictionary(c => c.Name, names);
         foreach (IndexSpec index in indexes)
         {
             ValidateNameLength(index.Name, "Index", format);
@@ -983,7 +1004,7 @@ public sealed class TableDefinition : Page
         // Duplicate index names, on the create path. ACE rejects them, and every downstream lookup resolves an
         // index by name, so two blocks sharing one would make DROP INDEX remove an arbitrary one of them. The
         // column list has had this check all along (see below); the index list had only a length check.
-        var indexNames = new HashSet<string>(JetTextComparer.For(collation));
+        var indexNames = new HashSet<string>(names);
         foreach (LogicalIndexSpec index in logical)
         {
             ValidateNameLength(index.Name, "Logical index", format);
@@ -1049,9 +1070,9 @@ public sealed class TableDefinition : Page
     }
 
     /// <summary>Writes the index structures and returns the offset just past them (the definition end).</summary>
-    private static int WriteIndexes(byte[] page, JetFormatBase format, List<ColumnDef> columns, IReadOnlyList<IndexSpec> indexes, IReadOnlyList<LogicalIndexSpec> logical, IReadOnlyList<LongValueColumnSpec> longValueColumns, int dataBlockStart)
+    private static int WriteIndexes(byte[] page, JetFormatBase format, IEqualityComparer<string> names, List<ColumnDef> columns, IReadOnlyList<IndexSpec> indexes, IReadOnlyList<LogicalIndexSpec> logical, IReadOnlyList<LongValueColumnSpec> longValueColumns, int dataBlockStart)
     {
-        var columnIdByName = columns.ToDictionary(c => c.Name, c => c.ColumnId, StringComparer.OrdinalIgnoreCase);
+        var columnIdByName = columns.ToDictionary(c => c.Name, c => c.ColumnId, names);
 
         // 1. Index-data blocks: columns, root page, unique flag.
         for (int i = 0; i < indexes.Count; i++)

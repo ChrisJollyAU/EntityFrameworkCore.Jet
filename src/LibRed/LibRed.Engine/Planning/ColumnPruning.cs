@@ -33,13 +33,16 @@ internal static class ColumnPruning
     // pay for that walk once; weak keys keep this derived shape alive only while its plan is in use.
     private static readonly ConditionalWeakTable<PlanNode, PlanNode> Pruned = new();
 
-    public static PlanNode Apply(PlanNode plan)
+    /// <summary><paramref name="plan"/> with each table read told which columns it may skip. A column is read when a
+    /// reference names it by <paramref name="columnNames"/>, the database's
+    /// <see cref="LibRed.Catalog.JetCatalog.Names"/>.</summary>
+    public static PlanNode Apply(PlanNode plan, IEqualityComparer<string> columnNames)
     {
         if (!HasHiddenRead(plan, visible: true))
             return plan;
-        return Pruned.GetValue(plan, static input =>
+        return Pruned.GetValue(plan, input =>
         {
-            HashSet<string>? names = ReferencedNames(input);
+            HashSet<string>? names = ReferencedNames(input, columnNames);
             return names is null ? input : Rewrite(input, visible: true, names);
         });
     }
@@ -123,10 +126,10 @@ internal static class ColumnPruning
         projection.Any(item => item.Value is StarExpression or QualifiedStarExpression);
 
     /// <summary>Every column name any reference in <paramref name="root"/> uses, or null when the walk met a value
-    /// it cannot see into — then nothing is pruned.</summary>
-    internal static HashSet<string>? ReferencedNames(object root)
+    /// it cannot see into — then nothing is pruned. The set compares names by <paramref name="columnNames"/>.</summary>
+    internal static HashSet<string>? ReferencedNames(object root, IEqualityComparer<string> columnNames)
     {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var names = new HashSet<string>(columnNames);
         return Walk(root, node =>
         {
             if (node is not ColumnReference reference) return true;

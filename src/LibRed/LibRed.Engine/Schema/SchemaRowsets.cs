@@ -377,8 +377,7 @@ public static class SchemaRowsets
             foreach (IndexDef ix in t.Indexes.Where(ix => ix.IsUnique && !ix.IsPrimaryKey))
                 yield return (t, ix.Name, "UNIQUE", ix, null);
 
-            foreach (ForeignKey fk in catalog.Relationships.Where(fk =>
-                fk.Table.Equals(t.Name, StringComparison.OrdinalIgnoreCase)))
+            foreach (ForeignKey fk in catalog.Relationships.Where(fk => catalog.Names.Equals(fk.Table, t.Name)))
                 yield return (t, fk.Name, "FOREIGN KEY", BackingIndex(fk, t), fk);
         }
     }
@@ -386,7 +385,7 @@ public static class SchemaRowsets
     /// <summary>The index on the child table that stores a relationship's key columns.</summary>
     private static IndexDef? BackingIndex(ForeignKey fk, TableDefinition child)
     {
-        var columns = fk.Columns.Select(c => c.Column).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var columns = fk.Columns.Select(c => c.Column).ToHashSet(child.Names);
         return child.Indexes.FirstOrDefault(ix =>
             ix.Columns.Count == columns.Count && ix.Columns.All(c => columns.Contains(c.Column.Name)));
     }
@@ -398,7 +397,7 @@ public static class SchemaRowsets
         TableDefinition? parent = catalog.FindTable(fk.ReferencedTable);
         if (parent is null) return null;
 
-        var columns = fk.Columns.Select(c => c.ReferencedColumn).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var columns = fk.Columns.Select(c => c.ReferencedColumn).ToHashSet(parent.Names);
         bool Covers(IndexDef ix) => ix.Columns.Count == columns.Count && ix.Columns.All(c => columns.Contains(c.Column.Name));
         return (parent.Indexes.FirstOrDefault(ix => ix.IsPrimaryKey && Covers(ix))
             ?? parent.Indexes.FirstOrDefault(ix => ix.IsUnique && Covers(ix)))?.Name;

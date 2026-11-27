@@ -77,9 +77,10 @@ public class CatalogTests
 
     // One column's name damaged into another's: c4 made c3. ACE reads the table and resolves the name to the first
     // column that has it — SELECT c3 reads c3's value — and CREATE INDEX succeeds over that name and over another
-    // column (measured on this shape).
+    // column (measured on this shape). A DELIBERATE divergence: LibRed reads the table too, and indexes another
+    // column, but refuses the shared name, since the second column can then only be read and written as the first.
     [Fact]
-    public void A_name_two_columns_share_resolves_to_the_first_of_them()
+    public void A_name_two_columns_share_is_refused()
     {
         string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "catalog-dupname-");
         try
@@ -103,8 +104,9 @@ public class CatalogTests
             using var damaged = JetDatabase.Open(path, readOnly: false);
             Assert.Equal(["c0", "c1", "c2", "c3", "c3", "c5"], damaged.Catalog.FindTable("Wide")!.Columns.Select(c => c.Name));
             damaged.CreateIndex("Wide", "I0", [("c0", false)]);
-            damaged.CreateIndex("Wide", "I3", [("c3", false)]);
-            Assert.Equal(3, damaged.Catalog.FindTable("Wide")!.FindIndex("I3")!.Columns.Single().Column.ColumnId);
+            Assert.Equal(0, damaged.Catalog.FindTable("Wide")!.FindIndex("I0")!.Columns.Single().Column.ColumnId);
+            Assert.Throws<InvalidOperationException>(() => damaged.CreateIndex("Wide", "I3", [("c3", false)]));
+            Assert.Null(damaged.Catalog.FindTable("Wide")!.FindIndex("I3"));
         }
         finally { TemporaryDatabase.Delete(path); }
     }

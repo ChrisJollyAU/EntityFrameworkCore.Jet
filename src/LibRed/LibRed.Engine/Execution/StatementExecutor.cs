@@ -24,8 +24,8 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     // What the constraint checks look up, resolved once per statement rather than once per row: CHECK expressions
     // parsed, each table's enforced relationships from either end, and each relationship's identity.
     private readonly Dictionary<string, (Expression Parsed, ExpressionEvaluator.Stored Kind)> _checkExpressions = [];
-    private readonly Dictionary<string, ForeignKey[]> _foreignKeysOf = new([], StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, ForeignKey[]> _referencesTo = new([], StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ForeignKey[]> _foreignKeysOf = new([], database.Catalog.Names);
+    private readonly Dictionary<string, ForeignKey[]> _referencesTo = new([], database.Catalog.Names);
     private readonly Dictionary<ForeignKey, RelationshipIdentity?> _identities = [];
     private readonly Dictionary<ForeignKey, RelationshipEnds> _ends = [];
 
@@ -117,15 +117,16 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             throw CheckConstraint.Refusal();
         }
 
+        IEqualityComparer<string> names = _database.Catalog.Names;
         List<(string Name, IReadOnlyList<string> Columns, HashSet<string> Read)> tables =
-            [(table, ownColumns, new HashSet<string>(StringComparer.OrdinalIgnoreCase))];
+            [(table, ownColumns, new HashSet<string>(names))];
 
         int TableOf(string name)
         {
-            int at = tables.FindIndex(t => string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase));
+            int at = tables.FindIndex(t => names.Equals(t.Name, name));
             if (at >= 0) return at;
             TableDefinition definition = _database.Catalog.FindTable(name) ?? throw CheckConstraint.Refusal();
-            HashSet<string> read = [with(StringComparer.OrdinalIgnoreCase)];
+            HashSet<string> read = [with(names)];
             tables.Add((definition.Name, [.. definition.Columns.Select(c => c.Name)], read));
             return tables.Count - 1;
         }
@@ -241,7 +242,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         // Whether it is a Currency is decided as the insert that applies it decides it (InsertNewRow).
         if (value is not null)
             _ = SchemaEditor.ConvertValue(LibRed.Storage.Types.JetTypeCodec.NumberFromText(checkAs, value), checkAs, column,
-                currency: ExpressionEvaluator.IsCurrency(expression, []));
+                currency: ExpressionEvaluator.IsCurrency(expression, [], _database.Catalog.Names));
     }
 
     /// <summary>Rejects an insert that leaves a NOT NULL (Required) column null after defaults are applied —
@@ -363,14 +364,14 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             // required self-ref, e.g. Inverse1Id = Id) satisfies the FK even though it isn't on disk yet — the
             // parent scan runs before the insert. Access allows this (EF's ComplexNavigations seed relies on it).
             if (!partialNull
-                && string.Equals(fk.ReferencedTable, childTable, StringComparison.OrdinalIgnoreCase)
+                && _database.Catalog.Names.Equals(fk.ReferencedTable, childTable)
                 && KeyEquals(values, ends.ParentColumns, target))
                 continue;
 
             if (partialNull || !ParentRowExists(ends, target))
             {
                 // ACE refuses the row at the relationship's index, the keys it gave the indexes ahead of it counted.
-                if (!update && table.Definition.Indexes.FirstOrDefault(i => i.Name.Equals(fk.Name, StringComparison.OrdinalIgnoreCase))
+                if (!update && table.Definition.Indexes.FirstOrDefault(i => table.Definition.Names.Equals(i.Name, fk.Name))
                     is { } refusing)
                     table.CountKeysBeforeRefusal(refusing, values);
                 throw new InvalidOperationException(
@@ -478,22 +479,23 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             childColumns[i] = childColumn.ColumnId;
             parentColumns[i] = parentColumn.ColumnId;
         }
-        return new RelationshipIdentity(fk.Name, child.DefinitionPage, parent.DefinitionPage, childColumns, parentColumns);
+        return new RelationshipIdentity(fk.Name, child.DefinitionPage, parent.DefinitionPage, childColumns, parentColumns,
+            _database.Catalog.Names);
     }
 
     /// <summary>A relationship's name, and what it joins as <see cref="Identify"/> finds it: equal only for the same
-    /// relationship, so one dropped and added again under its name over other columns is another.</summary>
+    /// relationship, so one dropped and added again under its name over other columns is another. Names compare, and
+    /// hash, by <paramref name="Names"/>, the catalog's <see cref="JetCatalog.Names"/>.</summary>
     private sealed record RelationshipIdentity(
-        string Name, int ChildTable, int ParentTable, int[] ChildColumns, int[] ParentColumns)
+        string Name, int ChildTable, int ParentTable, int[] ChildColumns, int[] ParentColumns, IEqualityComparer<string> Names)
     {
         public bool Equals(RelationshipIdentity? other) => other is not null
-            && string.Equals(Name, other.Name, StringComparison.OrdinalIgnoreCase)
+            && Names.Equals(Name, other.Name)
             && ChildTable == other.ChildTable && ParentTable == other.ParentTable
             && ChildColumns.AsSpan().SequenceEqual(other.ChildColumns)
             && ParentColumns.AsSpan().SequenceEqual(other.ParentColumns);
 
-        public override int GetHashCode() =>
-            HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(Name), ChildTable, ParentTable);
+        public override int GetHashCode() => HashCode.Combine(Names.GetHashCode(Name), ChildTable, ParentTable);
     }
 
     /// <summary>A parent a transaction's write relied on: the relationship, and the key it was checked for. Equal
@@ -1066,7 +1068,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         _database.AddForeignKey(table, relationship);
 
         ForeignKey added = _database.Catalog.Relationships.Single(
-            r => string.Equals(r.Name, relationship.Name, StringComparison.OrdinalIgnoreCase));
+            r => _database.Catalog.Names.Equals(r.Name, relationship.Name));
         RelationshipIdentity identity = Identify(added)!;
         bool Holds() => CurrentRelationship(identity) is not { } current || _database.ExistingRowsHaveParents(current);
 
@@ -1158,7 +1160,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         // Both of these before a row is read (verified vs ACE): the same table as source and destination is reported
         // first, and a read-only database is refused straight after it. A table of that name in another file is
         // another table: ACE reports it as the name being taken.
-        if (TablesIn(statement.From).Any(t => string.Equals(t.Name, target, StringComparison.OrdinalIgnoreCase)
+        if (TablesIn(statement.From).Any(t => into.Catalog.Names.Equals(t.Name, target)
                 && ExternalDatabases.Open(_database, t.Database) == into))
             throw new InvalidOperationException(
                 $"Same table '{target}' referenced as both the source and destination in make-table query.");
@@ -1260,7 +1262,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     /// </remarks>
     private Dictionary<string, ColumnDef> SourceColumnsFor(SelectStatement statement)
     {
-        var available = new Dictionary<string, ColumnDef>(StringComparer.OrdinalIgnoreCase);
+        var available = new Dictionary<string, ColumnDef>(_database.Catalog.Names);
         foreach (NamedTable table in TablesIn(statement.From))
             if (ExternalDatabases.Open(_database, table.Database).Catalog.FindTable(table.Name) is { } def)
                 foreach (ColumnDef column in def.Columns)
@@ -1268,7 +1270,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
 
         if (statement.IsSelectStar) return available;
 
-        var byOutputName = new Dictionary<string, ColumnDef>(StringComparer.OrdinalIgnoreCase);
+        var byOutputName = new Dictionary<string, ColumnDef>(_database.Catalog.Names);
         foreach (SelectItem item in statement.Projection)
             if (item.Value is ColumnReference reference &&
                 available.TryGetValue(reference.Column, out ColumnDef? column))
@@ -1370,7 +1372,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
 #pragma warning disable CA1031 // a supplied column's default only sizes the record's slack: one that cannot be evaluated adds none rather than failing a row that never takes it
                 catch (Exception) { value = null; }
 #pragma warning restore CA1031
-            value = LibRed.Storage.Types.JetTypeCodec.CurrencyAsStored(column.Type, value, ExpressionEvaluator.IsCurrency(expression, []));
+            value = LibRed.Storage.Types.JetTypeCodec.CurrencyAsStored(column.Type, value, ExpressionEvaluator.IsCurrency(expression, [], _database.Catalog.Names));
             if (column.Type == JetDataType.Text && value is not null && JetStoreType.MaxLength(column) is int width
                 && (string)LibRed.Storage.Types.JetTypeCodec.ToStoredValue(column, column.Type, value) is var text
                 && text.Length > width)
@@ -1418,8 +1420,10 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
                 ? []
                 : definition.Columns.Select(c => c.Name).ToList();
         // Each target column, looked up once for the values and the write alike; null for a name the table lacks,
-        // which the write refuses (AppendRows).
-        ColumnDef?[] targetColumns = [.. targets.Select(definition.FindColumn)];
+        // which the write refuses (AppendRows). A bare VALUES names no column, so takes them by position.
+        ColumnDef?[] targetColumns = statement.Columns.Count > 0 || statement.DefaultValues
+            ? [.. targets.Select(definition.FindColumn)]
+            : [.. definition.Columns];
 
         var evaluator = new ExpressionEvaluator(
             new EvalScope([], [], null), _scalarRunner, parameters: _parameters);
@@ -1468,7 +1472,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
                 .Select((e, i) => e is DefaultValueExpression ? DefaultRowValue
                     : i < targetColumns.Length && targetColumns[i] is { } column
                         ? LibRed.Storage.Types.JetTypeCodec.CurrencyAsStored(
-                            column.Type, evaluator.Evaluate(e), ExpressionEvaluator.IsCurrency(e, []))
+                            column.Type, evaluator.Evaluate(e), ExpressionEvaluator.IsCurrency(e, [], _database.Catalog.Names))
                         : evaluator.Evaluate(e))
                 .ToArray());
 
@@ -1660,7 +1664,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             var outerColumns = tables.SelectMany(t => t.Columns).ToList();
             Plan.PlanNode plan = Planning.ColumnPruning.Apply(Planning.IndexSelection.Apply(
                 Planning.QueryPlanner.PlanStatement(sq.Query, _database), _database,
-                tables.Select(t => t.Alias).ToHashSet(StringComparer.OrdinalIgnoreCase)));
+                tables.Select(t => t.Alias).ToHashSet(_database.Catalog.Names)), _database.Catalog.Names);
 
             // The rows vary per outer row but the schema does not, and JoinRows needs it before reading any row.
             // Probe once against an all-null outer row and drop the rows unread, as QueryExecutor.ExecuteApply does.
@@ -1755,7 +1759,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             int innerEnd = innerUnits < units.Count ? units[innerUnits] : end;
             bool left = j.Kind == JoinKind.Left;
             HashSet<string> readable = tables.Take(left ? first + tables[first].ComboWidth : innerEnd)
-                .Select(t => t.Alias).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                .Select(t => t.Alias).ToHashSet(_database.Catalog.Names);
             bool onFits = j.On is null || Planning.IndexSelection.ReferencesOnly(j.On, readable);
 
             if (!left && onFits)
@@ -1827,7 +1831,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             for (int t = 0; t < inner.Count; t++)
             {
                 if (item.Value is StarExpression
-                    || item.Value is QualifiedStarExpression star && string.Equals(star.Table, inner[t].Alias, StringComparison.OrdinalIgnoreCase))
+                    || item.Value is QualifiedStarExpression star && _database.Catalog.Names.Equals(star.Table, inner[t].Alias))
                 {
                     for (int c = 0; c < inner[t].Columns.Count; c++) names[t][c] ??= inner[t].Columns[c].Name;
                 }
@@ -1885,13 +1889,13 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
 
     /// <summary>The table and position of every source column named <paramref name="column"/>: among the tables
     /// <paramref name="qualifier"/> names — by alias, or failing that by table name — or among all of them.</summary>
-    private static List<(int Table, int Position)> FindColumns(List<SourceTable> tables, string? qualifier, string column)
+    private List<(int Table, int Position)> FindColumns(List<SourceTable> tables, string? qualifier, string column)
     {
         IEnumerable<int> candidates = qualifier is null ? Enumerable.Range(0, tables.Count) : NamedTables(tables, qualifier);
         var found = new List<(int, int)>();
         foreach (int t in candidates)
             for (int c = 0; c < tables[t].Columns.Count; c++)
-                if (string.Equals(tables[t].Columns[c].Name, column, StringComparison.OrdinalIgnoreCase))
+                if (_database.Catalog.Names.Equals(tables[t].Columns[c].Name, column))
                     found.Add((t, c));
         return found;
     }
@@ -1938,8 +1942,8 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         // table's scan. A derived table's body is its own query, placed when it was resolved.
         // And the kind of join each table is the right side of as the SELECT plans it: a LEFT join whose WHERE compares
         // a column of its optional table is planned as an inner join (QueryPlanner.Place).
-        var placed = new Dictionary<string, Expression>(StringComparer.OrdinalIgnoreCase);
-        var plannedKinds = new Dictionary<string, JoinKind>(StringComparer.OrdinalIgnoreCase);
+        var placed = new Dictionary<string, Expression>(_database.Catalog.Names);
+        var plannedKinds = new Dictionary<string, JoinKind>(_database.Catalog.Names);
         void Place(Plan.PlanNode node)
         {
             if (node is Plan.FilterNode { Input: Plan.ScanNode scan } filter)
@@ -1980,7 +1984,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             // has no index to seek, and a writable one's rows are already chosen.
             if (i > 0 && ons[i] is { } on && read is Plan.ScanNode or Plan.FilterNode { Input: Plan.ScanNode }
                 && IndexSelection.Lookup(on, scan, table.Definition,
-                    tables.Take(i).Select(t => t.Alias).ToHashSet(StringComparer.OrdinalIgnoreCase), _ => null) is { } seek)
+                    tables.Take(i).Select(t => t.Alias).ToHashSet(_database.Catalog.Names), _ => null, _database.Catalog.Names) is { } seek)
                 read = read is Plan.FilterNode filter ? filter with { Input = seek } : seek;
             reads[i] = read;
         }
@@ -2152,20 +2156,21 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     }
 
     /// <summary>The tables a qualifier names: by alias, or failing that by table name.</summary>
-    private static List<int> NamedTables(List<SourceTable> tables, string qualifier)
+    private List<int> NamedTables(List<SourceTable> tables, string qualifier)
     {
+        IEqualityComparer<string> names = _database.Catalog.Names;
         var byAlias = Enumerable.Range(0, tables.Count)
-            .Where(t => string.Equals(tables[t].Alias, qualifier, StringComparison.OrdinalIgnoreCase)).ToList();
+            .Where(t => names.Equals(tables[t].Alias, qualifier)).ToList();
         return byAlias.Count > 0
             ? byAlias
             : Enumerable.Range(0, tables.Count)
-                .Where(t => string.Equals(tables[t].Table?.Name, qualifier, StringComparison.OrdinalIgnoreCase)).ToList();
+                .Where(t => names.Equals(tables[t].Table?.Name, qualifier)).ToList();
     }
 
     /// <summary>The source table a DELETE removes rows from: the one its <c>target.*</c> names, or the only one (a
     /// join without a target is ambiguous). A writable derived table over a join is never one, as in ACE (verified:
     /// "Could not delete from specified tables").</summary>
-    private static int DeleteTarget(List<SourceTable> tables, string? qualifier)
+    private int DeleteTarget(List<SourceTable> tables, string? qualifier)
     {
         List<int> named = qualifier is null ? [.. Enumerable.Range(0, tables.Count)] : NamedTables(tables, qualifier);
         if (named.Any(t => tables[t].ComboWidth > 1 || tables[t].InCombo))
@@ -2199,7 +2204,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     /// </summary>
     private int ExecuteUpdate(UpdateStatement statement)
     {
-        _readNames = Planning.ColumnPruning.ReferencedNames(statement);
+        _readNames = Planning.ColumnPruning.ReferencedNames(statement, _database.Catalog.Names);
         try
         {
             return Update(statement);
@@ -2254,7 +2259,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         // A null-extended side's value array is the joined row's own, so it keys the new row it becomes.
         var newRows = new Dictionary<object?[], (Table Table, List<int> Provided)>(ReferenceEqualityComparer.Instance);
         bool[] currency = targets
-            .Select(t => ExpressionEvaluator.IsCurrency(t.Value, columns))
+            .Select(t => ExpressionEvaluator.IsCurrency(t.Value, columns, _database.Catalog.Names))
             .ToArray();
         foreach (var combo in joinRows)
         {
@@ -2323,7 +2328,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
     /// </summary>
     private int ExecuteDelete(DeleteStatement statement)
     {
-        _readNames = Planning.ColumnPruning.ReferencedNames(statement);
+        _readNames = Planning.ColumnPruning.ReferencedNames(statement, _database.Catalog.Names);
         try
         {
             return Delete(statement);
@@ -2354,7 +2359,7 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
         // too, and its values' flat rows stay where they are, owned by no row (verified through DAO and ACE's OLE DB
         // alike). No row is read but to be counted.
         bool wholeTable = statement.Where is null && statement.From is NamedTable
-            && ChildRelationshipsOf(target.Name).All(r => string.Equals(r.Table, target.Name, StringComparison.OrdinalIgnoreCase));
+            && ChildRelationshipsOf(target.Name).All(r => _database.Catalog.Names.Equals(r.Table, target.Name));
         if (wholeTable && target.Definition.CheckConstraints.Count == 0)
         {
             int rows = target.Rows(target.DecodeOnly([])).Count();

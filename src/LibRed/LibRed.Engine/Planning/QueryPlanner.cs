@@ -11,8 +11,9 @@ namespace LibRed.Engine.Planning;
 public static class QueryPlanner
 {
     /// <summary>Plans a bound statement. <paramref name="database"/> is the one it runs on, whose catalog binds an
-    /// unqualified column of a WHERE to the table of its FROM that has it (<see cref="PushPredicates"/>).</summary>
-    public static PlanNode Plan(BoundStatement bound, JetDatabase? database = null)
+    /// unqualified column of a WHERE to the table of its FROM that has it (<see cref="PushPredicates"/>), and whose
+    /// <see cref="LibRed.Catalog.JetCatalog.Names"/> tells the tables' aliases apart.</summary>
+    public static PlanNode Plan(BoundStatement bound, JetDatabase database)
     {
         return PlanStatement(bound.Statement, database);
     }
@@ -20,8 +21,9 @@ public static class QueryPlanner
     /// <summary>Plans a SELECT or a set operation over SELECTs. Public because an append query's source is
     /// either — <c>INSERT INTO t SELECT …</c>, or a UNION feeding one. <paramref name="database"/> is the one it
     /// runs on, whose catalog binds an unqualified column of a WHERE to the table of its FROM that has it
-    /// (<see cref="PushPredicates"/>).</summary>
-    public static PlanNode PlanStatement(SqlStatement statement, JetDatabase? database = null) => statement switch
+    /// (<see cref="PushPredicates"/>), and whose <see cref="LibRed.Catalog.JetCatalog.Names"/> tells the tables' aliases
+    /// apart.</summary>
+    public static PlanNode PlanStatement(SqlStatement statement, JetDatabase database) => statement switch
     {
         SelectStatement select => PlanSelect(select, database),
         // ORDER BY and paging on a set operation apply to its combined result, so they sit ABOVE the node —
@@ -61,7 +63,7 @@ public static class QueryPlanner
 
     /// <summary>Plans a SELECT statement directly (used for subqueries). <paramref name="database"/> is as for
     /// <see cref="PlanStatement"/>.</summary>
-    public static PlanNode PlanSelect(SelectStatement select, JetDatabase? database)
+    public static PlanNode PlanSelect(SelectStatement select, JetDatabase database)
     {
         // Shape: From (Scan/Join/Derived) → Filter → Sort → Project → Limit. ORDER BY is
         // applied over the source columns (before projection) so it can reference them.
@@ -124,7 +126,7 @@ public static class QueryPlanner
             // Kept above the joins rather than sunk into one side (PushSort): the cut needs each row's keys.
             node = new SortNode(node, select.OrderBy, Ties: ties);
         else if (select.OrderBy.Count > 0)
-            node = PushSort(node, select.OrderBy);
+            node = PushSort(node, select.OrderBy, database.Catalog.Names);
 
         // DISTINCTROW dedupes on the *pre-projection* rows of the contributing tables, so it goes below the
         // projection. It is meaningless with aggregation (grouping already collapses rows) and a no-op for
@@ -242,12 +244,12 @@ public static class QueryPlanner
     /// </remarks>
     // Not a SortNode as CA1859 reads it: pushing through a join returns the join.
 #pragma warning disable CA1859
-    private static PlanNode PushSort(PlanNode node, IReadOnlyList<OrderByItem> keys)
+    private static PlanNode PushSort(PlanNode node, IReadOnlyList<OrderByItem> keys, IEqualityComparer<string> names)
     {
         if (node is JoinNode { Kind: JoinKind.Inner or JoinKind.Left or JoinKind.Cross } j
-            && keys.All(k => Qualifiers(k.Value, j, null) is { Count: > 0 } q && q.IsSubsetOf(SubtreeAliases(j.Left))))
+            && keys.All(k => Qualifiers(k.Value, j, null, names) is { Count: > 0 } q && q.IsSubsetOf(SubtreeAliases(j.Left, names))))
         {
-            return j with { Left = PushSort(j.Left, keys) };
+            return j with { Left = PushSort(j.Left, keys, names) };
         }
 
         return new SortNode(node, keys);
@@ -328,7 +330,7 @@ public static class QueryPlanner
         return new ColumnReference(null, name);
     }
 
-    internal static PlanNode PlanFrom(TableReference? from, JetDatabase? database) => from switch
+    internal static PlanNode PlanFrom(TableReference? from, JetDatabase database) => from switch
     {
         null => new SingleRowNode(), // FROM-less SELECT (e.g. `SELECT 2`) — one row, no columns
         NamedTable t => new ScanNode(t.Name, t.Alias, t.Database),
@@ -346,8 +348,9 @@ public static class QueryPlanner
     /// placed as the table of <paramref name="joinTree"/> that <paramref name="database"/>'s catalog binds it to
     /// would be (<see cref="Qualifiers"/>).
     /// </summary>
-    internal static PlanNode PushPredicates(PlanNode joinTree, Expression where, JetDatabase? database)
+    internal static PlanNode PushPredicates(PlanNode joinTree, Expression where, JetDatabase database)
     {
+        IEqualityComparer<string> names = database.Catalog.Names;
         var conjuncts = new List<Expression>();
         SplitAnd(where, conjuncts);
         // The aliases this FROM clause introduces. Any other qualifier belongs to an enclosing query — this is
@@ -356,8 +359,8 @@ public static class QueryPlanner
         // a correlated subquery's predicate still landed as a Filter directly over its own scan, which index
         // selection recognises. Over a lateral join it lands above the join instead, and the difference is
         // seeking the inner table once per outer row versus rescanning all of it.
-        HashSet<string> introduced = SubtreeAliases(joinTree);
-        (PlanNode node, List<Expression> unplaced) = Place(joinTree, conjuncts, introduced, c => Qualifiers(c, joinTree, database), database);
+        HashSet<string> introduced = SubtreeAliases(joinTree, names);
+        (PlanNode node, List<Expression> unplaced) = Place(joinTree, conjuncts, introduced, c => Qualifiers(c, joinTree, database, names), database);
         return unplaced.Count == 0 ? node : new FilterNode(node, CombineAnd(unplaced));
     }
 
@@ -368,7 +371,7 @@ public static class QueryPlanner
     /// conjunct's tables (<see cref="Qualifiers"/>).</summary>
     private static (PlanNode Node, List<Expression> Unplaced) Place(
         PlanNode node, List<Expression> conjuncts, HashSet<string> introduced, Func<Expression, HashSet<string>?> qualifiers,
-        JetDatabase? database)
+        JetDatabase database)
     {
         // A tree planned already — a saved query's, given its caller's WHERE (IndexSelection) — holds the filters its
         // own WHERE was placed as. Each is taken apart and placed again with the new conjuncts, which lands them
@@ -380,7 +383,7 @@ public static class QueryPlanner
             return Place(filtered.Input, all, introduced, qualifiers, database);
         }
 
-        HashSet<string> aliases = SubtreeAliases(node);
+        HashSet<string> aliases = SubtreeAliases(node, database.Catalog.Names);
         var candidates = new List<Expression>();
         var outside = new List<Expression>();
         foreach (Expression c in conjuncts)
@@ -407,10 +410,10 @@ public static class QueryPlanner
         // BETWEEN — is an inner join: the comparison is Null on every null-padded row, so drops them all. ACE plans it
         // as one (verified vs ACE: t LEFT JOIN s … WHERE s.Y = 2 is read as the inner join is, the Y index answering).
         if (node is JoinNode { Kind: JoinKind.Left, Right: ScanNode optional } leftJoin
-            && database is not null
             && Execution.ExternalDatabases.Open(database, optional.Database).Catalog.FindTable(optional.Table) is { } def
-            && candidates.Any(c => qualifiers(c) is { } q && q.Where(introduced.Contains).All(SubtreeAliases(optional).Contains)
-                && IndexSelection.Restriction(c, optional.Alias ?? optional.Table, def, []) is not null))
+            && candidates.Any(c => qualifiers(c) is { } q
+                && q.Where(introduced.Contains).All(SubtreeAliases(optional, database.Catalog.Names).Contains)
+                && IndexSelection.Restriction(c, optional.Alias ?? optional.Table, def, [], database.Catalog.Names) is not null))
             return Place(leftJoin with { Kind = JoinKind.Inner }, conjuncts, introduced, qualifiers, database);
 
         if (node is JoinNode { Kind: JoinKind.CrossApply or JoinKind.OuterApply or JoinKind.Left } a)
@@ -425,37 +428,37 @@ public static class QueryPlanner
     }
 
     /// <summary>The table aliases (or names) exposed by a plan subtree — a scan's alias/name, or the union
-    /// over a join. A derived table exposes only its own alias (its inner columns are already projected).</summary>
-    // Aliases compare case-insensitively, and IDE0028's only fix for these arms is a collection expression,
-    // which would drop the comparer.
+    /// over a join. A derived table exposes only its own alias (its inner columns are already projected). The set
+    /// compares aliases by <paramref name="names"/>, the database's <see cref="LibRed.Catalog.JetCatalog.Names"/>.</summary>
+    // IDE0028's only fix for these arms is a collection expression, which would drop the comparer.
 #pragma warning disable IDE0028
-    internal static HashSet<string> SubtreeAliases(PlanNode node) => node switch
+    internal static HashSet<string> SubtreeAliases(PlanNode node, IEqualityComparer<string> names) => node switch
     {
-        ScanNode s => new(StringComparer.OrdinalIgnoreCase) { s.Alias ?? s.Table },
-        IndexSeekNode s => new(StringComparer.OrdinalIgnoreCase) { s.Alias ?? s.Table },
-        DerivedTableNode d => d.Alias is { } a ? new(StringComparer.OrdinalIgnoreCase) { a } : new(StringComparer.OrdinalIgnoreCase),
-        IndexRangeSeekNode s => new(StringComparer.OrdinalIgnoreCase) { s.Alias ?? s.Table },
-        JoinNode j => SubtreeAliases(j.Left).Union(SubtreeAliases(j.Right)).ToHashSet(StringComparer.OrdinalIgnoreCase),
-        HashJoinNode h => SubtreeAliases(h.Left).Union(SubtreeAliases(h.Right)).ToHashSet(StringComparer.OrdinalIgnoreCase),
-        FilterNode f => SubtreeAliases(f.Input),
+        ScanNode s => new(names) { s.Alias ?? s.Table },
+        IndexSeekNode s => new(names) { s.Alias ?? s.Table },
+        DerivedTableNode d => d.Alias is { } a ? new(names) { a } : new(names),
+        IndexRangeSeekNode s => new(names) { s.Alias ?? s.Table },
+        JoinNode j => SubtreeAliases(j.Left, names).Union(SubtreeAliases(j.Right, names), names).ToHashSet(names),
+        HashJoinNode h => SubtreeAliases(h.Left, names).Union(SubtreeAliases(h.Right, names), names).ToHashSet(names),
+        FilterNode f => SubtreeAliases(f.Input, names),
         // Pass-through nodes keep their input's aliases: they reshape or restrict rows without renaming a
         // source. A ProjectNode in particular sits at the root of every planned SELECT, so omitting it made
         // SubtreeAliases(PlanSelect(q)) report NO aliases at all — which silently defeated any caller asking
         // "which aliases does this query introduce?" (ExistsSemiJoin declined every subquery because of it).
         // A DerivedTableNode is deliberately NOT pass-through: above it only its own alias is visible.
-        ProjectNode p => SubtreeAliases(p.Input),
+        ProjectNode p => SubtreeAliases(p.Input, names),
         // A window appends a column without renaming a source, so it passes its input's aliases through — the
         // same reasoning as ProjectNode above, and the same bug if omitted.
-        WindowNode w => SubtreeAliases(w.Input),
-        SortNode s => SubtreeAliases(s.Input),
-        LimitNode l => SubtreeAliases(l.Input),
-        DistinctNode d => SubtreeAliases(d.Input),
-        DistinctRowNode d => SubtreeAliases(d.Input),
+        WindowNode w => SubtreeAliases(w.Input, names),
+        SortNode s => SubtreeAliases(s.Input, names),
+        LimitNode l => SubtreeAliases(l.Input, names),
+        DistinctNode d => SubtreeAliases(d.Input, names),
+        DistinctRowNode d => SubtreeAliases(d.Input, names),
         // Grouping collapses rows but doesn't rename their source: the group scope still exposes the input's
         // columns (which is what lets HAVING and the projection qualify them), so the aliases carry through.
-        AggregateNode a => SubtreeAliases(a.Input),
-        IndexScanNode s => new(StringComparer.OrdinalIgnoreCase) { s.Table },
-        _ => new(StringComparer.OrdinalIgnoreCase),
+        AggregateNode a => SubtreeAliases(a.Input, names),
+        IndexScanNode s => new(names) { s.Table },
+        _ => new(names),
     };
 #pragma warning restore IDE0028
 
@@ -463,10 +466,10 @@ public static class QueryPlanner
     /// the source of <paramref name="from"/> that <paramref name="database"/>'s catalog binds it to
     /// (<see cref="IndexSelection.ResolveColumn"/>); or <see langword="null"/> if it can't be safely placed — an
     /// unqualified column no one source has (or with no catalog), or a subquery (references an inner scope). Such a
-    /// conjunct stays at the top filter.</summary>
-    private static HashSet<string>? Qualifiers(Expression e, PlanNode from, JetDatabase? database)
+    /// conjunct stays at the top filter. The set compares qualifiers by <paramref name="names"/>.</summary>
+    private static HashSet<string>? Qualifiers(Expression e, PlanNode from, JetDatabase? database, IEqualityComparer<string> names)
     {
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new HashSet<string>(names);
         return Collect(e, result) ? result : null;
 
         bool Collect(Expression e, HashSet<string> acc) => e switch

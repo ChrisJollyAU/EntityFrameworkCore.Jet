@@ -109,7 +109,7 @@ internal sealed partial class ExpressionEvaluator(
     private object? Value(Expression expression) => expression switch
     {
         LiteralExpression l => l.Value,
-        ColumnReference c => scope.TryResolve(c, out object? v) ? v
+        ColumnReference c => scope.TryResolve(c, subqueries.Names, out object? v) ? v
             : IsNiladicFunction(c) ? Clock
             : throw new InvalidOperationException($"Column '{c.QualifiedName}' was not found."),
         ParameterExpression p => parameters is not null
@@ -147,7 +147,7 @@ internal sealed partial class ExpressionEvaluator(
         _soughtColumns ??= new Dictionary<SoughtValue, ColumnDef?>(ReferenceEqualityComparer.Instance);
 #pragma warning restore IDE0028
         if (!_soughtColumns.TryGetValue(s, out ColumnDef? column))
-            _soughtColumns[s] = column = OutputColumn.Find(scope.AllColumns(), s.Column) is { Source: { } source } ? source.Column : null;
+            _soughtColumns[s] = column = OutputColumn.Find(scope.AllColumns(), s.Column, subqueries.Names) is { Source: { } source } ? source.Column : null;
         if (value is null || column is null)
             return value;
         return TryGetSeekKey(column, s.Value, value, s.Bound, out object? key) switch
@@ -241,7 +241,7 @@ internal sealed partial class ExpressionEvaluator(
                 && val is not null && ComparedByTruth(val.GetType(), inq.Value is ColumnReference && IsCurrency(inq.Value))
                 && inq.Query is SelectStatement { IsSelectStar: false, Projection: [{ Value: ColumnReference }] }
                 && items.FirstOrDefault(item => item is not null) is bool
-                && !SubqueryHoisting.MayReferenceOuter(inq.Query, scope.VisibleAliases().ToHashSet(StringComparer.OrdinalIgnoreCase)))
+                && !SubqueryHoisting.MayReferenceOuter(inq.Query, scope.VisibleAliases().ToHashSet(subqueries.Names)))
                 val = IsTruthy(val);
             if (val is not null && membership && subqueries.LookupHoistedIn(inq.Query, val) is var (setFound, setNull))
             {
@@ -470,10 +470,12 @@ internal sealed partial class ExpressionEvaluator(
 
     /// <summary>Whether an expression is a Currency: a Currency column, CCur, or arithmetic that keeps one —
     /// <paramref name="expression"/> over <paramref name="columns"/> (<see cref="NumberTypeOf"/>), with
-    /// <paramref name="declaredType"/> where its caller knows declared types.</summary>
+    /// <paramref name="declaredType"/> where its caller knows declared types, and column names matched by
+    /// <paramref name="names"/>.</summary>
     internal static bool IsCurrency(
-        Expression expression, IReadOnlyList<OutputColumn> columns, Func<Expression, Type?>? declaredType = null) =>
-        NumberTypeOf(expression, columns, declaredType ?? (_ => null)).Class == NumberClass.Currency;
+        Expression expression, IReadOnlyList<OutputColumn> columns, IEqualityComparer<string> names,
+        Func<Expression, Type?>? declaredType = null) =>
+        NumberTypeOf(expression, columns, names, declaredType ?? (_ => null)).Class == NumberClass.Currency;
 
     /// <summary>The expression's <see cref="NumberClass"/>.</summary>
     /// <remarks>Decided by the expression and the scope's columns, never the row, so it is worked out once per node
@@ -486,7 +488,7 @@ internal sealed partial class ExpressionEvaluator(
         _classes ??= new Dictionary<Expression, NumberClass>(ReferenceEqualityComparer.Instance);
 #pragma warning restore IDE0028
         if (!_classes.TryGetValue(expression, out NumberClass numberClass))
-            _classes[expression] = numberClass = NumberTypeOf(expression, scope.AllColumns(), _ => null).Class;
+            _classes[expression] = numberClass = NumberTypeOf(expression, scope.AllColumns(), subqueries.Names, _ => null).Class;
         return numberClass;
     }
 
@@ -1012,10 +1014,10 @@ internal sealed partial class ExpressionEvaluator(
                 {
                     IndexSelection.TypeKind.Temporal => AsDateColumn(value),
                     IndexSelection.TypeKind.Guid => JetTypeCodec.ToStoredValue(column, column.Type,
-                        JetTypeCodec.CurrencyAsStored(column.Type, value, IsCurrency(operand, []))),
+                        JetTypeCodec.CurrencyAsStored(column.Type, value, IsCurrency(operand, [], StringComparer.Ordinal))),
                     // Without the zero padding a fixed-length column adds when it stores the value (verified vs ACE).
                     IndexSelection.TypeKind.Binary => JetTypeCodec.AsBinary(JetTypeCodec.NumberFromText(
-                            column.Type, JetTypeCodec.CurrencyAsStored(column.Type, value, IsCurrency(operand, []))), currency: false)
+                            column.Type, JetTypeCodec.CurrencyAsStored(column.Type, value, IsCurrency(operand, [], StringComparer.Ordinal))), currency: false)
                         ?? throw JetTypeCodec.CannotStore(column, column.Type, value),
                     _ => column.Type switch
                     {
@@ -1098,13 +1100,14 @@ internal sealed partial class ExpressionEvaluator(
     /// </list>
     /// </summary>
     internal static NumberType NumberTypeOf(
-        Expression expression, IReadOnlyList<OutputColumn> columns, Func<Expression, Type?> declaredType)
+        Expression expression, IReadOnlyList<OutputColumn> columns, IEqualityComparer<string> names,
+        Func<Expression, Type?> declaredType)
     {
         return NumberTypeOf(expression, e => e switch
         {
             LiteralExpression { Value: null } => new NumberNode.WrittenNull(),
             LiteralExpression literal => new NumberNode.Known(WrittenNumberType(literal.Value)),
-            ColumnReference reference => new NumberNode.Known(OutputColumn.Find(columns, reference) is { } column
+            ColumnReference reference => new NumberNode.Known(OutputColumn.Find(columns, reference, names) is { } column
                 ? ColumnNumberType(column.Currency, column.Scale, column.Precision, column.ClrType)
                 : new(NumberClass.Other)),
             UnaryExpression { Operator: UnaryOperator.Negate } negation => new NumberNode.Negation(negation.Operand),

@@ -35,10 +35,10 @@ internal static class ViewExpander
         JetDatabase Home, JetCatalog Catalog, ExternalDatabase? Database, ISqlParser Parser, HashSet<string> Active);
 
     // IDE0028's only fix here is `[]`, which would silently drop the comparer and let a view expand
-    // itself recursively when the cycle guard's names differ only by case.
+    // itself recursively when the cycle guard's names differ only as the catalog's names do not tell apart.
 #pragma warning disable IDE0028
     public static SqlStatement Expand(SqlStatement statement, JetDatabase database, ISqlParser parser) =>
-        Rewrite(statement, new Scope(database, database.Catalog, null, parser, new HashSet<string>(StringComparer.OrdinalIgnoreCase)));
+        Rewrite(statement, new Scope(database, database.Catalog, null, parser, new HashSet<string>(database.Catalog.Names)));
 #pragma warning restore IDE0028
 
     private static SqlStatement Rewrite(SqlStatement statement, Scope scope) => statement switch

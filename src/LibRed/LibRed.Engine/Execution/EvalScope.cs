@@ -52,7 +52,9 @@ internal sealed class EvalScope(
     private ColumnReference? _firstReference;
     private int _firstSlot;
 
-    public bool TryResolve(ColumnReference reference, out object? value)
+    /// <summary>The value of the column <paramref name="reference"/> names, here or in an enclosing scope, matching
+    /// names by <paramref name="names"/> — the database's <see cref="LibRed.Catalog.JetCatalog.Names"/>.</summary>
+    public bool TryResolve(ColumnReference reference, IEqualityComparer<string> names, out object? value)
     {
         // Resolve each reference once rather than re-scanning every column — two case-insensitive compares
         // apiece, and no early exit, since the same pass is proving the reference unambiguous — for every row.
@@ -67,7 +69,7 @@ internal sealed class EvalScope(
         {
             // Most scopes read one or two references. Keep the first binding directly, avoiding a
             // dictionary lookup per row (and the dictionary altogether for a one-reference scope).
-            found = Locate(schema, reference);
+            found = Locate(schema, reference, names);
             _firstSlot = found;
             _firstReference = reference;
         }
@@ -81,7 +83,7 @@ internal sealed class EvalScope(
             _resolved ??= new Dictionary<ColumnReference, int>(ReferenceEqualityComparer.Instance);
 #pragma warning restore IDE0028
             if (!_resolved.TryGetValue(reference, out found))
-                _resolved[reference] = found = Locate(schema, reference);
+                _resolved[reference] = found = Locate(schema, reference, names);
         }
 
         if (found >= 0)
@@ -91,7 +93,7 @@ internal sealed class EvalScope(
         }
 
         if (outer is not null)
-            return outer.TryResolve(reference, out value);
+            return outer.TryResolve(reference, names, out value);
 
         value = null;
         return false;
@@ -100,16 +102,16 @@ internal sealed class EvalScope(
     /// <summary>The index of the one column of <paramref name="schema"/> that <paramref name="reference"/> names,
     /// or -1 for none. Scans to the end whether or not it has matched, because finding a second match is what
     /// makes the reference ambiguous — which throws, or with <paramref name="throwIfAmbiguous"/> false is -1 too,
-    /// for a caller planning ahead that must leave the error to the row that would raise it.</summary>
-    internal static int Locate(IReadOnlyList<OutputColumn> schema, ColumnReference reference, bool throwIfAmbiguous = true)
+    /// for a caller planning ahead that must leave the error to the row that would raise it. Names and qualifiers
+    /// match by <paramref name="names"/>, the database's <see cref="LibRed.Catalog.JetCatalog.Names"/>.</summary>
+    internal static int Locate(IReadOnlyList<OutputColumn> schema, ColumnReference reference,
+        IEqualityComparer<string> names, bool throwIfAmbiguous = true)
     {
         int found = -1;
         for (int i = 0; i < schema.Count; i++)
         {
-            bool nameMatch = string.Equals(schema[i].Name, reference.Column, StringComparison.OrdinalIgnoreCase);
-            bool qualifierMatch = reference.Table is null
-                || string.Equals(schema[i].Qualifier, reference.Table, StringComparison.OrdinalIgnoreCase);
-            if (!nameMatch || !qualifierMatch) continue;
+            if (!names.Equals(schema[i].Name, reference.Column)
+                || reference.Table is not null && !names.Equals(schema[i].Qualifier, reference.Table)) continue;
 
             if (found >= 0)
                 return throwIfAmbiguous
@@ -157,6 +159,10 @@ internal interface IScalarSubqueryRunner
     /// <summary>How text compares in this database: its page-0 collation, which every query-time text
     /// comparison uses whatever its operands (see <see cref="LibRed.Storage.JetTextComparer"/>).</summary>
     LibRed.Storage.JetTextComparer TextComparer { get; }
+
+    /// <summary>How object names compare in this database (<see cref="LibRed.Catalog.JetCatalog.Names"/>), which
+    /// a column reference is resolved by.</summary>
+    IEqualityComparer<string> Names { get; }
 
     /// <summary>The subquery's single value, correlated to <paramref name="outerScope"/>.</summary>
     object? ExecuteScalar(SqlStatement query, EvalScope outerScope);

@@ -95,7 +95,7 @@ internal static class IndexSelection
     /// output's alias) none of the input's.</summary>
     private static HashSet<string> Read(HashSet<string>? above, IEnumerable<Expression> values, PlanNode input, JetDatabase database)
     {
-        var read = new HashSet<string>(above ?? [], StringComparer.OrdinalIgnoreCase);
+        var read = new HashSet<string>(above ?? [], database.Catalog.Names);
         foreach (Expression value in values)
             ColumnPruning.Walk(value, node =>
             {
@@ -105,7 +105,7 @@ internal static class IndexSelection
                     case ScalarSubquery or ExistsExpression or InSubqueryExpression:
                         return false;
                     case StarExpression:
-                        read.UnionWith(QueryPlanner.SubtreeAliases(input));
+                        read.UnionWith(QueryPlanner.SubtreeAliases(input, database.Catalog.Names));
                         return false;
                     case QualifiedStarExpression star:
                         read.Add(star.Table);
@@ -206,7 +206,7 @@ internal static class IndexSelection
             {
                 switch (e)
                 {
-                    case ColumnReference c when c.Table is null || string.Equals(c.Table, derived.Alias, StringComparison.OrdinalIgnoreCase):
+                    case ColumnReference c when c.Table is null || database.Catalog.Names.Equals(c.Table, derived.Alias):
                         if (DerivedColumn(derived, c.Column, database) is { } column)
                             return column;
                         break;
@@ -244,14 +244,15 @@ internal static class IndexSelection
             return null;
 
         bool star = projection.Any(i => i.Value is StarExpression or QualifiedStarExpression);
-        if (derived.Columns is { } names)
+        IEqualityComparer<string> names = database.Catalog.Names;
+        if (derived.Columns is { } columns)
         {
-            int position = names.ToList().FindIndex(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase));
+            int position = columns.ToList().FindIndex(n => names.Equals(n, name));
             return position >= 0 && position < projection.Count && !star ? projection[position].Value as ColumnReference : null;
         }
 
         var items = projection.Where(i => i.Value is not (StarExpression or QualifiedStarExpression)
-            && string.Equals(i.Alias ?? (i.Value as ColumnReference)?.Column, name, StringComparison.OrdinalIgnoreCase)).ToList();
+            && names.Equals(i.Alias ?? (i.Value as ColumnReference)?.Column, name)).ToList();
         if (items.Count > 0 || !star)
             return items is [{ Value: ColumnReference column }] ? column : null;
 
@@ -295,11 +296,12 @@ internal static class IndexSelection
     /// the statement's own is answered as if the outer row's conjuncts were not there.</description></item>
     /// </list>
     /// </remarks>
-    private static Expression SoughtAsIndexed(Expression predicate, string alias, TableDefinition def, HashSet<string> outer, Reading reading)
+    private static Expression SoughtAsIndexed(
+        Expression predicate, string alias, TableDefinition def, HashSet<string> outer, Reading reading, IEqualityComparer<string> names)
     {
         List<Expression> written = [.. Conjuncts(predicate)];
         List<Expression> conjuncts = [.. written.Select(Plain)];
-        var restrictions = conjuncts.Select(c => Restriction(c, alias, def, outer)).ToList();
+        var restrictions = conjuncts.Select(c => Restriction(c, alias, def, outer, names)).ToList();
         bool lookup = reading == Reading.ExistsLookup && restrictions.Any(r => r is { Joined: true, Equal: true });
 
         bool changed = false;
@@ -340,11 +342,11 @@ internal static class IndexSelection
 
         bool Indexed(Expression e) => e is BinaryExpression { Operator: BinaryOperator.And or BinaryOperator.Or } b
             ? Indexed(b.Left) && Indexed(b.Right)
-            : Restriction(Plain(e), alias, def, outer) is { } r && LeadsIndex(def, r.Column);
+            : Restriction(Plain(e), alias, def, outer, names) is { } r && LeadsIndex(def, r.Column);
 
         Expression Branches(Expression e) => e is BinaryExpression { Operator: BinaryOperator.And or BinaryOperator.Or } b
             ? b with { Left = Branches(b.Left), Right = Branches(b.Right) }
-            : Restriction(Plain(e), alias, def, outer) is { } r && Classify(r.Column.Type) is not (null or TypeKind.Text)
+            : Restriction(Plain(e), alias, def, outer, names) is { } r && Classify(r.Column.Type) is not (null or TypeKind.Text)
                 ? AsIndexed(Plain(e), r.Column, r.ColumnLeft, looked: false)
             : e;
 
@@ -459,7 +461,7 @@ internal static class IndexSelection
     /// it (ExpressionEvaluator.TruthTest; verified vs ACE, with and without an index: -1, 1 and 2 all qualify for
     /// True, '0' for False), so select rows no single key holds.</summary>
     internal static ColumnRestriction? Restriction(
-        Expression conjunct, string alias, TableDefinition def, HashSet<string> outer)
+        Expression conjunct, string alias, TableDefinition def, HashSet<string> outer, IEqualityComparer<string> names)
     {
         // ColumnLeft: whether the column is a comparison's left operand (an IN's or BETWEEN's always is).
         (Expression Column, Expression[] Values, bool Equal, bool ColumnLeft)? parts = conjunct switch
@@ -468,14 +470,14 @@ internal static class IndexSelection
             {
                 Operator: BinaryOperator.Equal or BinaryOperator.LessThan or BinaryOperator.LessThanOrEqual
                     or BinaryOperator.GreaterThan or BinaryOperator.GreaterThanOrEqual
-            } b => Column(b.Left, alias, def) is not null && Seekable(b.Right, outer)
+            } b => Column(b.Left, alias, def, names) is not null && Seekable(b.Right, outer)
                 ? (b.Left, [b.Right], b.Operator == BinaryOperator.Equal, true)
                 : (b.Right, [b.Left], b.Operator == BinaryOperator.Equal, false),
             InListExpression { Negated: false } list => (list.Value, [.. list.Items], false, true),
             BetweenExpression { Negated: false } between => (between.Value, [between.Low, between.High], false, true),
             _ => null,
         };
-        if (parts is not { } p || Column(p.Column, alias, def) is not { } reference || !p.Values.All(v => Seekable(v, outer)))
+        if (parts is not { } p || Column(p.Column, alias, def, names) is not { } reference || !p.Values.All(v => Seekable(v, outer)))
             return null;
         ColumnDef column = def.FindColumn(reference.Column)!;
         bool truthTested = p.Equal && column.Type != JetDataType.Boolean && p.Values is [LiteralExpression { Value: bool truth }]
@@ -504,6 +506,7 @@ internal static class IndexSelection
         if (rest.Count == 0 && byTruth.Count == 0)
             return false;
         Expression beside = QueryPlanner.CombineAnd([.. rest, .. keys]);
+        IEqualityComparer<string> names = database.Catalog.Names;
         List<(string Alias, TableDefinition Def)> tables = [.. BaseTables(plan)
             .Select(t => (t.Alias, Def: ExternalDatabases.Open(database, t.Database).Catalog.FindTable(t.Table)))
             .Where(t => t.Def is not null).Select(t => (t.Alias, t.Def!))];
@@ -512,7 +515,7 @@ internal static class IndexSelection
             List<Expression> written = [.. Conjuncts(beside)];
             var taken = new HashSet<Expression>(ReferenceEqualityComparer.Instance);
             foreach (var (alias, def) in tables)
-                foreach (var (sought, conjunct) in Conjuncts(SoughtAsIndexed(beside, alias, def, outer, Reading.ExistsLookup)).Zip(written))
+                foreach (var (sought, conjunct) in Conjuncts(SoughtAsIndexed(beside, alias, def, outer, Reading.ExistsLookup, names)).Zip(written))
                     if (!ReferenceEquals(sought, conjunct))
                         taken.Add(conjunct);
             if (byTruth.Any(key => !taken.Contains(key)))
@@ -521,8 +524,8 @@ internal static class IndexSelection
         if (rest.Count == 0)
             return false;
         Expression alone = QueryPlanner.CombineAnd(rest);
-        return tables.Any(t => !Conjuncts(SoughtAsIndexed(beside, t.Alias, t.Def, outer, Reading.Alone)).Take(rest.Count)
-            .SequenceEqual(Conjuncts(SoughtAsIndexed(alone, t.Alias, t.Def, NoOuter, Reading.Alone))));
+        return tables.Any(t => !Conjuncts(SoughtAsIndexed(beside, t.Alias, t.Def, outer, Reading.Alone, names)).Take(rest.Count)
+            .SequenceEqual(Conjuncts(SoughtAsIndexed(alone, t.Alias, t.Def, NoOuter, Reading.Alone, names))));
     }
 
     private static FilterNode RewriteFilterOverScan(FilterNode filter, ScanNode scan, JetDatabase database, HashSet<string> outer, Reading reading)
@@ -530,7 +533,8 @@ internal static class IndexSelection
         if (ExternalDatabases.Open(database, scan.Database).Catalog.FindTable(scan.Table) is not { } def)
             return filter;
         string alias = scan.Alias ?? scan.Table;
-        filter = filter with { Predicate = SoughtAsIndexed(filter.Predicate, alias, def, outer, reading) };
+        IEqualityComparer<string> names = database.Catalog.Names;
+        filter = filter with { Predicate = SoughtAsIndexed(filter.Predicate, alias, def, outer, reading, names) };
         var conjuncts = Conjuncts(filter.Predicate).ToList();
 
         // A seek converts its key itself (ExpressionEvaluator.TryGetSeekKey), so it is keyed by the value a
@@ -541,13 +545,13 @@ internal static class IndexSelection
         //    evaluable without a row of it (a constant, a parameter, or — in a correlated subquery — an outer
         //    column), then use the index (composite preferred) all of whose columns are so constrained. This is
         //    an exact point seek; a fully-constrained composite key (e.g. a correlated PK match) hits one row.
-        var equalities = new Dictionary<string, Expression>(StringComparer.OrdinalIgnoreCase);
+        var equalities = new Dictionary<string, Expression>(def.Names);
         foreach (Expression conjunct in conjuncts)
         {
             // A comparison tested as written is not one a seek, which converts its key to the column's type, can serve:
             // a Yes/No key is taken by its truth, and a key the column cannot hold seeks nothing where the comparison
             // as written errs.
-            if (Restriction(conjunct, alias, def, outer) is { Equal: true, Values: [var value] } match
+            if (Restriction(conjunct, alias, def, outer, names) is { Equal: true, Values: [var value] } match
                 && !TestedAsWritten(match.Column, match.Joined, reading))
                 equalities.TryAdd(match.Column.Name, Key(value));
         }
@@ -580,7 +584,7 @@ internal static class IndexSelection
             {
                 // A BETWEEN's two bounds are ordered only when the seek runs, so they are taken as a pair or not at
                 // all — never mixed with a bound another conjunct set. The FilterNode above re-checks every conjunct.
-                if (Between(conjunct, colName, alias, def) is { } range)
+                if (Between(conjunct, colName, alias, def, names) is { } range)
                 {
                     if (low is null && high is null)
                         (low, high, unordered) = (Key(range.Low), Key(range.High), true);
@@ -588,7 +592,7 @@ internal static class IndexSelection
                 }
                 if (unordered)
                     continue;
-                if (Bound(conjunct, colName, alias, def) is not { } b)
+                if (Bound(conjunct, colName, alias, def, names) is not { } b)
                     continue;
                 if (b.Op is BinaryOperator.GreaterThan or BinaryOperator.GreaterThanOrEqual)
                     low ??= Key(b.Value);
@@ -656,8 +660,8 @@ internal static class IndexSelection
                 matches = ascending
                     && sort.Keys[i].Direction == SortDirection.Ascending
                     && Classify(indexColumn.Type) is TypeKind.Numeric or TypeKind.Temporal
-                    && Column(sort.Keys[i].Value, alias, def) is { } key
-                    && string.Equals(key.Column, indexColumn.Name, StringComparison.OrdinalIgnoreCase);
+                    && Column(sort.Keys[i].Value, alias, def, database.Catalog.Names) is { } key
+                    && def.Names.Equals(key.Column, indexColumn.Name);
             }
 
             // Both bounds open: the range seek descends to the leftmost leaf and walks the chain, which is the
@@ -676,14 +680,15 @@ internal static class IndexSelection
     /// <summary>If <paramref name="conjunct"/> is a range comparison of column <paramref name="colName"/> against
     /// a value (either orientation), returns the operator as if the column were on the left (so <c>5 &lt; K</c>
     /// yields <c>K &gt; 5</c>) and the value expression; else null.</summary>
-    private static (BinaryOperator Op, Expression Value)? Bound(Expression conjunct, string colName, string alias, TableDefinition def)
+    private static (BinaryOperator Op, Expression Value)? Bound(
+        Expression conjunct, string colName, string alias, TableDefinition def, IEqualityComparer<string> names)
     {
         if (conjunct is not BinaryExpression { Operator: var op } cmp
             || op is not (BinaryOperator.GreaterThan or BinaryOperator.GreaterThanOrEqual
                 or BinaryOperator.LessThan or BinaryOperator.LessThanOrEqual))
             return null;
 
-        bool IsCol(Expression e) => Column(e, alias, def) is { } c && string.Equals(c.Column, colName, StringComparison.OrdinalIgnoreCase);
+        bool IsCol(Expression e) => Column(e, alias, def, names) is { } c && def.Names.Equals(c.Column, colName);
         if (IsCol(cmp.Left) && !HasColumnRef(cmp.Right)) return (op, cmp.Right);
         if (IsCol(cmp.Right) && !HasColumnRef(cmp.Left)) return (Flip(op), cmp.Left);
         return null;
@@ -695,11 +700,12 @@ internal static class IndexSelection
     /// values are known (<see cref="IndexRangeSeekNode.Unordered"/>), so a bound is anything without a column in it, as
     /// for <see cref="Bound"/>. A Null bound makes the whole test Null, which a seek has no way to say, so it is left
     /// to the filter; so is text on a column whose collation has no index keys to order it by.</remarks>
-    private static (Expression Low, Expression High)? Between(Expression conjunct, string colName, string alias, TableDefinition def)
+    private static (Expression Low, Expression High)? Between(
+        Expression conjunct, string colName, string alias, TableDefinition def, IEqualityComparer<string> names)
     {
         if (conjunct is not BetweenExpression { Negated: false } between
-            || Column(between.Value, alias, def) is not { } column
-            || !string.Equals(column.Column, colName, StringComparison.OrdinalIgnoreCase)
+            || Column(between.Value, alias, def, names) is not { } column
+            || !def.Names.Equals(column.Column, colName)
             || HasColumnRef(between.Low) || HasColumnRef(between.High)
             || between.Low is LiteralExpression { Value: null } || between.High is LiteralExpression { Value: null }
             || def.FindColumn(colName) is not { } indexed
@@ -728,6 +734,7 @@ internal static class IndexSelection
 #pragma warning disable CA1859
     private static PlanNode RewriteJoin(JoinNode j, JetDatabase database, HashSet<string> outer, HashSet<string> above)
     {
+        IEqualityComparer<string> names = database.Catalog.Names;
         var pairs = Conjuncts(j.On).Select(c => EqualColumn(c, j.Left, j.Right, database)).Where(p => p.HasValue).Select(p => p!.Value).ToList();
         // What reads a column of either side besides the join's own equalities: what is above the join, a sort the
         // planner put on a side (an ORDER BY of its columns), and the rest of the ON.
@@ -759,8 +766,8 @@ internal static class IndexSelection
             // Double left as written compares as Singles (InInnerType), which a seek of the Double's index cannot do:
             // its keys are Doubles, so that conjunct seeks nothing.
             && Lookup(on, scan, def,
-                QueryPlanner.SubtreeAliases(left).Union(outer).ToHashSet(StringComparer.OrdinalIgnoreCase),
-                key => ResolveColumn(key, left, database)?.Column.Type) is { } seek)
+                QueryPlanner.SubtreeAliases(left, names).Union(outer, names).ToHashSet(names),
+                key => ResolveColumn(key, left, database)?.Column.Type, names) is { } seek)
             return j with { Left = left, Right = seek }; // ON kept as residual
 
         // A lateral (APPLY) right side is re-executed per left row with the left row in scope, so its own
@@ -768,7 +775,7 @@ internal static class IndexSelection
         // correlated subquery. Without this the right side rescans a base table for every left row, which is
         // the one shape where that cost is paid over and over.
         HashSet<string> rightOuter = j.Kind is JoinKind.CrossApply or JoinKind.OuterApply
-            ? QueryPlanner.SubtreeAliases(left).Union(outer).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            ? QueryPlanner.SubtreeAliases(left, names).Union(outer, names).ToHashSet(names)
             : outer;
         PlanNode right = Apply(j.Right, database, rightOuter, inner && innerLeft == false ? Reading.JoinInner : Reading.Alone, below);
 
@@ -791,14 +798,15 @@ internal static class IndexSelection
     /// those rows (<see cref="Restriction"/>), and that value as the key, as a seek of <paramref name="scan"/>'s table
     /// read as <paramref name="scan"/> reads it; null when no such index. The join keeps its ON as the test of each row
     /// the seek finds. <paramref name="keyType"/> gives the type a key column compares in, where known: a Single key
-    /// beside a Double column seeks nothing.
+    /// beside a Double column seeks nothing. <paramref name="names"/> tells the scan's alias apart from others.
     /// </summary>
     internal static IndexSeekNode? Lookup(
-        Expression on, ScanNode scan, TableDefinition def, HashSet<string> keySources, Func<ColumnReference, JetDataType?> keyType)
+        Expression on, ScanNode scan, TableDefinition def, HashSet<string> keySources, Func<ColumnReference, JetDataType?> keyType,
+        IEqualityComparer<string> names)
     {
         foreach (Expression conjunct in Conjuncts(on))
         {
-            if (Restriction(conjunct, scan.Alias ?? scan.Table, def, keySources) is not { Equal: true, Values: [var key] } match
+            if (Restriction(conjunct, scan.Alias ?? scan.Table, def, keySources, names) is not { Equal: true, Values: [var key] } match
                 || match.Column.Type == JetDataType.Double && key is ColumnReference keyColumn && keyType(keyColumn) == JetDataType.Single)
                 continue;
             if (def.Indexes.FirstOrDefault(i => i.RootPage > 0 && i.Columns.Count == 1 && Position(i, match.Column) == 0) is { } index)
@@ -949,7 +957,7 @@ internal static class IndexSelection
         if (source.Catalog.FindTable(scan.Table) is not { } def)
             return null;
         string alias = scan.Alias ?? scan.Table;
-        var restrictions = Conjuncts(filter.Predicate).Select(c => Restriction(c, alias, def, outer)).ToList();
+        var restrictions = Conjuncts(filter.Predicate).Select(c => Restriction(c, alias, def, outer, database.Catalog.Names)).ToList();
         (double E, bool KeyEqual, bool YesNoEqual)? found = null;
         for (int i = 0; i < restrictions.Count; i++)
         {
@@ -989,7 +997,7 @@ internal static class IndexSelection
     private static int Position(IndexDef index, ColumnDef column)
     {
         for (int k = 0; k < index.Columns.Count; k++)
-            if (string.Equals(index.Columns[k].Column.Name, column.Name, StringComparison.OrdinalIgnoreCase))
+            if (index.Columns[k].Column.ColumnId == column.ColumnId)
                 return k;
         return -1;
     }
@@ -1000,8 +1008,8 @@ internal static class IndexSelection
     private static (IReadOnlyList<Expression> Left, IReadOnlyList<Expression> Right, IReadOnlyList<Type?>? Types)? TryHashKeys(
         Expression on, PlanNode left, PlanNode right, JetDatabase database)
     {
-        HashSet<string> leftAliases = QueryPlanner.SubtreeAliases(left);
-        HashSet<string> rightAliases = QueryPlanner.SubtreeAliases(right);
+        HashSet<string> leftAliases = QueryPlanner.SubtreeAliases(left, database.Catalog.Names);
+        HashSet<string> rightAliases = QueryPlanner.SubtreeAliases(right, database.Catalog.Names);
         var leftKeys = new List<Expression>();
         var rightKeys = new List<Expression>();
         var types = new List<Type?>();
@@ -1080,13 +1088,13 @@ internal static class IndexSelection
     {
         ResolvedColumn? found = null;
         int sources = 0;
+        IEqualityComparer<string> names = database.Catalog.Names;
         foreach ((string alias, string table, ExternalDatabase? external) in BaseTables(subtree))
         {
-            if (col.Table is { } t && !string.Equals(t, alias, StringComparison.OrdinalIgnoreCase))
+            if (col.Table is { } t && !names.Equals(t, alias))
                 continue;
             JetDatabase source = ExternalDatabases.Open(database, external);
-            if (source.Catalog.FindTable(table) is { } def
-                && def.Columns.FirstOrDefault(cd => string.Equals(cd.Name, col.Column, StringComparison.OrdinalIgnoreCase)) is { } c)
+            if (source.Catalog.FindTable(table) is { } def && def.FindColumn(col.Column) is { } c)
             {
                 if (col.Table is not null)
                     return new ResolvedColumn(source, def, c, alias);
@@ -1099,7 +1107,7 @@ internal static class IndexSelection
         // that expression against the derived query's own tables (only if it is itself a plain column).
         foreach (DerivedTableNode d in DerivedTables(subtree))
         {
-            if (col.Table is { } t && !string.Equals(t, d.Alias, StringComparison.OrdinalIgnoreCase))
+            if (col.Table is { } t && !names.Equals(t, d.Alias))
                 continue;
             if (DerivedColumn(d, col.Column, database) is { } inner)
             {
@@ -1149,11 +1157,11 @@ internal static class IndexSelection
 
     /// <summary>The column reference if <paramref name="e"/> is a column of the given scan (its qualifier is
     /// the scan's alias, or it is unqualified and the table has such a column), else null.</summary>
-    private static ColumnReference? Column(Expression e, string alias, TableDefinition def)
+    private static ColumnReference? Column(Expression e, string alias, TableDefinition def, IEqualityComparer<string> names)
     {
         if (e is not ColumnReference c) return null;
-        if (c.Table is { } t && !string.Equals(t, alias, StringComparison.OrdinalIgnoreCase)) return null;
-        return def.Columns.Any(col => string.Equals(col.Name, c.Column, StringComparison.OrdinalIgnoreCase)) ? c : null;
+        if (c.Table is { } t && !names.Equals(t, alias)) return null;
+        return def.FindColumn(c.Column) is not null ? c : null;
     }
 
     private static bool HasColumnRef(Expression e) => e switch

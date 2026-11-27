@@ -40,8 +40,9 @@ internal static class OutputNames
         return item.Alias is { } alias ? new(index, Kind.Alias, alias, null) : new(index, Kind.Expression, "", null);
     }
 
-    /// <summary>The name of each output, in order.</summary>
-    public static string[] Of(IReadOnlyList<Output> outputs)
+    /// <summary>The name of each output, in order, names shared as <paramref name="columnNames"/> — the database's
+    /// <see cref="LibRed.Catalog.JetCatalog.Names"/> — tells them apart.</summary>
+    public static string[] Of(IReadOnlyList<Output> outputs, IEqualityComparer<string> columnNames)
     {
         var names = new string?[outputs.Count];
         string Generated(int i) => $"Expr{1000 + outputs[i].Item}";
@@ -65,8 +66,8 @@ internal static class OutputNames
         // names directly rather than allocating a grouping and an index iterator for every output column.
         if (outputs.Count > 1)
         {
-#pragma warning disable IDE0028 // Preserve case-insensitive grouping and the known output capacity.
-            var shared = new Dictionary<string, (int Count, bool Aliased)>(outputs.Count, StringComparer.OrdinalIgnoreCase);
+#pragma warning disable IDE0028 // Preserve the names' grouping and the known output capacity.
+            var shared = new Dictionary<string, (int Count, bool Aliased)>(outputs.Count, columnNames);
 #pragma warning restore IDE0028
             for (int i = 0; i < outputs.Count; i++)
                 if (names[i] is null)

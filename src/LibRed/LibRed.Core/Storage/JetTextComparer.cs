@@ -21,20 +21,41 @@ namespace LibRed.Storage;
 public sealed class JetTextComparer : IEqualityComparer<string>
 {
     private static readonly ConcurrentDictionary<Collation, JetTextComparer> Comparers = new();
+    private static readonly ConcurrentDictionary<Collation, JetTextComparer> NameComparers = new();
 
     /// <summary>The comparer for <paramref name="collation"/>.</summary>
-    public static JetTextComparer For(Collation collation) => Comparers.GetOrAdd(collation, c => new JetTextComparer(c));
+    public static JetTextComparer For(Collation collation) => Comparers.GetOrAdd(collation, c => new JetTextComparer(c, keepKeys: false));
+
+    /// <summary>The comparer for <paramref name="collation"/> that keeps each text's <see cref="Key"/>, for object names:
+    /// a statement compares the same few names over and over — a reference against every column of a scope, per row
+    /// where the scope is built per row — and encoding both sides each time made two different names cost a hundred
+    /// times what a case-insensitive compare did. Bounded, since names arrive from SQL text as well as from the
+    /// catalog.</summary>
+    public static JetTextComparer ForNames(Collation collation) =>
+        NameComparers.GetOrAdd(collation, c => new JetTextComparer(c, keepKeys: true));
 
     private readonly LocaleTailoring? _tailoring;
     private readonly bool _version1;
     private readonly bool _encodable;
+    private readonly ConcurrentDictionary<string, (byte[] Key, int Hash)>? _keys;
 
-    private JetTextComparer(Collation collation)
+    private JetTextComparer(Collation collation, bool keepKeys)
     {
         Collation = collation;
         _encodable = collation.IsIndexKeyEncodable;
         _tailoring = _encodable ? JetLocaleTailoring.For(collation) : null;
         _version1 = collation.Version == Collation.GeneralVersion;
+        if (keepKeys) _keys = new(StringComparer.Ordinal);
+    }
+
+    private (byte[] Key, int Hash) Kept(string text)
+    {
+        if (_keys!.TryGetValue(text, out var kept)) return kept;
+        if (_keys.Count >= 4096) _keys.Clear();
+        byte[] key = Key(text);
+        var hash = new HashCode();
+        hash.AddBytes(key);
+        return _keys[text] = (key, hash.ToHashCode());
     }
 
     /// <summary>The collation this compares in.</summary>
@@ -78,12 +99,14 @@ public sealed class JetTextComparer : IEqualityComparer<string>
     public bool Equals(string? x, string? y)
     {
         if (x is null || y is null) return x is null && y is null;
-        return x.AsSpan().TrimEnd(' ').SequenceEqual(y.AsSpan().TrimEnd(' ')) || Compare(x, y) == 0;
+        return x.AsSpan().TrimEnd(' ').SequenceEqual(y.AsSpan().TrimEnd(' '))
+            || (_keys is null ? Compare(x, y) == 0 : Kept(x).Key.AsSpan().SequenceEqual(Kept(y).Key));
     }
 
     /// <summary>A hash that agrees with <see cref="Equals(string?, string?)"/>: taken over the key.</summary>
     public int GetHashCode(string text)
     {
+        if (_keys is not null) return Kept(text).Hash;
         List<byte> key = t_left ??= [];
         Encode(text, key);
         var hash = new HashCode();

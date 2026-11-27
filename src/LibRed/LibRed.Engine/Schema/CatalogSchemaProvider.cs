@@ -19,21 +19,21 @@ public sealed class CatalogSchemaProvider(JetCatalog catalog) : ISchemaProvider
         // The magic INFORMATION_SCHEMA.<view> tables are virtual (no catalog TableDefinition) — expose a synthetic
         // schema so binding validates; the executor materialises their rows from the catalog.
         if (InformationSchema.IsInformationSchema(name))
-            return new InformationSchemaTable(name);
+            return new InformationSchemaTable(name, _catalog.Names);
 
         TableDefinition? def = _catalog.FindTable(name);
         return def is null ? null
-            : _tables.GetValue(def.Metadata!, static ddl => new TableSchema(ddl));
+            : _tables.GetValue(def.Metadata!, ddl => new TableSchema(ddl, _catalog.Names));
     }
 
-    private sealed class InformationSchemaTable(string name) : ITableSchema
+    /// <summary>A view of INFORMATION_SCHEMA, its columns named apart by <paramref name="names"/>.</summary>
+    private sealed class InformationSchemaTable(string name, IEqualityComparer<string> names) : ITableSchema
     {
         public string Name => name;
         public IReadOnlyList<IColumnSchema> Columns { get; } =
             InformationSchema.ColumnsOf(name).Zip(InformationSchema.ColumnTypesOf(name),
                 (column, type) => (IColumnSchema)new VirtualColumn(column, type)).ToList();
-        public IColumnSchema? FindColumn(string col) =>
-            Columns.FirstOrDefault(c => string.Equals(c.Name, col, StringComparison.OrdinalIgnoreCase));
+        public IColumnSchema? FindColumn(string col) => Columns.FirstOrDefault(c => names.Equals(c.Name, col));
     }
 
     private sealed class VirtualColumn(string name, Type clrType) : IColumnSchema
@@ -43,14 +43,15 @@ public sealed class CatalogSchemaProvider(JetCatalog catalog) : ISchemaProvider
         public Type ClrType => clrType;
     }
 
-    private sealed class TableSchema(TableDefinition.DdlMetadata def) : ITableSchema
+    /// <summary>A stored table, its columns named apart by <paramref name="names"/>, the catalog's
+    /// <see cref="JetCatalog.Names"/>.</summary>
+    private sealed class TableSchema(TableDefinition.DdlMetadata def, IEqualityComparer<string> names) : ITableSchema
     {
         public string Name => def.Name;
         public IReadOnlyList<IColumnSchema> Columns => field ??=
             Array.AsReadOnly(def.Columns.Select(c => (IColumnSchema)new ColumnSchema(c)).ToArray());
 
-        public IColumnSchema? FindColumn(string name) =>
-            Columns.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+        public IColumnSchema? FindColumn(string name) => Columns.FirstOrDefault(c => names.Equals(c.Name, name));
     }
 
     private sealed class ColumnSchema(ColumnDef col) : IColumnSchema

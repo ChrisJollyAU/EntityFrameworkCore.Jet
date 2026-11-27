@@ -276,7 +276,7 @@ public sealed class QueryEngine
     internal PlanNode PlanFor(string sql)
     {
         SqlStatement ast = ViewExpander.Expand(_parser.ParseStatement(sql), _database, _parser);
-        return ColumnPruning.Apply(PlanWithIndexes(_binder.Bind(ast)));
+        return ColumnPruning.Apply(PlanWithIndexes(_binder.Bind(ast)), _database.Catalog.Names);
     }
 
     /// <summary>The stored query <paramref name="name"/> names, for running it and describing it alike; a missing one
