@@ -301,7 +301,17 @@ chain's pages — and the page an `UPDATE` took unwritten — are held like ever
 map, out of the column's maps, their bytes untouched. At that user's close — another user still connected — every
 page it holds is set in the **released-pages map**, the free map is not given them, and the pages already in the
 released map stay there; the shared reservation's unused pages still go to the free map. The last user's close
-merges the released map into the free map and clears it, as below, an idle close included. Measured for each route:
+merges the released map into the free map and clears it, as below, an idle close included.
+
+**Page 1 held by another lock holder** (verified, ACE 16, page 1's exclusive write lock held from a handle that is no
+user). Alone, a `DELETE` freeing a chain is granted the probe and refused page 1 for the retries of
+[locking.md §7](locking.md#7-conflicts-and-errors); it goes on without page 1, and the chain is held as with another
+user connected. Its close, alone, tries page 1 in rounds of retries; given page 1, it sets the held pages in the free
+map. Beside another user, a close refused page 1 for one round of retries writes nothing: the pages it held are in
+**neither map**, and the last user's close does not find them — they stay unusable, in no map and out of the column's
+maps, until the file is compacted. How many rounds a close alone makes before it gives up is not measured.
+
+Measured for each route:
 
 | Freed by | Alone: at the statement | Alone: at close | With another user: at the statement | With another user: at that user's close | Last user's close |
 |---|---|---|---|---|---|
@@ -449,13 +459,16 @@ This is allocation policy, not an on-disk requirement; see `docs/design/page-all
 > taken before it. A chained long value's pages, and the page an `UPDATE` took unwritten, go through `Free` at once
 > — after the new value is written, so, as in ACE, the `UPDATE` that frees those pages does not reuse them — only
 > from a statement on its own (not one under a user transaction's savepoint) whose probe of the other users' bytes
-> is granted, held while page 1 is locked and read (`PageChannel.WhileAlone`); otherwise they go through `Release`.
+> is granted, held while page 1 is locked and read, and that gets page 1 within the retries
+> (`PageAllocator.FreeWhileAlone`); otherwise they go through `Release`.
 > A rollback beside another user holds the pages its undone writes took, rather than freeing them. Closing a
 > writable `JetDatabase` locks page 1 and, alone, returns the held pages and any already set in the released-pages
 > map to the free map and clears the released map; beside another user it sets the held pages in the released map
 > and leaves the rest of it as it is; either way it first sizes the map as above, gives the reservation back to the
 > free map, and runs in one transaction. A close with nothing held, no reservation and an empty released map writes
-> nothing. A connection that is no Jet user — exclusive, off Windows, no lock file — is alone by definition; two
+> nothing. Refused page 1 — three rounds of retries alone (a number chosen: ACE's limit is not measured), one beside
+> another user — the close writes nothing of the maps and the pages it held, and its reservation's, are left in
+> neither map, as ACE leaves them. A connection that is no Jet user — exclusive, off Windows, no lock file — is alone by definition; two
 > connections of one process are two users and find each other through the probe.
 >
 > **Where LibRed differs from ACE.** A held page lives in the handle, not on disk, until the close — as ACE's

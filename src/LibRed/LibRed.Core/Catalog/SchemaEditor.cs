@@ -593,12 +593,13 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// MSysObjects' definition page (<see cref="PageChannel.RewriteCatalog"/>), as ACE's session does for every design
     /// change but most of <c>ADD COLUMN</c>s (measured): that passes <paramref name="rewritesCatalog"/> false and rewrites
     /// it only when it stores a property, which ACE's <c>ADD COLUMN … DEFAULT</c> matches and its <c>BIT</c> does not
-    /// (locking.md §4).</remarks>
+    /// (locking.md §4). The page is locked as the statement ends, after the pages the change writes, where ACE's
+    /// <c>CREATE INDEX</c> locks it (measured).</remarks>
     private TableDefinition DesignTable(string name, bool rewritesCatalog = true)
     {
         TableDefinition table = _catalog.FindTable(name) ?? throw new InvalidOperationException("Cannot find table or constraint.");
         _channel.LockTable(table.DefinitionPage, table.Name, TableUse.Design);
-        if (rewritesCatalog) _channel.RewriteCatalog();
+        if (rewritesCatalog) _channel.RewriteCatalog(last: true);
         return table;
     }
 

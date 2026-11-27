@@ -2188,6 +2188,11 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             InsertNewRow(table.Name, table, defaults, values, provided);
         }
 
+        // Through a join, once its rows are written, it rewrites the catalog's definition page in a session that has
+        // written a system table's rows — whether it writes one of the tables or both — as ACE's does, locking it after
+        // the rows' pages; an UPDATE reading another table in a subquery does not (measured, locking.md §4).
+        if (tables.Count > 1) _database.Channel.RewriteCatalog();
+
         int affected = joinRows.Count;
         if (_session is not null) _session.RowCount = affected;
         return affected;

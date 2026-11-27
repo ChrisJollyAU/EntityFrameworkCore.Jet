@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using LibRed.Catalog;
 using LibRed.Formats;
 using LibRed.IO;
@@ -291,6 +292,78 @@ public class ReleaseAtCloseTests
             table.Delete(table.Rows().WithIds().Single().Id);
             Assert.NotEqual(page1, TestDatabases.ReadPage(path, 1));
             Assert.All(chain, page => Assert.True(FreeMapBit(table.Channel, page)));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // ACE alone with page 1 held by a handle that is no user (measured, ACE 16): the DELETE's probe is granted, page 1 is
+    // refused 21 times, and the statement goes on — the row gone, page 1 not written, the chain held; its close tries page
+    // 1 again, a round of retries at a time, and once given it sets the chain in the free map.
+    [Fact]
+    public void Alone_with_page_1_held_a_deleted_chain_is_held_and_the_close_frees_it_once_page_1_is_had()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "release-page1-alone-");
+        try
+        {
+            int[] chain = CreateChainedRow(path);
+            var db = JetDatabase.Open(path, readOnly: false);
+            using JetLockFile holder = HoldPageOne(path);
+            Table table = db.OpenTable("Doc");
+            byte[] page1 = TestDatabases.ReadPage(path, 1);
+            var wait = Stopwatch.StartNew();
+            table.Delete(table.Rows().WithIds().Single().Id);
+            Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
+            Assert.Empty(table.Rows());
+            Assert.Equal(page1, TestDatabases.ReadPage(path, 1));
+            Assert.All(chain, page => Assert.False(FreeMapBit(table.Channel, page)));
+
+            // Let go during the close's second round.
+            var release = new Thread(() => { Thread.Sleep(3000); ReleasePageOne(holder); }) { IsBackground = true };
+            release.Start();
+            wait.Restart();
+            db.Dispose();
+            release.Join();
+            Assert.InRange(wait.ElapsedMilliseconds, 2900, 6500);
+            using var reopened = JetDatabase.Open(path);
+            Assert.All(chain, page => Assert.True(FreeMapBit(reopened.Channel, page)));
+            Assert.All(ReleasedBits(reopened.Channel), b => Assert.Equal(0, b));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // Page 1 held throughout the close: ACE alone made three rounds and was granted in the third (measured); how many it
+    // makes before it gives up is not measured, and LibRed gives up after three. Beside another user, ACE's close tries
+    // page 1 one round, 21 attempts, and closes writing nothing (measured). Either way the held chain ends in neither map.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void With_page_1_held_throughout_the_close_gives_up_and_leaves_the_held_pages_in_neither_map(bool company)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "release-page1-close-");
+        try
+        {
+            int[] chain = CreateChainedRow(path);
+            JetLockFile? other = company ? OtherUser(path) : null;
+            try
+            {
+                var db = JetDatabase.Open(path, readOnly: false);
+                using JetLockFile holder = HoldPageOne(path);
+                Table table = db.OpenTable("Doc");
+                table.Delete(table.Rows().WithIds().Single().Id);   // held: alone, page 1 refused; beside a user, not tried
+                byte[] page1 = TestDatabases.ReadPage(path, 1);
+                var wait = Stopwatch.StartNew();
+                db.Dispose();
+                Assert.InRange(wait.ElapsedMilliseconds, company ? 1900 : 5700, company ? 4000 : 12_000);
+                Assert.Equal(page1, TestDatabases.ReadPage(path, 1));
+                ReleasePageOne(holder);
+            }
+            finally { other?.Dispose(); }
+
+            using var reopened = JetDatabase.Open(path);
+            Assert.All(chain, page => Assert.False(FreeMapBit(reopened.Channel, page)));
+            Assert.Empty(MapPages(reopened.Channel, Format.ReleasedPagesMapPointerOffset).Intersect(chain));
         }
         finally { TemporaryDatabase.Delete(path); }
     }
@@ -614,6 +687,22 @@ public class ReleaseAtCloseTests
         Assert.True(other.TryLock(JetLockLayout.SessionByte(1), 1));
         Assert.True(other.TryLock(JetLockLayout.UserByte(1), 1));
         return other;
+    }
+
+    /// <summary>Page 1's exclusive write lock taken from a lock-file handle that is no Jet user, as user 5 — what
+    /// <c>jetlocktrace hold</c> took against ACE.</summary>
+    private static JetLockFile HoldPageOne(string path)
+    {
+        JetLockFile holder = JetLockFile.Open(JetLockFile.PathFor(path)!, createIfMissing: false);
+        (long offset, long length) = JetLockLayout.ExclusiveRange(JetLockRegion.WriteRead, 1, 5);
+        Assert.True(holder.TryLock(offset, length));
+        return holder;
+    }
+
+    private static void ReleasePageOne(JetLockFile holder)
+    {
+        (long offset, long length) = JetLockLayout.ExclusiveRange(JetLockRegion.WriteRead, 1, 5);
+        holder.Unlock(offset, length);
     }
 
     /// <summary>The pages set in the global map whose page-0 pointer is at <paramref name="pointerOffset"/>.</summary>

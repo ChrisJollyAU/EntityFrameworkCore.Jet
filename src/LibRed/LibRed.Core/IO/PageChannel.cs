@@ -381,10 +381,13 @@ public sealed class PageChannel : IDisposable
     /// at all. Taken once, without the retries of a page write: held by another user, it is left out of the batch and
     /// the statement goes on, as ACE's does (measured). Nothing before the system table's row, nor outside a
     /// transaction.</summary>
-    internal void RewriteCatalog()
+    /// <param name="last">Locked as the statement ends, after every other page it locks, rather than now — as ACE's
+    /// design change locks it after the table's definition page (measured: <c>CREATE INDEX</c>, <c>ADD COLUMN … NOT
+    /// NULL</c>).</param>
+    internal void RewriteCatalog(bool last = false)
     {
         if (!_catalogWritten || _active is null) return;
-        if (InUserTransaction) _rewriteAtCommit = true;
+        if (InUserTransaction || last) _rewriteAtCommit = true;
         else Rewrite(CatalogPages().Objects);
     }
 
@@ -619,11 +622,13 @@ public sealed class PageChannel : IDisposable
     /// of that (<see cref="Rebased"/>), as ACE's COMMIT writes its counting onto the page as the file has it then
     /// (locking.md §5). The counters the transaction keeps through a rollback move with it: each is still its change
     /// on top of what is committed.</remarks>
-    /// <param name="purpose">What the page is locked for: <see cref="JetLockPurpose.PageWrite"/>, or
+    /// <param name="purpose">What the page is locked for: <see cref="JetLockPurpose.PageWrite"/>;
     /// <see cref="JetLockPurpose.CatalogRewrite"/> for a catalog definition page written as it is
-    /// (<see cref="RewriteCatalog"/>).</param>
-    /// <returns>False when <paramref name="purpose"/> is <see cref="JetLockPurpose.CatalogRewrite"/> and another user
-    /// holds the page: nothing is locked, and the page is not the transaction's. True otherwise.</returns>
+    /// (<see cref="RewriteCatalog"/>); <see cref="JetLockPurpose.DefinitionCounts"/> for a table's definition page a
+    /// statement only counts on; <see cref="JetLockPurpose.GiveBack"/> for the global maps' holder page when pages are
+    /// given back.</param>
+    /// <returns>False when <paramref name="purpose"/> is one whose refusal ends in no lock and another user holds the
+    /// page: nothing is locked, and the page is not the transaction's. True otherwise.</returns>
     internal bool LockForUpdate(int pageNumber, bool refuseStale = true, JetLockPurpose purpose = JetLockPurpose.PageWrite)
     {
         if (_active is null || _readOnly || _commitBaselines.ContainsKey(pageNumber)) return true;
@@ -841,17 +846,15 @@ public sealed class PageChannel : IDisposable
             throw new StaleReadException(JetUserRegistration.TableInUseMessage(name));
         }
 
-        // A statement writing a table with another in use — an UPDATE through a join, or cascading to another table —
-        // rewrites the catalog's definition page as one adding a row does (RewriteCatalog): the tables of the locks its
-        // frame has taken, its reads among them.
-        if (_catalogWritten && use != TableUse.Design && !callers && _active is { } transaction)
-        {
-            var frame = _transactionLocks.Skip(transaction.TableLockCountAt(new Savepoint(transaction.Depth - 1)))
-                .Where(l => l.Region is JetLockRegion.TableRead or JetLockRegion.TableWrite).ToList();
-            if (frame.Exists(l => l.Region == JetLockRegion.TableWrite)
-                && frame.Concat(_statementLocks.Where(l => l.Region == JetLockRegion.TableRead)).Select(l => l.Page).Distinct().Count() >= 2)
-                RewriteCatalog();
-        }
+        // A statement writing two tables — an UPDATE cascading to another table, or one through a join setting columns of
+        // both — rewrites the catalog's definition page as one adding a row does (RewriteCatalog): the tables its frame
+        // has taken write locks on. A table it only reads — a subquery's, a foreign key's parent — does not count, as
+        // ACE's UPDATE reading one rewrites nothing (measured); an UPDATE through a join writing one table asks for it
+        // itself (the SQL engine's UPDATE).
+        if (_catalogWritten && use == TableUse.Write && !callers && _active is { } transaction
+            && _transactionLocks.Skip(transaction.TableLockCountAt(new Savepoint(transaction.Depth - 1)))
+                .Where(l => l.Region == JetLockRegion.TableWrite).Select(l => l.Page).Distinct().Count() >= 2)
+            RewriteCatalog();
 
         // A design change reads the definition page and lays it out afresh, which can move the counters on it (a dropped
         // index's entry goes from the real-index block): a page let go after an early publication is locked again

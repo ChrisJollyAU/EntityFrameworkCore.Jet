@@ -489,6 +489,39 @@ public class PageLockStatementTests
         AssertNothingLocked(other, copy.Path);
     }
 
+    // Once switched on, an UPDATE that only reads another table — in a subquery, or a foreign key's parent it checks — does
+    // not rewrite MSysObjects' definition page; one through a join does, writing one of the tables or both (measured, ACE
+    // 16: UPDATE … WHERE Id IN (SELECT Id FROM U15) and UPDATE C15 SET P = 2 left page 2 alone; UPDATE … INNER JOIN U15
+    // … SET LockT.Txt locked and wrote it).
+    [Fact]
+    public void Once_switched_on_an_UPDATE_reading_another_table_leaves_the_catalog_definition_page_and_one_through_a_join_rewrites_it()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        CreateTwoRows(engine, database);
+        engine.ExecuteNonQuery("CREATE TABLE U (Id INTEGER CONSTRAINT pkU PRIMARY KEY, V INTEGER)");
+        engine.ExecuteNonQuery("INSERT INTO U (Id, V) VALUES (1, 0)");
+        engine.ExecuteNonQuery("INSERT INTO U (Id, V) VALUES (2, 0)");
+        engine.ExecuteNonQuery("CREATE TABLE C (Id INTEGER, P INTEGER, CONSTRAINT fkC FOREIGN KEY (P) REFERENCES U (Id))");
+        engine.ExecuteNonQuery("INSERT INTO C (Id, P) VALUES (1, 1)");
+        int objects = CatalogDefinition(database, "MSysObjects");
+
+        byte marked = MarkLastByte(copy.Path, objects);
+        Assert.Equal(2, engine.ExecuteNonQuery("UPDATE T SET A = 'sub' WHERE Id IN (SELECT Id FROM U)"));
+        Assert.Equal(1, engine.ExecuteNonQuery("UPDATE C SET P = 2 WHERE Id = 1"));
+        Assert.Equal(marked, LastByte(copy.Path, objects));
+
+        Assert.Equal(2, engine.ExecuteNonQuery("UPDATE T INNER JOIN U ON T.Id = U.Id SET T.A = 'join'"));
+        Assert.NotEqual(marked, LastByte(copy.Path, objects));
+        marked = MarkLastByte(copy.Path, objects);
+        Assert.Equal(2, engine.ExecuteNonQuery("UPDATE T INNER JOIN U ON T.Id = U.Id SET T.A = 'both', U.V = 1"));
+        Assert.NotEqual(marked, LastByte(copy.Path, objects));
+        using JetLockFile other = OtherUserOf(copy.Path);
+        AssertNothingLocked(other, copy.Path);
+    }
+
     // The lock is held for the statement: a row-by-row DELETE waiting on its second row (a chained memo another user is
     // reading) holds MSysObjects' definition page meanwhile, taken for its first row; before the session's CREATE TABLE it
     // holds none.

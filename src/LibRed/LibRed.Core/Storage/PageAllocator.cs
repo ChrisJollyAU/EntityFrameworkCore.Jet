@@ -130,6 +130,10 @@ internal sealed class PageAllocator
 
     internal PageAllocator(PageChannel channel) => _channel = channel;
 
+    // How many rounds of retries a close alone on the file makes for page 1 before it gives up (ReturnReleasedPages):
+    // ACE's made three and was granted in the third (measured); how many it makes in all is not measured.
+    private const int CloseRounds = 3;
+
     /// <summary>
     /// Allocates a fresh page by growing the file by one page, returning its number. Jet also
     /// recycles freed pages via usage maps; appending at the end is always valid since the page
@@ -428,7 +432,8 @@ internal sealed class PageAllocator
     /// <summary>Returns a page to the global free-pages map now (sets its bit), so it can be reused — the
     /// inverse of <see cref="Allocate"/>. ACE frees this way only a chained long value's pages, when an UPDATE
     /// replaces the value or a DELETE removes its row, and the page such an UPDATE takes unwritten — and those only in
-    /// a statement on its own with no other user connected; every other freed page is held, through
+    /// a statement on its own with no other user connected and page 1 to be had (<see cref="FreeWhileAlone"/>); every
+    /// other freed page is held, through
     /// <see cref="Release"/> (page-05 §9.1). It also gives back pages taken and not used: a reservation's, a group's, a
     /// rollback's.</summary>
     public void Free(int page)
@@ -502,7 +507,9 @@ internal sealed class PageAllocator
     /// groups go back to the free map, and the released map is first sized to cover the pages it is to hold or merge
     /// (<see cref="SizeReleasedMap"/>), which can convert it to reference form. A close that holds nothing — an idle
     /// one included — still merges a released map another user's close left, when alone (measured); it writes nothing
-    /// when there is nothing to merge or hold.
+    /// when there is nothing to merge or hold. Page 1 held by another user past ACE's retries — three rounds of them
+    /// alone, one with another user connected — it gives up and writes nothing, the pages it held left in neither map,
+    /// as ACE's close leaves them (measured).
     /// </summary>
     public void ReturnReleasedPages()
     {
@@ -522,14 +529,36 @@ internal sealed class PageAllocator
             {
                 // Page 1 locked before it is read, as ACE locks it at close (locking.md §3): nothing used here was read
                 // before, so a lock taken after another user committed only means reading it afresh. Alone, ACE's probe
-                // of the other users' bytes is held across that lock and read (measured).
-                MapRecord? released = null;
-                bool alone = _channel.WhileAlone(() => (_, released) = ReadGlobalMaps(refuseStale: false));
-                if (!alone) (_, released) = ReadGlobalMaps(refuseStale: false);
+                // of the other users' bytes is held across that lock and read (measured). Refused past the retries, ACE
+                // alone tries again, a round of retries at a time — three rounds at least (measured; how many in all is
+                // not, and LibRed makes three); with another user connected it makes one. Then it closes writing
+                // nothing: the pages it held are in neither map, unusable until a compact, as ACE leaves them (measured).
+                bool? claimedAlone = null;
+                for (int round = 0; round < CloseRounds && claimedAlone is null; round++)
+                {
+                    bool claimed = false;
+                    if (_channel.WhileAlone(() => claimed = ClaimToGiveBack(refuseStale: false)))
+                        claimedAlone = claimed ? true : null;
+                    else
+                    {
+                        claimedAlone = ClaimToGiveBack(refuseStale: false) ? false : null;
+                        break;
+                    }
+                }
+                if (claimedAlone is not { } alone)
+                {
+                    _reservationBits = 0;
+                    _owners.Clear();
+                    _bitmapSlot = 0;
+                    _channel.ClearPagesReleasedAtClose();
+                    if (ownTransaction) _channel.CommitTransaction(flush: false);   // writes nothing of page 1
+                    return false;
+                }
+                (_, MapRecord released) = ReadGlobalMaps(refuseStale: false);
                 // Every bit kept, none bounded by the file: a page past its end is one taken unwritten, or never
                 // materialized (below).
                 SortedSet<int> pages = [.. held];
-                pages.UnionWith(UsageMap.PagesInRecord(_channel, released!.Record, rejectBeyond: null, "The global released-pages map"));
+                pages.UnionWith(UsageMap.PagesInRecord(_channel, released.Record, rejectBeyond: null, "The global released-pages map"));
                 if ((alone ? pages : held).Count == 0 && _reservationBits == 0 && _groups.Count == 0)
                 {
                     if (ownTransaction) _channel.CommitTransaction(flush: false);   // writes nothing; lets page 1 go
@@ -900,16 +929,44 @@ internal sealed class PageAllocator
             throw new InvalidDataException(
                 $"Page 0 names the same record (page {freePointer.Page}, row {freePointer.Row}) for the global " +
                 "free-pages and released-pages maps; they must be distinct.");
-        if (claim && freePointer.Page > 0 && releasedPointer.Page > 0)
-        {
-            _channel.LockForUpdate(freePointer.Page, refuseStale);
-            _channel.LockForUpdate(releasedPointer.Page, refuseStale);
-        }
+        if (claim) Claim(freePointer.Page, releasedPointer.Page, refuseStale, JetLockPurpose.PageWrite);
 
         MapRecord free = ReadMapRecord("free-pages", freePointer);
         MapRecord released = ReadMapRecord("released-pages", releasedPointer);
         ReferenceBitmapPages(free, released);
         return (free, released);
+    }
+
+    /// <summary>Locks the maps' holder pages, <paramref name="free"/>'s and <paramref name="released"/>'s, for
+    /// <paramref name="purpose"/> (<see cref="PageChannel.LockForUpdate"/>); false when one whose refusal ends in no lock
+    /// was refused.</summary>
+    private bool Claim(int free, int released, bool refuseStale, JetLockPurpose purpose) =>
+        free <= 0 || released <= 0
+        || (_channel.LockForUpdate(free, refuseStale, purpose) && _channel.LockForUpdate(released, refuseStale, purpose));
+
+    /// <summary>Locks the global maps' holder page — page 1 where ACE creates them — to give pages back into the free
+    /// map, as ACE locks it: retried as a page write, and refused once the retries are spent with nothing raised
+    /// (<see cref="JetLockPurpose.GiveBack"/>). False then: nothing is locked, and the caller holds the pages, or leaves
+    /// them, as ACE does (page-05 §9.1).</summary>
+    private bool ClaimToGiveBack(bool refuseStale)
+    {
+        (var free, var released) = ReadMapPointers(_channel.ReadPage(0).Span);
+        return Claim(free.Page, released.Page, refuseStale, JetLockPurpose.GiveBack);
+    }
+
+    /// <summary>Gives pages back at once through <paramref name="giveBack"/> — each <see cref="Free"/>d — as ACE does
+    /// from a statement with no other user connected: under ACE's probe of the other users' bytes
+    /// (<see cref="PageChannel.WhileAlone"/>), page 1 locked first (<see cref="ClaimToGiveBack"/>). False, with nothing
+    /// given back, when another user is connected or page 1 is refused past the retries: ACE then goes on and holds the
+    /// pages to close (measured), and so does the caller (<see cref="Release"/>).</summary>
+    internal bool FreeWhileAlone(Action giveBack)
+    {
+        bool claimed = false;
+        return _channel.WhileAlone(() =>
+        {
+            claimed = ClaimToGiveBack(refuseStale: true);
+            if (claimed) giveBack();
+        }) && claimed;
     }
 
     /// <summary>The free-pages and released-pages map pointers, (row, page), as page 0 names them.</summary>

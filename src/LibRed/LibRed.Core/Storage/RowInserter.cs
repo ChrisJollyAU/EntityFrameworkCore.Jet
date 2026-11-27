@@ -51,11 +51,15 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         // final id drives both the row encoding and the high-water update below. A row refused from here on
         // keeps its drawn ids used, which a rollback writes back (PageChannel.KeepThroughRollback).
         // The definition page is read once: its counters are drawn from and advanced in this one copy, and
-        // nothing between here and UpdateTdefCounters writes that page. It is locked before it is read, and before
-        // any other page of the row is touched, as ACE's INSERT takes the table's definition page first and reads it
-        // again under the lock (locking.md §4): two users never draw from one counter, and a statement that gets the
-        // page only after another user committed is run again before it has done anything else.
-        _channel.LockForUpdate(_table.DefinitionPage);
+        // nothing between here and UpdateTdefCounters writes that page. In a table with an AutoNumber it is locked
+        // before it is read, and before any other page of the row is touched, as ACE's INSERT into such a table takes
+        // the definition page first and reads it again under the lock, retried and refused with 3218 whether the id is
+        // drawn or named (locking.md §4): two users never draw from one counter, and a statement that gets the page
+        // only after another user committed is run again before it has done anything else. A table with none has only
+        // its counts to write, and ACE's INSERT then tries the page once and, refused, writes the row without them
+        // (measured), as a DELETE does: locked at the counting, and read again then.
+        bool counter = _table.Columns.Any(c => c.IsAutoNumber);
+        if (counter) _channel.LockForUpdate(_table.DefinitionPage);
         byte[] tdef = _channel.ReadPageShared(_table.DefinitionPage).Span.ToArray();
         bool[]? generatedAutoNumbers = AssignAutoNumbers(format, values, tdef);
         validate?.Invoke(values);
@@ -92,7 +96,9 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
 
         // Asked before the row's own entries go in, so an index "already has" a key only through another row.
         HashSet<int> newKeys = updateIndexes ? IndexesGainingANewKey(values) : [];
-        UpdateTdefCounters(format, tdef, values, generatedAutoNumbers, newKeys);
+        if (counter) UpdateTdefCounters(format, tdef, values, generatedAutoNumbers, newKeys);
+        else if (_channel.LockForUpdate(_table.DefinitionPage, purpose: JetLockPurpose.DefinitionCounts))
+            UpdateTdefCounters(format, _channel.ReadPageShared(_table.DefinitionPage).Span.ToArray(), values, generatedAutoNumbers, newKeys);
         if (updateIndexes)
             UpdateIndexes(values, new RowId(pageNumber, rowCount));
         _channel.RowAddedOrRemoved(_table.IsSystem);
@@ -195,7 +201,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
             FreeLongValue(column, descriptor, releaseAtClose: true, JetLockPurpose.LongValueReplace);
         // The page taken unwritten goes with the chain: free at once, or held to close (measured, page-05 §9.1).
         if (unwritten.Count != 0 && (_channel.InUserTransaction
-            || !_channel.WhileAlone(() => { foreach (int page in unwritten) _channel.Allocator.Free(page); })))
+            || !_channel.Allocator.FreeWhileAlone(() => { foreach (int page in unwritten) _channel.Allocator.Free(page); })))
             foreach (int page in unwritten) _channel.Allocator.Release(page);
 
         PageBuffer srcPage = _channel.ReadPageShared(id.Page);
@@ -428,10 +434,16 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         }
         finally { ArrayPool<byte>.Shared.Return(page); }
 
+        // The counts last, locked, then read (see Insert). ACE's DELETE tries the definition page once, after the row's
+        // pages; another user holding it, the row goes all the same and the counts are left as the file has them — one
+        // row too many, and each index's total one too high, for good: a later statement counts on from the file's
+        // value, and no close puts it right (measured).
+        // MSysObjects' definition page before it, as ACE's INSERT and its UPDATE through a join lock it before the TDEF.
+        _channel.RowAddedOrRemoved(_table.IsSystem);
         byte[] tdef = ArrayPool<byte>.Shared.Rent(format.PageSize);
         try
         {
-            _channel.LockForUpdate(_table.DefinitionPage);   // its counters: locked, then read (see Insert)
+            if (!_channel.LockForUpdate(_table.DefinitionPage, purpose: JetLockPurpose.DefinitionCounts)) return;
             _channel.ReadPage(_table.DefinitionPage, tdef);
             TableDefinition.WriteRowCount(tdef, format, TableDefinition.ReadRowCount(tdef, format) - 1);
 
@@ -463,7 +475,6 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
             WriteDefinitionCounters(tdef.AsSpan(0, format.PageSize));
         }
         finally { ArrayPool<byte>.Shared.Return(tdef); }
-        _channel.RowAddedOrRemoved(_table.IsSystem);
     }
 
     /// <summary>
@@ -519,14 +530,16 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
     /// <summary>Counts an UPDATE's key change in <paramref name="index"/>'s statistics as ACE does (verified): the
     /// total drops by one, as on a delete, and the unique count is then held to no more than the total. Whether the
     /// old key had another holder does not matter, and the new key advances nothing. A total already reading 0 is
-    /// left alone, as a delete leaves it.</summary>
+    /// left alone, as a delete leaves it. The definition page is tried once, as ACE's UPDATE tries it, and another user
+    /// holding it leaves the counts as the file has them, as a delete's are (see <see cref="Delete"/>).</summary>
     public void CountKeyMoved(IndexDef index)
     {
         JetFormatBase format = _channel.Format;
         byte[] tdef = ArrayPool<byte>.Shared.Rent(format.PageSize);
         try
         {
-            _channel.LockForUpdate(_table.DefinitionPage);   // its counters: locked, then read (see Insert)
+            // Its counters: locked, then read (see Insert).
+            if (!_channel.LockForUpdate(_table.DefinitionPage, purpose: JetLockPurpose.DefinitionCounts)) return;
             _channel.ReadPage(_table.DefinitionPage, tdef);
             (int total, int unique) = TableDefinition.ReadIndexCounts(tdef, format, index.RealIndexOrdinal);
             if (total == 0) return;
@@ -758,9 +771,10 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
             // partially free. The writes themselves are atomic under the caller's transaction (the engine opens
             // one per statement); a direct Core caller without one gets no more than any other multi-page write.
             // Free at once only from a statement on its own with nobody else connected — ACE's probe of the other
-            // users' bytes held while page 1 is locked and read; otherwise held to close (measured, page-05 §9.1).
+            // users' bytes held while page 1 is locked and read — and page 1 had; otherwise held to close (measured,
+            // page-05 §9.1).
             if (_channel.InUserTransaction
-                || !_channel.WhileAlone(() => { foreach (int page in pages) ReleaseLongValuePage(page, owned, free, releaseAtClose: false); }))
+                || !_channel.Allocator.FreeWhileAlone(() => { foreach (int page in pages) ReleaseLongValuePage(page, owned, free, releaseAtClose: false); }))
                 foreach (int page in pages)
                     ReleaseLongValuePage(page, owned, free, releaseAtClose: true);
         }
@@ -1476,7 +1490,9 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
     {
         HashSet<int> gaining = IndexesGainingANewKey(values, refusing);
         if (gaining.Count == 0) return;
-        _channel.LockForUpdate(_table.DefinitionPage);   // its counters: locked, then read (see Insert)
+        // Its counters: locked, then read (see Insert) — held already in a table with an AutoNumber, and tried once in one
+        // with none, as its INSERT tries it.
+        if (!_channel.LockForUpdate(_table.DefinitionPage, purpose: JetLockPurpose.DefinitionCounts)) return;
         WriteNewKeyCounts(_channel.ReadPageShared(_table.DefinitionPage).Span.ToArray(), gaining);
         _channel.AcceptCounters();
     }

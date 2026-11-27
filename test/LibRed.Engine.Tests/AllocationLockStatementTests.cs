@@ -119,6 +119,57 @@ public class AllocationLockStatementTests
         Assert.Equal([1, 2, 4], Ids(engine));
     }
 
+    // The table's definition page held by another user (ACE 16, measured): an INSERT into a table with an AutoNumber —
+    // the id drawn or named, above the counter or below it — is refused it, 21 attempts, 3218; a DELETE, an UPDATE and an
+    // INSERT into a table with no AutoNumber try it once, go ahead at once and leave the counts as the file has them, the
+    // row count one off for good: the next statement counts on from the file's value.
+    [Fact]
+    public void With_the_definition_page_held_only_an_INSERT_with_an_AutoNumber_waits_and_the_others_leave_the_counts()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        (int tdef, _) = CreateTwoRows(engine, database);
+        engine.ExecuteNonQuery("CREATE INDEX ixA ON T (A)");
+        engine.ExecuteNonQuery("CREATE TABLE P (Id LONG, A TEXT(20))");
+        engine.ExecuteNonQuery("INSERT INTO P (Id, A) VALUES (1, 'one')");
+        int plain = database.Catalog.FindTable("P")!.DefinitionPage;
+        using JetLockFile other = OtherUserOf(copy.Path);
+        JetFormatBase format = FormatOf(copy.Path);
+
+        HoldExclusive(other, tdef);
+        foreach (string insert in (string[])["INSERT INTO T (A) VALUES ('three')", "INSERT INTO T (Id, A) VALUES (50, 'fifty')"])
+        {
+            var wait = Stopwatch.StartNew();
+            Assert.Equal(CurrentlyLocked, Assert.Throws<InvalidOperationException>(() => engine.ExecuteNonQuery(insert)).Message);
+            Assert.InRange(wait.ElapsedMilliseconds, 1900, 10_000);
+        }
+
+        byte[] before = ReadRaw(copy.Path, tdef, format);
+        var quick = Stopwatch.StartNew();
+        Assert.Equal(1, engine.ExecuteNonQuery("DELETE FROM T WHERE Id = 2"));
+        Assert.Equal(1, engine.ExecuteNonQuery("UPDATE T SET A = 'moved' WHERE Id = 1"));
+        Assert.InRange(quick.ElapsedMilliseconds, 0, 1500);
+        Assert.Equal(before, ReadRaw(copy.Path, tdef, format));
+        Assert.Equal([1], Ids(engine));
+        ReleaseExclusive(other, tdef);
+
+        HoldExclusive(other, plain);
+        quick.Restart();
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO P (Id, A) VALUES (2, 'two')"));
+        Assert.InRange(quick.ElapsedMilliseconds, 0, 1500);
+        Assert.Equal(1, RowCount(copy.Path, plain));
+        ReleaseExclusive(other, plain);
+        Assert.Equal(2, Convert.ToInt32(engine.ExecuteQuery("SELECT COUNT(*) FROM P").Rows.Single()[0], System.Globalization.CultureInfo.InvariantCulture));
+
+        // Let go, the next DELETE counts on from what the file says: one row too many still.
+        Assert.Equal(2, RowCount(copy.Path, tdef));
+        Assert.Equal(1, engine.ExecuteNonQuery("DELETE FROM T WHERE Id = 1"));
+        Assert.Equal(1, RowCount(copy.Path, tdef));
+        AssertNothingLocked(other, copy.Path);
+    }
+
     // An INSERT inside a transaction, as ACE's (measured, locking.md §5): the table's definition page is written with the
     // AutoNumber drawn and nothing else — not the row count, not the index counts — one more on the slot, and let go,
     // before COMMIT; the row's data page stays held. LibRed writes it as the statement returns, where ACE writes it about

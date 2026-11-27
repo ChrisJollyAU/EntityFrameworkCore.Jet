@@ -369,7 +369,8 @@ parser: the lexer/parser are pre-generated and committed under `LibRed.Sql/Gramm
 > `JetDatabase.BarsNewConnections`; writes its commit slot on
 > page 0 around every batch of page writes; reads the slot table at the start of each statement and drops its
 > cached pages when another user's slot has moved; takes ACE's exclusive page lock when a statement first changes
-> a page (the table's TDEF page first for an INSERT, the global maps' page before reserving pages); and takes
+> a page (the table's TDEF page first for an INSERT into a table with an AutoNumber, the global maps' page before
+> reserving pages); and takes
 > table locks — shared for reads and writes, exclusive for a design change. A refused lock is retried as ACE
 > retries it and then fails with ACE's own message, and a statement that got a lock on a page another user has
 > since changed is rolled back and run again. So LibRed and Access can write one file at the same time.
