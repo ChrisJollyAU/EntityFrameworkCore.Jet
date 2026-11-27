@@ -272,7 +272,8 @@ page each engine takes, and what each goes back to, differ, so the two do not fa
 **Freed pages are released at close, through the released-pages map.** Most pages freed during a session are
 not reusable on the same connection: later allocations in that session grow the file instead, and the free map on
 disk does not change until the file closes (verified). A handle's freed pages are its own business until then:
-on disk they are in neither map, and only the close moves them into the free map. This holds for the data and
+on disk they are in neither map, and only the close moves them into the free map — or, with another user connected,
+into the released map (below). This holds for the data and
 index pages a delete empties, every page of a `DELETE` with no `WHERE` (its long values included), a packed long
 value's page a deleted row or an `UPDATE` empties, a dropped Memo column's long values, the pages of a dropped index — by
 `DROP INDEX`, by `DROP CONSTRAINT` on a foreign key, or by the index rebuild of an `ALTER COLUMN` — and every page
@@ -286,13 +287,40 @@ Two kinds of page are freed sooner (verified):
   are set in the free map at once, and later statements on the same connection reuse them; the `UPDATE` that frees
   them does not. An `UPDATE` replacing a chained value with one that does not chain — null, inline or single-page —
   first takes the long-value page the next request would get, opening a shared reservation if there is none, and
-  frees it with the old chain without writing it: a page past the end of the file stays unwritten.
+  frees it with the old chain without writing it: a page past the end of the file stays unwritten. This is so only
+  for a statement on its own with no other user connected (below). Inside a transaction the chain is held like the
+  rest: its `COMMIT` writes no page 1, and the close frees it; a `ROLLBACK` leaves the row, the chain and both maps
+  as they were.
 - A rewritten definition's **old continuation pages** are set in the free map when the rewriting statement ends,
   so the statement itself does not reuse them and the next one may.
 
-Any page set in the released-pages map is likewise **never allocated**, and at close its pages are merged into
-the free map and the map is left empty. Before that merge, the close sizes the map to cover every page released.
-An inline record that already covers them stays as it is. Otherwise, in order of preference:
+**With another user connected, nothing a statement frees reaches the free map** (verified, ACE 16, beside a second
+idle user). Before it gives a chain back, the user tries to lock every other user's group-0 byte
+([locking.md §3](locking.md#3-user-registration-region-1)); refused, it does not lock or write page 1, and the
+chain's pages — and the page an `UPDATE` took unwritten — are held like every other freed page: in neither global
+map, out of the column's maps, their bytes untouched. At that user's close — another user still connected — every
+page it holds is set in the **released-pages map**, the free map is not given them, and the pages already in the
+released map stay there; the shared reservation's unused pages still go to the free map. The last user's close
+merges the released map into the free map and clears it, as below, an idle close included. Measured for each route:
+
+| Freed by | Alone: at the statement | Alone: at close | With another user: at the statement | With another user: at that user's close | Last user's close |
+|---|---|---|---|---|---|
+| `DELETE` of a row with a chained memo | free map | — | neither map, page 1 not written | released map | free map |
+| `UPDATE` setting a chained memo to a short one (the chain, and the page taken unwritten) | free map | — | neither map | released map | free map |
+| `DELETE … WHERE` emptying data pages | neither map | free map | neither map | released map | free map |
+| `DELETE … WHERE` of rows with single-page memos, emptying their pages | neither map | free map | neither map | released map | free map |
+| `DROP TABLE` | neither map | free map | neither map | released map | free map |
+| `DROP INDEX` | neither map | free map | neither map | released map | free map |
+| `DELETE` in a transaction, committed (data pages, or a chain) | neither map, at the `COMMIT` too | free map | neither map | released map | free map |
+| A transaction's `DELETE` that took a page from the run it reserved, rolled back | page 1 written with the run taken; nothing at `ROLLBACK` | the page taken and the rest of the run: free map | as alone | the page taken: released map; the rest of the run: free map | free map |
+| `DELETE` in a transaction, rolled back (the freed pages) | nothing | nothing | nothing | nothing | nothing |
+
+Any page set in the released-pages map is likewise **never allocated**, and at the last user's close its pages are
+merged into the free map and the map is left empty — by a close that did nothing else, too: one open and close of a
+file whose released map holds a page sets it free and clears the map (verified). Before that merge, the close sizes
+the map to cover every page released. *Unverified:* that a close beside another user sizes it the same way for the
+pages it is to hold — every page measured there already lay inside the record; LibRed sizes it so. An inline record
+that already covers them stays as it is. Otherwise, in order of preference:
 
 - **Lengthen it.** Keeping its start page, the record grows, never shrinks, to the shortest that covers the
   highest page released: 5 header bytes plus `roundUp(⌈(highest + 1 − start) / 8⌉, 4)` bitmap bytes — page 569
@@ -321,8 +349,10 @@ A map already in reference form gains a bitmap page, allocated the same way, for
 page that it has none for — a released table-definition page among the free pages is taken like any other, its
 type becoming `0x0105`. The merge then clears every bitmap page, each keeping its 4-byte header.
 
-So at rest the released-pages map has no bits set, though it may have grown, moved its start page or converted
-to reference form. A non-empty one is *inferred* to be a release interrupted before close.
+So once the last user has closed the released-pages map has no bits set, though it may have grown, moved its start
+page or converted to reference form. Pages set in it are those of users who closed while another user was connected;
+the map holds them until a close with nobody else connected. A non-empty one with nobody connected is *inferred* to
+be a close of that kind that never came — the last user's interrupted.
 
 **Page allocation works through the free-pages map.** Access does **not** simply grow the file: it finds a
 set bit (a free page), **clears it** (marking the page used), and reuses that page — only growing
@@ -368,7 +398,8 @@ refilled: the pages the undone writes took from it go to the free map, and the n
 reservation's next page. Those pages are left free below it, as zero pages once the file has grown past them. The
 undone writes are never on disk — inside a transaction ACE writes only the reservation's bits to the free map,
 about 500 ms after the statement that reserved it and before `COMMIT`; a `ROLLBACK` writes nothing, and the run,
-with the pages the undone writes took, goes back to the free map at close ([locking.md §5](locking.md#5-lifetimes)).
+with the pages the undone writes took, goes back to the free map at close ([locking.md §5](locking.md#5-lifetimes))
+— beside another user, the pages the undone writes took go to the released map instead (§9.1 above).
 This is allocation policy, not an on-disk requirement; see `docs/design/page-allocation.md`.
 
 > LibRed allocates **through** this map (the `PageChannel`'s single `PageAllocator`, which also owns file growth), found as ACE finds it — through page 0's `0x18`
@@ -415,15 +446,25 @@ This is allocation policy, not an on-disk requirement; see `docs/design/page-all
 >
 > **Release at close.** The frees ACE holds go through `Release`, which keeps the page in a list on the handle
 > — staged with the open transaction, kept on commit, dropped on rollback or on a rollback to a savepoint
-> taken before it. Closing a writable `JetDatabase` returns those pages and any already set in the
-> released-pages map to the free map, clears the released map and first sizes it as above, all in one
-> transaction. A close that released nothing and wrote nothing writes
-> nothing. Only an `UPDATE`'s replaced long value goes through `Free` at once — after the new value is written,
-> so, as in ACE, the `UPDATE` that frees those pages does not reuse them (the whole file then matches ACE's).
+> taken before it. A chained long value's pages, and the page an `UPDATE` took unwritten, go through `Free` at once
+> — after the new value is written, so, as in ACE, the `UPDATE` that frees those pages does not reuse them — only
+> from a statement on its own (not one under a user transaction's savepoint) whose probe of the other users' bytes
+> is granted, held while page 1 is locked and read (`PageChannel.WhileAlone`); otherwise they go through `Release`.
+> A rollback beside another user holds the pages its undone writes took, rather than freeing them. Closing a
+> writable `JetDatabase` locks page 1 and, alone, returns the held pages and any already set in the released-pages
+> map to the free map and clears the released map; beside another user it sets the held pages in the released map
+> and leaves the rest of it as it is; either way it first sizes the map as above, gives the reservation back to the
+> free map, and runs in one transaction. A close with nothing held, no reservation and an empty released map writes
+> nothing. A connection that is no Jet user — exclusive, off Windows, no lock file — is alone by definition; two
+> connections of one process are two users and find each other through the probe.
 >
-> **Where LibRed differs from ACE.** Held pages live in the handle, not in the released-pages map — which is
-> ACE's own behaviour (above), the difference being only that each LibRed handle releases its own at its own
-> close, while other handles stay open.
+> **Where LibRed differs from ACE.** A held page lives in the handle, not on disk, until the close — as ACE's
+> does. A rollback alone writes the pages its undone writes took back into the free map at once, where ACE leaves
+> them taken until close; the file ends the same. *Chosen, not measured:* a rewritten definition's old continuation
+> pages beside another user go to the free map at the statement's commit, as alone; a statement that fails beside
+> another user holds the pages its undone writes took, as a rollback does. Page 1's lock refused at close past the
+> retries makes the close throw ACE's 3218 text, its transaction rolled back: the held pages are then in neither map,
+> unreusable until a compact.
 >
 > **Global-map growth.** The inline growth rule in §9 applies, but ACE leaves **4 bytes free in the
 > holder page** before promoting the global map to reference form. With a 69-byte companion row,

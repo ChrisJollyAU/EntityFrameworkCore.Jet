@@ -192,7 +192,10 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         // A chain goes back at once; a single-page value's page this empties is held, as a delete holds it (measured).
         foreach ((ColumnDef column, byte[] descriptor) in replaced)
             FreeLongValue(column, descriptor, releaseAtClose: true, JetLockPurpose.LongValueReplace);
-        foreach (int page in unwritten) _channel.Allocator.Free(page);
+        // The page taken unwritten goes with the chain: free at once, or held to close (measured, page-05 §9.1).
+        if (unwritten.Count != 0 && (_channel.InUserTransaction
+            || !_channel.WhileAlone(() => { foreach (int page in unwritten) _channel.Allocator.Free(page); })))
+            foreach (int page in unwritten) _channel.Allocator.Release(page);
 
         PageBuffer srcPage = _channel.ReadPageShared(id.Page);
         // Written over the old row, as ACE writes it: its fixed bytes, its dropped columns' chunks and their bits
@@ -706,9 +709,10 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
     /// the last value on it (<see cref="ReleasePackedValue"/>).
     /// </summary>
     /// <remarks>
-    /// Measured against ACE on one connection: a chained value's pages are set in the global free map at once,
-    /// whether an UPDATE replaced the value or a DELETE removed its row. A packed value's page an UPDATE or a DELETE
-    /// empties is held until close (<paramref name="releaseAtClose"/>, see <see cref="PageAllocator.Release"/>).
+    /// Measured against ACE: a chained value's pages are set in the global free map at once, whether an UPDATE
+    /// replaced the value or a DELETE removed its row — by a statement on its own, with no other user connected. Inside
+    /// a user's transaction, or with another user connected, they are held until close as a packed value's page an
+    /// UPDATE or a DELETE empties always is (<paramref name="releaseAtClose"/>, see <see cref="PageAllocator.Release"/>).
     /// A chained value is given back under this user's exclusive lock on its first page, for
     /// <paramref name="purpose"/> (<see cref="PageChannel.LockPage"/>).
     /// </remarks>
@@ -751,8 +755,12 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
             // Validation above completes before the first free-map or page mutation, so a malformed chain cannot
             // partially free. The writes themselves are atomic under the caller's transaction (the engine opens
             // one per statement); a direct Core caller without one gets no more than any other multi-page write.
-            foreach (int page in pages)
-                ReleaseLongValuePage(page, owned, free, releaseAtClose: false);
+            // Free at once only from a statement on its own with nobody else connected — ACE's probe of the other
+            // users' bytes held while page 1 is locked and read; otherwise held to close (measured, page-05 §9.1).
+            if (_channel.InUserTransaction
+                || !_channel.WhileAlone(() => { foreach (int page in pages) ReleaseLongValuePage(page, owned, free, releaseAtClose: false); }))
+                foreach (int page in pages)
+                    ReleaseLongValuePage(page, owned, free, releaseAtClose: true);
         }
         finally
         {

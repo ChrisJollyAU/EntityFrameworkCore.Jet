@@ -510,7 +510,8 @@ internal sealed class JetUserRegistration : IDisposable
         bool alone = false;
         try
         {
-            alone = OthersAbsent();
+            alone = TryLockOthers();
+            if (alone) UnlockOthers();
             if (_bars > 0)
             {
                 _bars = 0;
@@ -533,20 +534,32 @@ internal sealed class JetUserRegistration : IDisposable
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* another user has it open */ }
     }
 
-    // The group-0 bytes below and above this user's own, each as one range, taken and released at once.
-    private bool OthersAbsent()
+    /// <summary>ACE's test of whether anyone else is connected (locking.md §3): every other user's group-0 byte, those
+    /// below this user's own as one range and those above as another, each tried once, the second only when the first
+    /// is granted — user 1 tries bytes 2–255 as one range; user 2 tries user 1's byte, and with it refused tries nothing
+    /// more (measured). Granted, both ranges are held, nobody else being connected, until <see cref="UnlockOthers"/>; a
+    /// refusal holds nothing and returns false.</summary>
+    /// <remarks>ACE holds them across its lock and read of page 1 when it gives pages back, at a statement and at close
+    /// (measured), and lets them go before it writes the page.</remarks>
+    public bool TryLockOthers()
     {
-        bool absent = true;
-        if (User > 1) absent &= Probe(JetLockLayout.UserByte(1), User - 1);
-        if (User < JetLockLayout.MaxUserNumber) absent &= Probe(JetLockLayout.UserByte(User + 1), JetLockLayout.MaxUserNumber - User);
-        return absent;
+        long below = JetLockLayout.UserByte(1), above = JetLockLayout.UserByte(User + 1);
+        int belowLength = User - 1, aboveLength = JetLockLayout.MaxUserNumber - User;
+        if (belowLength > 0 && !_lockFile.TryLock(below, belowLength)) return false;
+        if (aboveLength > 0 && !_lockFile.TryLock(above, aboveLength))
+        {
+            if (belowLength > 0) _lockFile.Unlock(below, belowLength);
+            return false;
+        }
+        return true;
     }
 
-    private bool Probe(long offset, long length)
+    /// <summary>Lets go of the other users' group-0 bytes <see cref="TryLockOthers"/> took.</summary>
+    public void UnlockOthers()
     {
-        if (!_lockFile.TryLock(offset, length)) return false;
-        _lockFile.Unlock(offset, length);
-        return true;
+        if (User > 1) _lockFile.Unlock(JetLockLayout.UserByte(1), User - 1);
+        if (User < JetLockLayout.MaxUserNumber)
+            _lockFile.Unlock(JetLockLayout.UserByte(User + 1), JetLockLayout.MaxUserNumber - User);
     }
 }
 

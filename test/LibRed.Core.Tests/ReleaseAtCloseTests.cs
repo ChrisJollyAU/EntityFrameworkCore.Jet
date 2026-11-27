@@ -195,8 +195,11 @@ public class ReleaseAtCloseTests
         finally { TemporaryDatabase.Delete(path); }
     }
 
+    // ACE's open and close of this very file — page 300 set in its released map, nothing else done — sets 300 free and
+    // clears the map, writing page 1 (measured, ACE 16 over OLE DB, a shared open alone). LibRed's read-only close
+    // writes nothing.
     [Fact]
-    public void Pages_already_in_the_released_map_are_merged_by_a_close_that_wrote_but_not_by_an_idle_one()
+    public void Pages_already_in_the_released_map_are_merged_by_a_close_alone_an_idle_one_included()
     {
         string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "release-merge-");
         try
@@ -214,11 +217,10 @@ public class ReleaseAtCloseTests
             }
             TestDatabases.WritePage(path, holderPage, holder);
 
-            using (JetDatabase.Open(path, readOnly: false)) { }
-            Assert.Equal(holder, TestDatabases.ReadPage(path, holderPage));   // an idle writable close changes nothing
+            using (JetDatabase.Open(path)) { }
+            Assert.Equal(holder, TestDatabases.ReadPage(path, holderPage));   // a read-only close changes nothing
 
-            using (var db = JetDatabase.Open(path, readOnly: false))
-                db.CreateTable("Wrote", [new("Id", JetDataType.Int32, 4, IsFixedLength: true)]);
+            using (JetDatabase.Open(path, readOnly: false)) { }
 
             using (var db = JetDatabase.Open(path))
             {
@@ -228,6 +230,212 @@ public class ReleaseAtCloseTests
             }
         }
         finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // ACE beside a second, idle ACE user, deleting a row whose memo is a chained long value (measured, ACE 16): its probe
+    // of the other users' group-0 bytes is refused, so it neither locks nor writes page 1, and the chain's pages are in no
+    // map at all; its close puts them in the released map and leaves the free map alone; the last user's close — an idle
+    // one — moves them into the free map and clears the released map. The other user here is a second JetLockFile handle
+    // holding user 1's bytes, so LibRed is user 2, as ACE's deleting user was.
+    [Fact]
+    public void Beside_another_user_a_deleted_chain_is_held_and_its_close_puts_it_in_the_released_map()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "release-company-");
+        try
+        {
+            int[] chain = CreateChainedRow(path);
+            using (JetLockFile other = OtherUser(path))
+            {
+                using (var db = JetDatabase.Open(path, readOnly: false))
+                {
+                    Assert.Equal(2, db.Channel.UserNumber);
+                    Table table = db.OpenTable("Doc");
+                    byte[] page1 = TestDatabases.ReadPage(path, 1);
+                    table.Delete(table.Rows().WithIds().Single().Id);
+                    Assert.Equal(page1, TestDatabases.ReadPage(path, 1));
+                    (int Row, int Page) owned = Assert.Single(table.Definition.LongValueOwnedMaps.Values);
+                    Assert.Empty(new UsageMap(table.Channel, table.Definition).PagesInMap(owned.Row, owned.Page).Intersect(chain));
+                    Assert.All(chain, page => Assert.False(FreeMapBit(table.Channel, page)));
+                    Assert.Empty(MapPages(table.Channel, Format.ReleasedPagesMapPointerOffset).Intersect(chain));
+                }
+
+                using (var db = JetDatabase.Open(path))
+                {
+                    Assert.All(chain, page => Assert.False(FreeMapBit(db.Channel, page)));
+                    Assert.Superset(chain.ToHashSet(), MapPages(db.Channel, Format.ReleasedPagesMapPointerOffset));
+                }
+            }
+
+            using (JetDatabase.Open(path, readOnly: false)) { }
+            using (var db = JetDatabase.Open(path))
+            {
+                Assert.All(chain, page => Assert.True(FreeMapBit(db.Channel, page)));
+                Assert.All(ReleasedBits(db.Channel), b => Assert.Equal(0, b));
+            }
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // Alone, the same DELETE frees the chain at once and writes page 1 — ACE's probe granted (measured, as above).
+    [Fact]
+    public void Alone_a_deleted_chain_is_free_at_once_and_page_1_is_written()
+    {
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "release-alone-");
+        try
+        {
+            int[] chain = CreateChainedRow(path);
+            using var db = JetDatabase.Open(path, readOnly: false);
+            Table table = db.OpenTable("Doc");
+            byte[] page1 = TestDatabases.ReadPage(path, 1);
+            table.Delete(table.Rows().WithIds().Single().Id);
+            Assert.NotEqual(page1, TestDatabases.ReadPage(path, 1));
+            Assert.All(chain, page => Assert.True(FreeMapBit(table.Channel, page)));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // ACE alone, the same DELETE inside a transaction, committed (measured): the COMMIT writes no page 1 — the chain is in
+    // neither map — and the close sets it in the free map. The engine runs a statement inside a user's transaction under
+    // a savepoint, as here.
+    [Fact]
+    public void A_chain_deleted_inside_a_users_transaction_is_held_to_close_even_alone()
+    {
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "release-transaction-");
+        try
+        {
+            int[] chain = CreateChainedRow(path);
+            using (var db = JetDatabase.Open(path, readOnly: false))
+            {
+                Table table = db.OpenTable("Doc");
+                db.BeginTransaction();
+                Savepoint statement = db.CreateSavepoint();
+                table.Delete(table.Rows().WithIds().Single().Id);
+                db.ReleaseSavepoint(statement);
+                db.Commit(flush: false);
+                Assert.All(chain, page => Assert.False(FreeMapBit(table.Channel, page)));
+            }
+
+            using (var db = JetDatabase.Open(path))
+                Assert.All(chain, page => Assert.True(FreeMapBit(db.Channel, page)));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // A chain freed beside another user in a transaction that rolls back is neither held nor released: the rollback puts
+    // the row and its chain back, and the close has nothing to put in the released map (ACE: a rolled-back DELETE of a
+    // chained value changes nothing, alone or beside another user — measured).
+    [Fact]
+    public void Beside_another_user_a_chain_freed_in_a_rolled_back_transaction_stays_the_rows()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "release-company-rollback-");
+        try
+        {
+            int[] chain = CreateChainedRow(path);
+            byte[] released;
+            using (JetLockFile other = OtherUser(path))
+            {
+                using (var db = JetDatabase.Open(path, readOnly: false))
+                {
+                    Table table = db.OpenTable("Doc");
+                    released = ReleasedBits(table.Channel);
+                    db.BeginTransaction();
+                    table.Delete(table.Rows().WithIds().Single().Id);
+                    db.Rollback();
+                }
+
+                using (var db = JetDatabase.Open(path))
+                {
+                    Assert.Equal(released, ReleasedBits(db.Channel));
+                    Assert.All(chain, page => Assert.False(FreeMapBit(db.Channel, page)));
+                    Table table = db.OpenTable("Doc");
+                    Assert.Equal(20000, ((string)table.Rows().Single()[1]!).Length);
+                    (int Row, int Page) owned = Assert.Single(table.Definition.LongValueOwnedMaps.Values);
+                    Assert.Superset(chain.ToHashSet(), new UsageMap(db.Channel, table.Definition).PagesInMap(owned.Row, owned.Page).ToHashSet());
+                }
+            }
+        }
+        finally
+        {
+            using (JetDatabase.Open(path, readOnly: false)) { }   // the last close, which deletes the lock file
+            TemporaryDatabase.Delete(path);
+        }
+    }
+
+    // Two connections of one process are two Jet users, and each finds the other through the probe: the second's DELETE
+    // holds the chain, its close puts it in the released map, and the first — the last to close, idle — merges it.
+    [Fact]
+    public void Two_connections_in_one_process_find_each_other_through_the_probe()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "release-two-");
+        try
+        {
+            int[] chain = CreateChainedRow(path);
+            JetDatabase first = JetDatabase.Open(path, readOnly: false);
+            try
+            {
+                using (var second = JetDatabase.Open(path, readOnly: false))
+                {
+                    Assert.Equal(2, second.Channel.UserNumber);
+                    Table table = second.OpenTable("Doc");
+                    table.Delete(table.Rows().WithIds().Single().Id);
+                    Assert.All(chain, page => Assert.False(FreeMapBit(table.Channel, page)));
+                }
+                Assert.All(chain, page => Assert.False(FreeMapBit(first.Channel, page)));
+                Assert.Superset(chain.ToHashSet(), MapPages(first.Channel, Format.ReleasedPagesMapPointerOffset));
+            }
+            finally { first.Dispose(); }
+
+            using var db = JetDatabase.Open(path);
+            Assert.All(chain, page => Assert.True(FreeMapBit(db.Channel, page)));
+            Assert.All(ReleasedBits(db.Channel), b => Assert.Equal(0, b));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // The pages another user's close parked in the released map are that user's, until the last close: a close beside
+    // another user, writing and holding pages of its own, adds its own and leaves theirs (measured: with three pages
+    // parked by one ACE user's close, a second ACE user deleting a chained memo and closing beside a third added the
+    // chain's two pages and left the three; the third's close moved all five to the free map).
+    [Fact]
+    public void A_close_beside_another_user_leaves_the_pages_already_in_the_released_map()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        string path = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "release-parked-");
+        try
+        {
+            int[] chain = CreateChainedRow(path);
+            int holderPage;
+            byte[] holder;
+            using (var channel = PageChannel.Open(path, readOnly: true))
+            {
+                (_, holderPage, holder, DataPage.RowSlot slot) = TestDatabases.GlobalMap(channel, Format.ReleasedPagesMapPointerOffset);
+                Span<byte> record = InlineMap(holder, slot);
+                BitmapBits.Set(UsageMap.InlineBits(record, Format), 300 - UsageMap.StartPage(record, Format), true);
+            }
+            TestDatabases.WritePage(path, holderPage, holder);
+
+            using (JetLockFile other = OtherUser(path))
+            {
+                using (var db = JetDatabase.Open(path, readOnly: false))
+                {
+                    Table table = db.OpenTable("Doc");
+                    table.Delete(table.Rows().WithIds().Single().Id);
+                }
+
+                using var reopened = JetDatabase.Open(path);
+                HashSet<int> released = MapPages(reopened.Channel, Format.ReleasedPagesMapPointerOffset);
+                Assert.Equal(chain.Append(300).Order(), released.Order());
+                Assert.False(FreeMapBit(reopened.Channel, 300));
+            }
+        }
+        finally
+        {
+            using (JetDatabase.Open(path, readOnly: false)) { }
+            TemporaryDatabase.Delete(path);
+        }
     }
 
     [Fact]
@@ -379,6 +587,41 @@ public class ReleaseAtCloseTests
     }
 
     // ---------------------------------------------------------------- helpers
+
+    private const string WindowsOnly = "Lock-file registration is Windows-only for now.";
+
+    /// <summary>Creates table Doc with one row whose 20,000-character memo is a chained long value, on a connection
+    /// alone that is then closed; returns the chain's pages.</summary>
+    private static int[] CreateChainedRow(string path)
+    {
+        using var db = JetDatabase.Open(path, readOnly: false);
+        db.CreateTable("Doc",
+            [new("Id", JetDataType.Int32, 4, IsFixedLength: true),
+             new("M", JetDataType.Memo, 0, IsFixedLength: false)]);
+        Table table = db.OpenTable("Doc");
+        table.Insert([1, new string('a', 20000)]);
+        (int Row, int Page) owned = Assert.Single(table.Definition.LongValueOwnedMaps.Values);
+        int[] chain = [.. new UsageMap(table.Channel, table.Definition).PagesInMap(owned.Row, owned.Page)];
+        Assert.True(chain.Length > 1);
+        return chain;
+    }
+
+    /// <summary>Another Jet user of the database: a lock-file handle of its own holding user 1's session and user
+    /// bytes, as an ACE connection that opened first holds them.</summary>
+    private static JetLockFile OtherUser(string path)
+    {
+        JetLockFile other = JetLockFile.Open(JetLockFile.PathFor(path)!, createIfMissing: true);
+        Assert.True(other.TryLock(JetLockLayout.SessionByte(1), 1));
+        Assert.True(other.TryLock(JetLockLayout.UserByte(1), 1));
+        return other;
+    }
+
+    /// <summary>The pages set in the global map whose page-0 pointer is at <paramref name="pointerOffset"/>.</summary>
+    private static HashSet<int> MapPages(PageChannel channel, int pointerOffset)
+    {
+        (_, _, byte[] holder, DataPage.RowSlot slot) = TestDatabases.GlobalMap(channel, pointerOffset);
+        return [.. UsageMap.PagesInRecord(channel, holder.AsSpan(slot.Offset, slot.Length), null, "A global map")];
+    }
 
     /// <summary>A global map's record on its holder page, which these tests expect in inline form.</summary>
     private static Span<byte> InlineMap(byte[] holder, DataPage.RowSlot slot)

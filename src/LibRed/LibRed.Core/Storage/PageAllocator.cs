@@ -18,7 +18,8 @@ namespace LibRed.Storage;
 /// maps are located only through their page-0 pointers, row included — page 1 rows 0 and 1 where ACE creates
 /// them, but ACE follows the pointers wherever they lead (docs/format/page-05-usage-maps.md §9.1).
 /// Freed pages take one of two routes, as ACE's do: <see cref="Free"/> makes a page reusable at once, and
-/// <see cref="Release"/> holds it until <see cref="ReturnReleasedPages"/> runs when the handle closes.
+/// <see cref="Release"/> holds it until <see cref="ReturnReleasedPages"/> runs when the handle closes — and puts it in
+/// the free map, or, with another user connected, in the released map.
 /// </remarks>
 internal sealed class PageAllocator
 {
@@ -76,13 +77,16 @@ internal sealed class PageAllocator
         _dataGroups = new(state.DataGroups);
         _heldUntilCommit = [.. state.HeldUntilCommit];
 
-        // What the undone writes took from the reservation they started with goes to the free map; what the
+        // What the undone writes took from the reservation they started with goes to the free map — or, with another
+        // user connected, is held to close, as ACE's close then puts it in the released map (measured); what the
         // reservation holds that the restored map shows free is reserved again.
         uint taken = state.Start == start ? state.Bits & ~bits : state.Bits;
+        bool alone = taken == 0 && takenEarly.Count == 0 || _channel.WhileAlone();
         for (int bit = 0; bit < 32; bit++)
         {
             if ((taken & 1u << bit) == 0) continue;
-            Free(state.Start + bit);
+            if (alone) Free(state.Start + bit);
+            else Release(state.Start + bit);
             takenEarly.Remove(state.Start + bit);
         }
         (free, released) = ReadGlobalMaps(claim: false);
@@ -91,11 +95,15 @@ internal sealed class PageAllocator
             if ((bits & ~before & 1u << bit) == 0) continue;
             // Unless another handle has committed the page meanwhile: the reservation lets it go. A page this session
             // took early is clear because it took it, and stays reserved.
-            if (FreeBit(start + bit, free) == true) WriteFreeBit(free, released, start + bit, false);
+            if (FreeBit(start + bit, free) == true) WriteMapBit(free, free, released, start + bit, set: false);
             else if (!takenEarly.Contains(start + bit)) _reservationBits &= ~(1u << bit);
         }
         foreach (int page in takenEarly.Order())
-            if (!Reserved(page) && !_groups.Values.Any(g => LowestHeld(g, page) == page)) Free(page);
+        {
+            if (Reserved(page) || _groups.Values.Any(g => LowestHeld(g, page) == page)) continue;
+            if (alone) Free(page);
+            else Release(page);
+        }
     }
 
     /// <summary>Records <paramref name="pages"/> as taken out of the global free map by a publication of the open
@@ -419,8 +427,10 @@ internal sealed class PageAllocator
 
     /// <summary>Returns a page to the global free-pages map now (sets its bit), so it can be reused — the
     /// inverse of <see cref="Allocate"/>. ACE frees this way only a chained long value's pages, when an UPDATE
-    /// replaces the value or a DELETE removes its row, and the page such an UPDATE takes unwritten; every other
-    /// freed page is held, through <see cref="Release"/>.</summary>
+    /// replaces the value or a DELETE removes its row, and the page such an UPDATE takes unwritten — and those only in
+    /// a statement on its own with no other user connected; every other freed page is held, through
+    /// <see cref="Release"/> (page-05 §9.1). It also gives back pages taken and not used: a reservation's, a group's, a
+    /// rollback's.</summary>
     public void Free(int page)
     {
         (MapRecord free, MapRecord released) = ReadGlobalMaps();
@@ -431,41 +441,44 @@ internal sealed class PageAllocator
         // region's, as a reserved page's is.
         ValidateReusablePage(page, "page being freed", free, released,
             reserved || page >= _channel.PageCount ? Math.Max(page, _channel.PageCount - 1) : _channel.PageCount - 1);
-        WriteFreeBit(free, released, page, true);
+        WriteMapBit(free, free, released, page, set: true);
     }
 
-    /// <summary>Sets <paramref name="page"/>'s bit in the global free-pages map, in either form, to
-    /// <paramref name="isFree"/>.</summary>
-    private void WriteFreeBit(MapRecord free, MapRecord released, int page, bool isFree)
+    /// <summary>Sets <paramref name="page"/>'s bit in <paramref name="map"/> — the global free-pages map, or the
+    /// released-pages map, as read with the other (<paramref name="free"/>, <paramref name="released"/>) — in either
+    /// form, to <paramref name="set"/>.</summary>
+    private void WriteMapBit(MapRecord map, MapRecord free, MapRecord released, int page, bool set)
     {
-        if (free.Type == UsageMapType.Reference)
+        if (map.Type == UsageMapType.Reference)
         {
-            WriteReferenceFreeBit(free, released, page, isFree);
+            WriteReferenceMapBit(map, free, released, page, set);
             return;
         }
 
         JetFormatBase format = _channel.Format;
-        int startPage = UsageMap.StartPage(free.Record, format);
-        Span<byte> bitmap = UsageMap.InlineBits(free.Page.AsSpan(free.Slot.Offset, free.Slot.Length), format);
+        int startPage = UsageMap.StartPage(map.Record, format);
+        Span<byte> bitmap = UsageMap.InlineBits(map.Page.AsSpan(map.Slot.Offset, map.Slot.Length), format);
         int bit = page - startPage;
-        // A page the map has no bit for cannot be recorded as free, and dropping it here is how a page is lost
-        // for good — nothing else remembers it. It does not arise in a well-formed file: allocation extends the
-        // map to the file's frontier, and ACE's own map covers its whole file (measured: a 1,761-page file
-        // carries a 229-byte record from page 0, and records pages freed above the original 512-page window).
-        // So this is a malformed or foreign map, and it says so rather than quietly leaking the page.
+        // A page the map has no bit for cannot be recorded, and dropping it here is how a page is lost for good —
+        // nothing else remembers it. It does not arise in a well-formed file: allocation extends the free map to the
+        // file's frontier, and ACE's own map covers its whole file (measured: a 1,761-page file carries a 229-byte
+        // record from page 0, and records pages freed above the original 512-page window); the released map is sized
+        // to its pages first (SizeReleasedMap). So this is a malformed or foreign map, and it says so rather than
+        // quietly leaking the page.
         if (bit < 0 || bit >= bitmap.Length * 8)
             throw new InvalidDataException(
-                $"Cannot record page {page}: the global free-pages map covers pages {startPage} through "
+                $"Cannot record page {page}: the global {map.Name} map covers pages {startPage} through "
                 + $"{startPage + bitmap.Length * 8 - 1}, so the page has no bit in it.");
 
-        BitmapBits.Set(bitmap, bit, isFree);
-        _channel.WritePage(free.PageNumber, free.Page);
+        BitmapBits.Set(bitmap, bit, set);
+        _channel.WritePage(map.PageNumber, map.Page);
     }
 
     /// <summary>
     /// Frees a page the way ACE frees a dropped table, a dropped index, a deleted row's packed long value and
     /// the pages a delete empties: it is not reusable while this handle stays open, and goes back to the global
-    /// free map only when <see cref="ReturnReleasedPages"/> runs at close. Inside a transaction it is released
+    /// free map — or, with another user connected, into the released-pages map — only when
+    /// <see cref="ReturnReleasedPages"/> runs at close. Inside a transaction it is released
     /// only if the transaction commits. With <paramref name="untilCommit"/> it is held only until the statement's
     /// transaction commits, as ACE holds a rewritten definition's old continuation pages — or, outside one, until
     /// close.
@@ -473,22 +486,30 @@ internal sealed class PageAllocator
     public void Release(int page, bool untilCommit = false)
     {
         (MapRecord free, MapRecord released) = ReadGlobalMaps(claim: false);   // only checked: the release is held
-        ValidateReusablePage(page, "page being released", free, released, _channel.PageCount - 1);
+        // A page past the end of the file is one taken unwritten, held as Free would have freed it.
+        ValidateReusablePage(page, "page being released", free, released,
+            page >= _channel.PageCount ? page : _channel.PageCount - 1);
         if (untilCommit) _heldUntilCommit.Add(page);
         else _channel.ReleaseAtClose(page);
     }
 
     /// <summary>
-    /// What ACE does at close: every page this handle released, and every page already set in the global
-    /// released-pages map, goes back to the global free-pages map, and the released map is cleared. First an
-    /// inline released map is sized to cover the highest page released (<see cref="SizeReleasedMap"/>), which
-    /// can convert it to reference form. Writes nothing when nothing was released and this handle changed
-    /// nothing.
+    /// What ACE does at close. Alone on the file, every page this handle released, and every page already set in the
+    /// global released-pages map, goes back to the global free-pages map, and the released map is cleared. With another
+    /// user connected — ACE's probe of the other users' bytes refused (<see cref="PageChannel.WhileAlone"/>) — the pages
+    /// this handle released are set in the released map instead, the free map is not given them, and the pages already
+    /// in the released map stay there, for the last user's close (measured). Either way the shared reservation and the
+    /// groups go back to the free map, and the released map is first sized to cover the pages it is to hold or merge
+    /// (<see cref="SizeReleasedMap"/>), which can convert it to reference form. A close that holds nothing — an idle
+    /// one included — still merges a released map another user's close left, when alone (measured); it writes nothing
+    /// when there is nothing to merge or hold.
     /// </summary>
     public void ReturnReleasedPages()
     {
-        SortedSet<int> pages = [.. _channel.PagesReleasedAtClose];
-        if (pages.Count == 0 && !_channel.HasPublishedWrites && _reservationBits == 0 && _groups.Count == 0) return;
+        SortedSet<int> held = [.. _channel.PagesReleasedAtClose];
+        if (held.Count == 0 && _reservationBits == 0 && _groups.Count == 0
+            && UsageMap.PagesInRecord(_channel, ReadGlobalMaps(claim: false).Released.Record, rejectBeyond: null,
+                "The global released-pages map").Count == 0) return;
 
         // In the file's exclusive scope, as a writing statement runs: the global maps are read, rewritten and
         // committed with no other connection committing between. Outside it, a statement on another connection
@@ -500,34 +521,44 @@ internal sealed class PageAllocator
             try
             {
                 // Page 1 locked before it is read, as ACE locks it at close (locking.md §3): nothing used here was read
-                // before, so a lock taken after another user committed only means reading it afresh.
-                (_, MapRecord released) = ReadGlobalMaps(refuseStale: false);
-                // Every bit kept, none bounded by the file: a released page past its end was never materialized, and
-                // is skipped below.
-                pages.UnionWith(UsageMap.PagesInRecord(_channel, released.Record, rejectBeyond: null, "The global released-pages map"));
-                if (pages.Count == 0 && _reservationBits == 0 && _groups.Count == 0)
+                // before, so a lock taken after another user committed only means reading it afresh. Alone, ACE's probe
+                // of the other users' bytes is held across that lock and read (measured).
+                MapRecord? released = null;
+                bool alone = _channel.WhileAlone(() => (_, released) = ReadGlobalMaps(refuseStale: false));
+                if (!alone) (_, released) = ReadGlobalMaps(refuseStale: false);
+                // Every bit kept, none bounded by the file: a page past its end is one taken unwritten, or never
+                // materialized (below).
+                SortedSet<int> pages = [.. held];
+                pages.UnionWith(UsageMap.PagesInRecord(_channel, released!.Record, rejectBeyond: null, "The global released-pages map"));
+                if ((alone ? pages : held).Count == 0 && _reservationBits == 0 && _groups.Count == 0)
                 {
                     if (ownTransaction) _channel.CommitTransaction(flush: false);   // writes nothing; lets page 1 go
                     return false;
                 }
 
                 // Sized before the merge: a conversion allocates its bitmap pages from the free map as it stands,
-                // without the pages being released.
-                if (pages.Count != 0) SizeReleasedMap(pages);
+                // without the pages being released. With another user connected the map is laid again holding every
+                // page it is to hold, the others' already there among them.
+                if ((alone ? pages : held).Count != 0) SizeReleasedMap(pages);
                 ReturnGroups();
 
-                // A released page past the end of the file was never materialized; the free map already records
-                // every page past the end as free.
-                foreach (int page in pages)
-                    if (page < _channel.PageCount) Free(page);
+                // A page past the end of the file whose bit the free map has is one taken unwritten, and is freed as any
+                // other; one past the map, never materialized, is left: the map grows over it as free.
+                MapRecord free;
+                (free, _) = ReadGlobalMaps();
+                if (alone)
+                    foreach (int page in pages)
+                        if (page < _channel.PageCount || FreeBit(page, free) is not null) Free(page);
                 for (int bit = 0; bit < 32; bit++)
                     if ((_reservationBits & (1u << bit)) != 0) Free(_reservationStart + bit);
                 _reservationBits = 0;
                 _owners.Clear();
                 _bitmapSlot = 0;
 
-                (_, released) = ReadGlobalMaps();
-                ClearReleasedMap(released);
+                (free, released) = ReadGlobalMaps();
+                if (alone) ClearReleasedMap(released);
+                else if (held.Count != 0)
+                    foreach (int page in pages) WriteMapBit(released, free, released, page, set: true);
                 _channel.ClearPagesReleasedAtClose();
                 if (ownTransaction) _channel.CommitTransaction(flush: false);
             }
@@ -829,25 +860,27 @@ internal sealed class PageAllocator
         _channel.WritePage(number, bitmap);
     }
 
-    /// <summary>Sets a page's bit in a reference-type global free map, on the bitmap page for its range, to
-    /// <paramref name="isFree"/>. If that range has no bitmap page (e.g. a page grown past the map's coverage), the
-    /// page is left unrecorded — it simply won't be reused, matching the pre-existing inline-window behaviour.</summary>
-    private void WriteReferenceFreeBit(MapRecord free, MapRecord released, int page, bool isFree)
+    /// <summary>Sets a page's bit in a reference-type global map (<paramref name="map"/>, the free or the released one),
+    /// on the bitmap page for its range, to <paramref name="set"/>. If that range has no bitmap page (e.g. a page grown
+    /// past the map's coverage), the page is left unrecorded — in the free map it simply won't be reused, matching the
+    /// pre-existing inline-window behaviour; the released map is given a bitmap page for each range first
+    /// (<see cref="SizeReleasedMap"/>).</summary>
+    private void WriteReferenceMapBit(MapRecord map, MapRecord free, MapRecord released, int page, bool set)
     {
         JetFormatBase format = _channel.Format;
-        ReadOnlySpan<byte> map = free.Record;
+        ReadOnlySpan<byte> record = map.Record;
         int pagesPerBitmap = format.UsageMapPagesPerBitmapPage;
         int slot = page / pagesPerBitmap;
         if (slot < 0 || slot >= format.UsageMapReferenceSlots) return; // beyond the map's ~2 GB reach
 
-        int bitmapPage = UsageMap.ReferencePointer(map, slot, format);
+        int bitmapPage = UsageMap.ReferencePointer(record, slot, format);
         if (bitmapPage == 0) return; // range has no bitmap page — nothing to record into
 
         int bitInRange = page - slot * pagesPerBitmap;
         byte[] bitmap = ValidateBitmapPage(bitmapPage, free, released);
         if (page == bitmapPage)
-            throw new InvalidDataException($"Usage-map bitmap page {page} cannot be marked globally free.");
-        BitmapBits.Set(UsageMap.BitmapPageBits(bitmap, format), bitInRange, isFree);
+            throw new InvalidDataException($"Usage-map bitmap page {page} cannot be marked in its own map.");
+        BitmapBits.Set(UsageMap.BitmapPageBits(bitmap, format), bitInRange, set);
         _channel.WritePage(bitmapPage, bitmap);
     }
 

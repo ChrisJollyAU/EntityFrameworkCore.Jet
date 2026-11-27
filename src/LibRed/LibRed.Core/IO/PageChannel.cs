@@ -93,8 +93,6 @@ public sealed class PageChannel : IDisposable
     // holds the keys of the conditions `_dependencies` still has.
     private readonly List<(Func<bool> StillHolds, string Violation, object? Key)> _dependencies = [];
     private readonly HashSet<object> _dependencyKeys = [];
-    // Whether anything this channel wrote has been published, so a close knows the session changed the file.
-    private bool _published;
 
     private PageChannel(FileStream stream, JetFormatBase format, bool readOnly, bool exclusive, string path,
         IPageCodec? codec, ILockManager? locks)
@@ -141,6 +139,10 @@ public sealed class PageChannel : IDisposable
 
     /// <summary>Whether a transaction is currently open on this channel.</summary>
     public bool InTransaction => _active is not null;
+
+    /// <summary>Whether what runs now is a statement inside a user's transaction — under a savepoint of it — rather than
+    /// a statement on its own, whose transaction is its own.</summary>
+    internal bool InUserTransaction => _active is { Depth: > 1 };
 
     /// <summary>Whether this channel was opened read-only, so it can never write a page.</summary>
     internal bool IsReadOnly => _readOnly;
@@ -196,9 +198,6 @@ public sealed class PageChannel : IDisposable
 
     /// <summary>Forgets the held pages once they have been returned to the global free map.</summary>
     internal void ClearPagesReleasedAtClose() => _released.Clear();
-
-    /// <summary>Whether this channel has published a page write since it opened.</summary>
-    internal bool HasPublishedWrites => _published;
 
     private JetFormatBase _format;
     private long _seenSchemaGeneration;
@@ -328,6 +327,24 @@ public sealed class PageChannel : IDisposable
     /// <summary>Bars new connections, or admits them again, through this channel's registration
     /// (<see cref="JetUserRegistration.SetConnectionControl"/>); a channel that is not registered does nothing.</summary>
     internal void SetConnectionControl(bool bar) => _user?.SetConnectionControl(bar);
+
+    /// <summary>Whether no other Jet user is connected, by ACE's probe of the other users' group-0 bytes
+    /// (<see cref="JetUserRegistration.TryLockOthers"/>), and if so runs <paramref name="alone"/> holding them — as ACE
+    /// holds them while it locks and reads page 1 to give pages back (locking.md §3) — and lets them go. With another
+    /// user connected it runs nothing and returns false. A channel that is no Jet user — exclusive, off Windows, no lock
+    /// file — is alone by definition.</summary>
+    internal bool WhileAlone(Action? alone = null)
+    {
+        if (_user is null)
+        {
+            alone?.Invoke();
+            return true;
+        }
+        if (!_user.TryLockOthers()) return false;
+        try { alone?.Invoke(); }
+        finally { _user.UnlockOthers(); }
+        return true;
+    }
 
     /// <summary>Rejects a page number that cannot exist in this file. Page numbers come out of the file
     /// itself, so a bad one is corruption — without this the read seeks past the end and throws
@@ -1257,7 +1274,6 @@ public sealed class PageChannel : IDisposable
             // Write through: the pool now holds the just-written (plaintext) image, so a subsequent read (this
             // channel or any other on the file) sees it without touching disk.
             _cache.Adopt(pageNumber, source);
-            _published = true;
         }
         finally { _locks?.ExitExclusive(pageNumber); }
     }
@@ -1419,7 +1435,7 @@ public sealed class PageChannel : IDisposable
     internal void ReclaimAtCommit(int page, int row)
     {
         _reclaimAtCommit.Add((page, row));
-        if (_active is null || _active.Depth == 1) ReclaimRetiredRecords();
+        if (!InUserTransaction) ReclaimRetiredRecords();
     }
 
     /// <summary>Takes back each retired map record still flagged — a savepoint rollback may have put one back.</summary>
@@ -1572,6 +1588,8 @@ public sealed class PageChannel : IDisposable
         Storage.PageAllocator.AllocationState? allocation = _active.AllocationAt(savepoint);
         var (before, pageCount) = _active.TakeForRollbackTo(savepoint);
         int[] unlocked = RestoreOverlay(before, pageCount);
+        // Before the allocator's rollback, which may itself hold pages the undone writes took (PageAllocator.RollBackTo).
+        _releasing.RemoveRange(releaseCount, _releasing.Count - releaseCount);
         try
         {
             // Locked once the overlay is restored, which lets go of every page the frame first locked: the maps' pages
@@ -1592,7 +1610,6 @@ public sealed class PageChannel : IDisposable
             // another connection's ALTER TABLE until ACE's outer transaction ends (measured).
             Unlock(unlocked);
         }
-        _releasing.RemoveRange(releaseCount, _releasing.Count - releaseCount);
         // The writes that needed them are undone, so the conditions are no longer anything to hold the commit to —
         // and a key they held is free to be registered again by a write made after the rollback.
         _dependencies.RemoveRange(dependencyCount, _dependencies.Count - dependencyCount);

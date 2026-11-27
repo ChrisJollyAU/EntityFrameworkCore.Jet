@@ -117,8 +117,9 @@ Treat the number as of its date — an EF Core version bump moves it.
   `int32`, which ACE does not treat as an error either); unique-index statistics; allocation through the
   global free-pages map; `MSysObjects` / `MSysACEs` catalog rows. `UPDATE`/`DELETE` write in place, relocate
   rows that no longer fit, maintain every index, and reclaim LVAL pages. Freed pages go back to that map
-  when the database closes, as ACE holds them — only an `UPDATE`'s replaced long value is reusable at once,
-  by the statements after it.
+  when the database closes, as ACE holds them — or, with another user connected, into the released-pages map
+  for the last user's close — and only a chained long value an `UPDATE` replaces or a `DELETE` removes is
+  reusable at once, by the statements after it, from a statement on its own with nobody else connected.
   `DROP TABLE` frees every page the table owns: data and long-value pages (each Memo/OLE column's hang off a
   per-column usage map, and are most of a memo-heavy table), every page of every index, the TDEF and its
   continuation pages, and a reference-form map's bitmap pages. It retires each map's records from their
@@ -380,7 +381,10 @@ Format-level detail on each on-disk gap lives in `docs/format/`.
   user."* when the page is not let go within about 6 s), and Access's `UPDATE` of a value LibRed is reading is
   refused with 3202 (measured against ACE 16). Its own `UPDATE` and `DELETE` of a chained value lock the old
   chain's first page as Access's do: an `UPDATE` of a value Access is reading is refused with 3202, and a
-  `DELETE` waits about 2 s, deletes the row and leaves the chain allocated — the same file Access's leaves. A
+  `DELETE` waits about 2 s, deletes the row and leaves the chain allocated — the same file Access's leaves.
+  **Freed pages are never reused under another user**: with anyone else connected — ACE's probe of the other
+  users' bytes — a statement gives no page back to the free map, and the close parks what it freed in the
+  released-pages map for the last user's close to free, as Access does (`page-05-usage-maps.md` §9.1). A
   query's **table locks are held by its result** until the reader is closed, as an open Access reader holds
   them, so Access cannot redesign or drop a table LibRed is still reading, and a table read through the Core API
   is locked while it is read (`docs/format/locking.md` §4, §5). After any user's `CREATE INDEX`, Access refuses reads of that table with 3159

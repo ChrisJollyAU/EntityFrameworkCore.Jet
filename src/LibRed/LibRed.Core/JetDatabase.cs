@@ -816,8 +816,9 @@ public sealed class JetDatabase : IDisposable
     }
 
     /// <summary>Closes the database. A writable handle first returns the pages it released to the global free
-    /// map, as ACE does only at close (docs/format/page-05-usage-maps.md §9.1). A transaction still open is
-    /// discarded, as it would be by the close anyway, so the pages it released stay unreleased.</summary>
+    /// map — or, with another user connected, puts them in the released-pages map — as ACE does only at close
+    /// (docs/format/page-05-usage-maps.md §9.1). A transaction still open is discarded, as it would be by the close
+    /// anyway, so the pages it released stay unreleased.</summary>
     public void Dispose()
     {
         if (_disposed) return;

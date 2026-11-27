@@ -521,6 +521,49 @@ public class AllocationLockStatementTests
         Assert.Equal(1, new QueryEngine(reopened).ExecuteNonQuery("INSERT INTO T (A, M) VALUES ('four', @m)", LongMemo));
     }
 
+    // The same beside another user. ACE beside a second, idle user (measured, ACE 16): a transaction whose DELETE took a
+    // page from the run it reserved, rolled back, then the connection's close — the close puts the page the undone write
+    // took in the released map and gives the rest of the run to the free map; the other user's close, the last, moves
+    // the page to the free map too. The other user is a second JetLockFile handle holding user 1's bytes.
+    [Fact]
+    public void Beside_another_user_a_ROLLBACK_holds_the_pages_its_undone_writes_took_for_the_released_map()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var control = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-control-");
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-alloclock-");
+        foreach (string path in new[] { control.Path, copy.Path })
+            using (JetDatabase database = JetDatabase.Open(path, readOnly: false))
+                CreateTwoRowsWithMemo(new QueryEngine(database), database);
+        JetFormatBase format = FormatOf(copy.Path);
+        HashSet<int> controlFree = MapPages(control.Path, format.FreePagesMapPointerOffset);
+
+        using (JetLockFile other = JetLockFile.Open(JetLockFile.PathFor(copy.Path)!, createIfMissing: true))
+        {
+            Assert.True(other.TryLock(JetLockLayout.SessionByte(1), 1));
+            Assert.True(other.TryLock(JetLockLayout.UserByte(1), 1));
+            using (JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false))
+            {
+                var engine = new QueryEngine(database);
+                engine.ExecuteNonQuery("BEGIN TRANSACTION");
+                engine.ExecuteNonQuery("INSERT INTO T (A, M) VALUES ('three', @m)", LongMemo);
+                engine.ExecuteNonQuery("ROLLBACK");
+                Assert.Equal([1, 2], Ids(engine));
+            }
+
+            HashSet<int> free = MapPages(copy.Path, format.FreePagesMapPointerOffset);
+            HashSet<int> released = MapPages(copy.Path, format.ReleasedPagesMapPointerOffset);
+            Assert.NotEmpty(released);
+            Assert.Empty(released.Intersect(free));
+            Assert.Equal(controlFree.Order(), free.Union(released).Order());
+        }
+
+        using (JetDatabase.Open(copy.Path, readOnly: false)) { }   // the last user's close
+        Assert.Equal(controlFree.Order(), MapPages(copy.Path, format.FreePagesMapPointerOffset).Order());
+        Assert.Empty(MapPages(copy.Path, format.ReleasedPagesMapPointerOffset));
+        using JetDatabase reopened = JetDatabase.Open(copy.Path, readOnly: false);
+        LibRed.Core.Tests.TestDatabases.AssertPageOwnership(reopened);
+    }
+
     // A failed INSERT after one whose run went out early: the savepoint's rollback gives back only what the failed
     // statement took, so the file's maps end as a session that never ran the failed statement leaves them.
     [Fact]
@@ -604,6 +647,14 @@ public class AllocationLockStatementTests
             var table = database.OpenTable("T");
             return (table.Definition.DefinitionPage, table.Rows().WithIds().Select(r => r.Id.Page).Distinct().Single());
         });
+    }
+
+    // The pages set in the global map whose page-0 pointer is at pointerOffset, read on a channel of its own.
+    private static HashSet<int> MapPages(string path, int pointerOffset)
+    {
+        using PageChannel channel = PageChannel.Open(path, readOnly: true);
+        (_, _, byte[] holder, Pages.DataPage.RowSlot slot) = LibRed.Core.Tests.TestDatabases.GlobalMap(channel, pointerOffset);
+        return [.. Storage.UsageMap.PagesInRecord(channel, holder.AsSpan(slot.Offset, slot.Length), null, "A global map")];
     }
 
     // The page holding the global free-pages map (page 1, as ACE creates it).
