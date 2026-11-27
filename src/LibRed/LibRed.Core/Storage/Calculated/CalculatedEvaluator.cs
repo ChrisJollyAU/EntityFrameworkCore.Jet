@@ -68,10 +68,11 @@ internal static class CalculatedEvaluator
     // query's `= True` tests the truth where this compares with -1; a query's
     // written decimal beside a Double result is a Double, outside the expression service a calculated column is always
     // in; a query's `Like '%'` is Is Not Null; a query's written False beside text counts as computed; and a query's IN
-    // with a Null item is Null where this is False (LibRed's decision for queries); a query's bare number column and
-    // IIf compare with text as numbers, where here a column is computed and an IIf takes the kind of the arm it
-    // chooses; and a written number beside written text, which a query compares as numbers, is here an error ACE
-    // caches (see CompareAsKinds). A change to one is made to the other. A CHECK that reads no table, and a DEFAULT,
+    // with a Null item is Null where this is False (LibRed's decision for queries); a query takes a column as written,
+    // so a number column beside a text column or written text is its type mismatch, where here a column is computed
+    // and compares as text; and a written number beside written text, a type mismatch in both, is raised by a query
+    // and cached by ACE as an error here (see CompareAsKinds). An IIf takes the kind of the arm it chooses in both. A
+    // change to one is made to the other. A CHECK that reads no table, and a DEFAULT,
     // compare as this side does, its = True, False, IN and text-beside-a-number rules (measured;
     // ExpressionEvaluator.Stored.RowOnly); a CHECK matches LIKE as a query does (a DEFAULT's LIKE is not measured).
     private static object? Unary(CalcUnary node, Func<string, object?> value, Collation? databaseCollation,

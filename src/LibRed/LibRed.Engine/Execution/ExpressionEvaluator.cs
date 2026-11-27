@@ -851,7 +851,7 @@ internal sealed partial class ExpressionEvaluator(
         var (text, textOperand, plain, plainOperand) = left is string
             ? (left, leftOperand, right, rightOperand) : (right, rightOperand, left, leftOperand);
         if (text is string && (IsNumeric(plain) || plain is DateTime)
-            && Written(textOperand) && Written(plainOperand))
+            && TakenAsWritten(textOperand) && TakenAsWritten(plainOperand))
             throw new InvalidCastException("Data type mismatch in criteria expression.");
 
         (left, right) = ComparedBooleans(left, right);
@@ -908,7 +908,8 @@ internal sealed partial class ExpressionEvaluator(
         return CompareValues(left, right, Text);
 
         Expression? Arm(FunctionCall iif) => IifArm(iif.Arguments);
-        bool Written(Expression operand) => operand is not ParameterExpression && !IsComputed(operand, Arm, subqueryAsColumn);
+        // Neither a parameter nor computed: a column, a written value, an aggregate, an IIf choosing one.
+        bool TakenAsWritten(Expression operand) => operand is not ParameterExpression && !IsComputed(operand, Arm, subqueryAsColumn);
         // The operands ACE's expression service takes as written: a literal, or the arm an IIf takes when that is one.
         bool ServiceWritten(Expression operand) => operand switch
         {
