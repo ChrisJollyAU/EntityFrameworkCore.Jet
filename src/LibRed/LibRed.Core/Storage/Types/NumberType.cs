@@ -76,7 +76,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
             case NumberNode.Choice choice:
                 return Chosen(choice.Arms);
             case NumberNode.Function { Call: var call } function:
-                string name = call.Name.TrimEnd('$').ToUpperInvariant();
+                string name = TextFold.Fold(call.Name.TrimEnd('$'), TextFold.Letters.None, out _);
                 if (name == "CCUR")
                     return new(NumberClass.Currency);
                 if (call.Arguments is [var argument] && name == "SUM")
@@ -129,7 +129,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// <summary>The values a choice picks among — IIf's, Switch's, Choose's, Coalesce's, Greatest's and Least's — or null
     /// for a function (<paramref name="name"/>, as written) that is not one.</summary>
     internal static IEnumerable<TExpression>? ChoiceArms(string name, IReadOnlyList<TExpression> arguments) =>
-        name.TrimEnd('$').ToUpperInvariant() switch
+        TextFold.Fold(name.TrimEnd('$'), TextFold.Letters.None, out _) switch
     {
         "IIF" when arguments.Count == 3 => arguments.Skip(1),
         "SWITCH" => arguments.Where((_, i) => i % 2 == 1),

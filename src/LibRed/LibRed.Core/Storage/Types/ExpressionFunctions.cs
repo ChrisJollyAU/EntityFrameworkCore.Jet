@@ -580,7 +580,9 @@ internal abstract partial class ExpressionFunctions<TExpression>
     /// </summary>
     private static double VbaVal(string s)
     {
-        string t = string.Concat(s.Where(c => c is not (' ' or '\t' or '\r' or '\n')));
+        // The space, tab, CR, LF and the ideographic space U+3000 are skipped wherever they stand (verified vs ACE:
+        // Val of U+3000 then '12' is 12; of a no-break space or an em space then '12', 0).
+        string t = string.Concat(s.Where(c => c is not (' ' or '\t' or '\r' or '\n' or '　')));
         if (t.Length > 1 && t[0] == '&' && (char.ToUpperInvariant(t[1]) is var prefix && prefix is 'H' or 'O'))
         {
             int radix = prefix == 'H' ? 16 : 8;

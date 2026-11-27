@@ -49,6 +49,11 @@ public class VbaValueQueryAccessTests(ITestOutputHelper output) : AceQueryParity
         "Val(ChrW(1635))", "Val('1' & ChrW(1635))", "Val(ChrW(65301))", "Val('2' & ChrW(65301) & '7')", "CDbl(ChrW(1635))",
         "IsNumeric(ChrW(65301))", "IsDate(ChrW(65297) & '/' & ChrW(65298) & '/2024')", "CDate(ChrW(65297) & '/2/2024')",
         "IsDate('1/2/' & ChrW(1634) & '024')",
+        // Val skips the ideographic space as it skips a space, and no other: a no-break space and an em space stop it.
+        "Val(ChrW(12288) & '12')", "Val('1' & ChrW(12288) & '2')", "Val(ChrW(160) & '12')", "Val(ChrW(8195) & '12')",
+        // A function's name is matched by ACE's own case table, the same on every platform: a long s is no s and a
+        // dotless i no i, so these are no functions.
+        "Abſ(-3)", "Mıd('abc', 2)", "aBS(-3)",
         // Case by ACE's own table, as UCase and LCase case (CalculatedExpressionQueryAccessTests.CaseSample).
         .. ((string[])["StrConv({0}, 1)", "StrConv({0}, 2)", "StrConv({0}, 3)", "Format({0}, '<')", "Format({0}, '>')"])
             .SelectMany(f => (string[])[string.Format(System.Globalization.CultureInfo.InvariantCulture, f, "[A]"),
@@ -84,6 +89,8 @@ public class VbaValueQueryAccessTests(ITestOutputHelper output) : AceQueryParity
         // A VBA Boolean as a grouping key and an ordering key is the plain number.
         "SELECT IsNull(A) & '' FROM G GROUP BY IsNull(A) ORDER BY IsNull(A)",
         "SELECT IsNull(A) & '', Id FROM G ORDER BY IsNull(A), Id",
+        // An aggregate's name too: ſum is no Sum.
+        "SELECT ſum(Qty) FROM O",
         "SELECT Max(IsNull(A)) & '' FROM G",
     ];
 

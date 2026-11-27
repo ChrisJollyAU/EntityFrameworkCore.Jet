@@ -148,6 +148,11 @@ decides that is not known, and LibRed writes what Microsoft 365 writes.
 - **Only ASCII digits are digits** (verified vs ACE): to `Val` another digit — Arabic-Indic, full-width — ends the
   number (`Val('1٣')` is 1, `Val('2５7')` 2), text holding one is no date (`IsDate` is False), and a calculated
   column's expression holding one is refused as a syntax error.
+- `Val` skips the space, tab, CR, LF and the ideographic space U+3000 wherever they stand, and no other space: a
+  no-break or em space ends the number (verified vs ACE).
+- **A function's name is matched by ACE's own case table**, the same on every platform: `abs` and `ABS` are `Abs`,
+  but a long s or a dotless i is no s or i, so `Abſ` and `ſum` are undefined functions, in a query and a
+  calculated column alike (verified vs ACE).
 - **`UCase`, `LCase`, `StrConv` 1–3 and `Format`'s `<` and `>` case by ACE's own table**, the one `LIKE` folds by
   (verified vs ACE over every BMP character but the surrogates): 973 pairs, and every other character left as it
   is — Cherokee, `ı`, `İ`, `ß`, `µ`, `ǅ` and `ς` among them, which a runtime's casing changes.

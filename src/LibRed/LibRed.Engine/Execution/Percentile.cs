@@ -14,7 +14,7 @@ internal static class Percentile
     /// <summary>The declared type: PERCENTILE_DISC returns one of the values, so has the ORDER BY key's type;
     /// PERCENTILE_CONT interpolates, giving a Double, or a date for dates.</summary>
     public static Type? ResultType(string name, Type? key) =>
-        name.Equals("PERCENTILE_DISC", StringComparison.OrdinalIgnoreCase) ? key
+        Storage.Types.TextFold.Fold(name, Storage.Types.TextFold.Letters.None, out _) is "PERCENTILE_DISC" ? key
         : key == typeof(DateTime) ? typeof(DateTime)
         : typeof(double);
 

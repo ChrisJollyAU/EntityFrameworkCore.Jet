@@ -64,13 +64,12 @@ internal static class CalculatedExpression
     /// Expression Builder offers.</summary>
     private static readonly HashSet<string> Accepted =
     [
-        with(StringComparer.OrdinalIgnoreCase),
-        "Abs", "Sgn", "Int", "Fix", "Round", "Sqr", "Exp", "Log", "Sin", "Cos", "Tan", "Atn",
-        "Len", "LCase", "UCase", "Trim", "Left", "Right", "Mid", "InStr", "Space", "String", "Str", "Asc",
-        "DateSerial", "TimeSerial", "Year", "Month", "Day", "Hour", "Minute", "Second", "Weekday",
-        "MonthName", "WeekdayName",
-        "IIf", "Choose", "IsNull", "IsEmpty", "CDbl",
-        "Pmt", "FV", "PV", "NPer", "Rate", "IPmt", "PPmt", "SLN", "SYD", "DDB",
+        "ABS", "SGN", "INT", "FIX", "ROUND", "SQR", "EXP", "LOG", "SIN", "COS", "TAN", "ATN",
+        "LEN", "LCASE", "UCASE", "TRIM", "LEFT", "RIGHT", "MID", "INSTR", "SPACE", "STRING", "STR", "ASC",
+        "DATESERIAL", "TIMESERIAL", "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "WEEKDAY",
+        "MONTHNAME", "WEEKDAYNAME",
+        "IIF", "CHOOSE", "ISNULL", "ISEMPTY", "CDBL",
+        "PMT", "FV", "PV", "NPER", "RATE", "IPMT", "PPMT", "SLN", "SYD", "DDB",
     ];
 
     /// <summary>Parses <paramref name="expression"/> and checks it is one ACE would accept for a column named
@@ -98,7 +97,8 @@ internal static class CalculatedExpression
                         + "a column of this one.");
                 // A '$' form is accepted exactly where its plain name is (verified vs ACE: the nine below, and no
                 // other function's '$' form).
-                case CalcCall f when !Accepted.Contains(f.Name.TrimEnd('$')):
+                // The name upper-cased by ACE's own table, as a query's is: Abſ is no Abs (verified vs ACE).
+                case CalcCall f when !Accepted.Contains(Types.TextFold.Fold(f.Name.TrimEnd('$'), Types.TextFold.Letters.None, out _)):
                     throw new CalculatedExpressionException(
                         $"The expression {f.Name} cannot be used in a calculated column.");
             }

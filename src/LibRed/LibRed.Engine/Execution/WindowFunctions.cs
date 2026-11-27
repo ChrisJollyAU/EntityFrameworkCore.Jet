@@ -63,7 +63,7 @@ internal static class WindowFunctions
     private static readonly WindowFunctionDef LastValue = new(1, 1, static t => t.ArgumentType(0),
         static (p, o) => FrameValue(p, o, fromLast: true), WindowOptions.Frame | WindowOptions.NullTreatment);
 
-    private static readonly Dictionary<string, WindowFunctionDef> Registry = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly Dictionary<string, WindowFunctionDef> Registry = new(StringComparer.Ordinal)
     {
         // Position within the partition, 1-based. The only window function EF Core emits.
         ["ROW_NUMBER"] = new(0, 0, static _ => typeof(int),
@@ -356,10 +356,12 @@ internal static class WindowFunctions
     /// OVER clause that this returns false for is a parse-level window function the engine has no evaluator
     /// for — <see cref="Lookup"/> then reports it by name.</summary>
     public static bool IsWindowFunction(string name) =>
-        Registry.ContainsKey(name) || RunningAggregate.Supports(name.ToUpperInvariant());
+        Storage.Types.TextFold.Fold(name, Storage.Types.TextFold.Letters.None, out _) is var upper
+        && (Registry.ContainsKey(upper) || RunningAggregate.Supports(upper));
 
     public static WindowFunctionDef Lookup(string name) =>
-        Registry.TryGetValue(name, out WindowFunctionDef? def) ? def
-        : RunningAggregate.Supports(name.ToUpperInvariant()) ? Aggregate(name.ToUpperInvariant())
+        Storage.Types.TextFold.Fold(name, Storage.Types.TextFold.Letters.None, out _) is var upper
+            && Registry.TryGetValue(upper, out WindowFunctionDef? def) ? def
+        : RunningAggregate.Supports(upper) ? Aggregate(upper)
         : throw new NotSupportedException($"Window function '{name}' is not supported.");
 }

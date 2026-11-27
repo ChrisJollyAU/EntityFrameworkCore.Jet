@@ -128,7 +128,7 @@ internal sealed class LocaleTailoring
         // Doubling is tested first, so it does not depend on whether the locale also tailors the single
         // letter: "ggy" is g followed by the digraph gy, and weighs as that digraph twice.
         if (DoublesDigraphs && start + 2 < text.Length &&
-            char.ToUpperInvariant(text[start]) == char.ToUpperInvariant(text[start + 1]) &&
+            Upper(text[start]) == Upper(text[start + 1]) &&
             TryLongest(text, start + 1, out weight, out consumed) && consumed >= 2)
         {
             consumed += 1;
@@ -180,15 +180,23 @@ internal sealed class LocaleTailoring
         }
     }
 
-    /// <summary>The entry for <paramref name="key"/> as written, else for its invariant uppercase — the order
-    /// the class remarks give, which lets a locale disagree with invariant casing.</summary>
+    /// <summary>The entry for <paramref name="key"/> as written, else for its upper case (<see cref="Upper"/>) — the
+    /// order the class remarks give, which lets a locale disagree with that casing.</summary>
     private bool TryGet(ReadOnlySpan<char> key, out TailoredWeight weight)
     {
         if (_bySpan.TryGetValue(key, out weight)) return true;
         Span<char> upper = stackalloc char[key.Length];
-        key.ToUpperInvariant(upper);
+        for (int i = 0; i < key.Length; i++) upper[i] = Upper(key[i]);
         return _bySpan.TryGetValue(upper, out weight);
     }
+
+    /// <summary>A character in upper case as a tailoring matches it: by ACE's own case table, which leaves a long s a
+    /// letter of its own, but a titlecase letter in its upper case (verified vs ACE: in a Hungarian database <c>ſz</c>
+    /// keys as <c>ſ</c> then <c>z</c>, not as <c>sz</c>; in a Croatian one <c>ǅ</c>, <c>ǈ</c> and <c>ǋ</c> key as
+    /// <c>Ǆ</c>, <c>Ǉ</c> and <c>Ǌ</c>).</summary>
+    private static char Upper(char c) =>
+        char.GetUnicodeCategory(c) == System.Globalization.UnicodeCategory.TitlecaseLetter ? char.ToUpperInvariant(c)
+        : Types.TextFold.FoldChar(c);
 }
 
 /// <summary>

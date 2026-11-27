@@ -172,7 +172,7 @@ internal static class CalculatedEvaluator
         Func<string, ColumnDef?> definition) => operand switch
         {
             CalcLiteral => true,
-            CalcCall call when call.Name.Equals("IIf", StringComparison.OrdinalIgnoreCase) => Written(
+            CalcCall call when TextFold.Fold(call.Name.TrimEnd('$'), TextFold.Letters.None, out _) is "IIF" => Written(
                 new Functions(value, databaseCollation, definition).IifArm(call.Arguments)!,
                 value, databaseCollation, definition),
             _ => false,
@@ -214,7 +214,7 @@ internal static class CalculatedEvaluator
         Func<string, ColumnDef?> definition)
     {
         string name = node.Name;
-        string function = name.TrimEnd('$').ToUpperInvariant();
+        string function = TextFold.Fold(name.TrimEnd('$'), TextFold.Letters.None, out _);
         int count = node.Arguments.Count;
 
         // Mid needs all three arguments in a calculated column, optional in VBA or not; InStr needs three

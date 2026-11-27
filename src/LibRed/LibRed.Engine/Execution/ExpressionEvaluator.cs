@@ -348,7 +348,9 @@ internal sealed partial class ExpressionEvaluator(
 #pragma warning restore IDE0028
         if (!_functions.TryGetValue(f, out string? name))
         {
-            name = f.Name.ToUpperInvariant();
+            // Upper case by ACE's own table, the same on every platform: a long s or a dotless i is no s or i, so
+            // Abſ and ſum are no functions (verified vs ACE: "Undefined function").
+            name = TextFold.Fold(f.Name, TextFold.Letters.None, out _);
             if (name.Length > 1 && name[^1] == '$') name = name[..^1];
             if (f.Filter is not null && !Planning.QueryPlanner.IsAggregate(name))
                 throw new InvalidOperationException($"{f.Name} takes no FILTER; only an aggregate does.");
@@ -694,9 +696,9 @@ internal sealed partial class ExpressionEvaluator(
             BinaryExpression { Operator: BinaryOperator.Add or BinaryOperator.Subtract } sum => Span(sum.Left) && Span(sum.Right),
             BinaryExpression { Operator: BinaryOperator.Multiply } product => Span(product.Left) != Span(product.Right),
             BinaryExpression { Operator: BinaryOperator.Divide } quotient => Span(quotient.Left) && !Span(quotient.Right),
-            FunctionCall call when call.Name.Equals("IIF", StringComparison.OrdinalIgnoreCase) && call.Arguments.Count >= 2 =>
+            FunctionCall call when TextFold.Fold(call.Name.TrimEnd('$'), TextFold.Letters.None, out _) is "IIF" && call.Arguments.Count >= 2 =>
                 Choice(call.Arguments.Skip(1)),
-            FunctionCall call when call.Name.Equals("COALESCE", StringComparison.OrdinalIgnoreCase) => Choice(call.Arguments),
+            FunctionCall call when TextFold.Fold(call.Name.TrimEnd('$'), TextFold.Letters.None, out _) is "COALESCE" => Choice(call.Arguments),
             CaseExpression @case => Choice(@case.WhenClauses.Select(w => w.Result)
                 .Concat(@case.ElseResult is { } otherwise ? [otherwise] : [])),
             _ => false,
@@ -746,7 +748,7 @@ internal sealed partial class ExpressionEvaluator(
                         factor = factor != 0 ? 1 / factor : throw new DivideByZeroException("Division by zero.");
                     return TimeSpan.FromTicks(checked((long)Math.Round(span.Ticks * factor)));
                 }
-            case FunctionCall call when call.Name.Equals("IIF", StringComparison.OrdinalIgnoreCase):
+            case FunctionCall call when TextFold.Fold(call.Name.TrimEnd('$'), TextFold.Letters.None, out _) is "IIF":
                 return IifArm(call.Arguments) is { } arm ? SpanOf(arm) : null;
             case FunctionCall coalesce:
                 foreach (Expression argument in coalesce.Arguments)
@@ -909,7 +911,7 @@ internal sealed partial class ExpressionEvaluator(
         bool ServiceWritten(Expression operand) => operand switch
         {
             LiteralExpression => true,
-            FunctionCall call when call.Name.Equals("IIF", StringComparison.OrdinalIgnoreCase) =>
+            FunctionCall call when TextFold.Fold(call.Name.TrimEnd('$'), TextFold.Letters.None, out _) is "IIF" =>
                 Arm(call) is { } arm && ServiceWritten(arm),
             _ => false,
         };
@@ -940,7 +942,7 @@ internal sealed partial class ExpressionEvaluator(
     {
         LiteralExpression { Value: not false } or ColumnReference or ParameterExpression => false,
         ScalarSubquery when subqueryAsColumn => false,
-        FunctionCall call when call.Name.Equals("IIF", StringComparison.OrdinalIgnoreCase) =>
+        FunctionCall call when TextFold.Fold(call.Name.TrimEnd('$'), TextFold.Letters.None, out _) is "IIF" =>
             iifArm?.Invoke(call) is { } arm && IsComputed(arm, iifArm, subqueryAsColumn),
         FunctionCall call => !Planning.QueryPlanner.IsAggregate(call.Name),
         _ => true,
@@ -1117,7 +1119,7 @@ internal sealed partial class ExpressionEvaluator(
             // (QueryExecutor.UnifiedType), where ACE makes it a Double.
             CaseExpression @case => new NumberNode.Choice(QueryExecutor.CaseResults(@case)),
             FunctionCall { WithinGroup: not null, Arguments: [_, var key] } function
-                when function.Name.Equals("PERCENTILE_DISC", StringComparison.OrdinalIgnoreCase) => new NumberNode.Same(key),
+                when TextFold.Fold(function.Name, TextFold.Letters.None, out _) is "PERCENTILE_DISC" => new NumberNode.Same(key),
             FunctionCall function => new NumberNode.Function(new(function.Name, function.Arguments), () =>
                 declaredType(function) is var returns && returns == typeof(string) ? new(NumberClass.Text, Integers: Most)
                     : returns == typeof(DateTime) ? new(NumberClass.Date, Integers: Most)

@@ -1474,10 +1474,10 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
             // text column; EFCore.Jet writes it for every projected Null, and LibRed keeps such a union typed from its
             // other arm.
             case FunctionCall { Arguments: [var argument] } function
-                when function.Name.TrimEnd('$').Equals("CVAR", StringComparison.OrdinalIgnoreCase):
+                when TextFold.Fold(function.Name.TrimEnd('$'), TextFold.Letters.None, out _) is "CVAR":
                 return argument is LiteralExpression { Value: null } ? Variance.None : Variance.Variant;
             // Access's Nz always gives a Variant, whatever it is given (verified vs Access): Nz(K, 0) writes "0".
-            case FunctionCall function when function.Name.TrimEnd('$').Equals("NZ", StringComparison.OrdinalIgnoreCase):
+            case FunctionCall function when TextFold.Fold(function.Name.TrimEnd('$'), TextFold.Letters.None, out _) is "NZ":
                 return Variance.Variant;
             case ColumnReference reference:
                 return OutputColumn.Find(columns, reference) is { Variant: true } ? Variance.Variant : Variance.None;
@@ -1558,7 +1558,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
                 || expression is BinaryExpression { Operator: BinaryOperator.Add or BinaryOperator.Subtract or BinaryOperator.Multiply }
                     && DeclaredType(expression, columns) == typeof(int)
                     && ExpressionEvaluator.NumberTypeOf(expression, columns, e => DeclaredType(e, columns)).Class == NumberClass.Whole
-                || expression is FunctionCall call && call.Name.Equals("DATEDIFF", StringComparison.OrdinalIgnoreCase)
+                || expression is FunctionCall call && TextFold.Fold(call.Name.TrimEnd('$'), TextFold.Letters.None, out _) is "DATEDIFF"
                 || expression is not ColumnReference && DeclaredType(expression, columns) == typeof(byte)
                 ? DeclaredType(expression, columns) : null, false);
 
@@ -1724,7 +1724,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
 
     private Type? DeclaredFunctionType(FunctionCall function, IReadOnlyList<OutputColumn> columns)
     {
-        string name = function.Name.TrimEnd('$').ToUpperInvariant();
+        string name = TextFold.Fold(function.Name.TrimEnd('$'), TextFold.Letters.None, out _);
         Type? argument = function.Arguments.Count == 0 ? null
             : OperandType(function.Arguments[function.WithinGroup is null ? 0 : ^1], columns);
         // Min, Max, First and Last take a Variant's or a Mixed value's text, and give it (verified vs ACE).
@@ -2968,7 +2968,8 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
         {
             (ColumnReference x, ColumnReference y) => EvalScope.Locate(columns, x, throwIfAmbiguous: false) is var slot
                 && slot >= 0 && slot == EvalScope.Locate(columns, y, throwIfAmbiguous: false),
-            (FunctionCall x, FunctionCall y) => string.Equals(x.Name, y.Name, StringComparison.OrdinalIgnoreCase)
+            (FunctionCall x, FunctionCall y) => string.Equals(TextFold.Fold(x.Name, TextFold.Letters.None, out _),
+                    TextFold.Fold(y.Name, TextFold.Letters.None, out _), StringComparison.Ordinal)
                 && x.Distinct == y.Distinct && (x.WithinGroup ?? []).SequenceEqual(y.WithinGroup ?? [])
                 && (x.Filter is null) == (y.Filter is null),
             (BinaryExpression x, BinaryExpression y) => x.Operator == y.Operator,
@@ -3001,7 +3002,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
         && node.Having is null
         && node.OrderBy.Count == 0
         && node.Projection is [{ Value: FunctionCall { Distinct: false, Filter: null, Arguments: [StarExpression] } call }]
-        && string.Equals(call.Name, "COUNT", StringComparison.OrdinalIgnoreCase);
+        && TextFold.Fold(call.Name, TextFold.Letters.None, out _) is "COUNT";
 
     /// <summary>Counts a row sequence without retaining it. COUNT is an Access Long Integer, so the count is an
     /// <see cref="int"/> — the same type <see cref="GroupAggregate"/> gives, which EF reads with GetInt32.</summary>
@@ -3052,7 +3053,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
                 return call;
             }
         }
-        public string Name { get; } = call.Name.ToUpperInvariant();
+        public string Name { get; } = TextFold.Fold(call.Name, TextFold.Letters.None, out _);
 
         /// <summary>Min, Max, First and Last take a Variant's or a Mixed value's text (verified vs ACE: Max of 3, 10
         /// and 25 held as Variants is "3").</summary>

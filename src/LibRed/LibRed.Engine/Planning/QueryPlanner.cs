@@ -272,7 +272,7 @@ public static class QueryPlanner
     /// <see cref="Execution.RunningAggregate"/>'s — and its ordered-set aggregates PERCENTILE_CONT, PERCENTILE_DISC
     /// and LISTAGG.</summary>
     internal static bool IsAggregate(string name) =>
-        name.ToUpperInvariant() is var upper
+        Storage.Types.TextFold.Fold(name, Storage.Types.TextFold.Letters.None, out _) is var upper
         && (upper is "FIRST" or "LAST" or "PERCENTILE_CONT" or "PERCENTILE_DISC" or "LISTAGG" or "STRING_AGG"
             || Execution.RunningAggregate.Supports(upper));
 

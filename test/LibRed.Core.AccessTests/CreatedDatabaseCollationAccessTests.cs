@@ -179,6 +179,8 @@ public class CreatedDatabaseCollationAccessTests(ITestOutputHelper output)
             "ch", "cch", "chh", "ll", "lll", "llll", "cs", "dz", "dzs", "gy", "ly", "ny", "sz", "ty", "zs",
             "ccs", "ddz", "ggy", "lly", "nny", "ssz", "tty", "zzs", "gyy", "hc", "dzz",
             "lj", "nj", "dž", "ddž", "llj", "nnj", "aa", "aaa", "aab", "baa", "Aa", "AA",
+            // A long s is a letter of its own, no s of a digraph.
+            "ſz", "ſsz", "sſz", "zſ", "aſszony", "ſs",
             // Thai: each leading vowel before a consonant, the reverse order (which must NOT contract), the
             // vowel with nothing to attach to, and words where the contraction meets tone marks.
             "เก", "แก", "โก", "ใก", "ไก", "กเ", "กแ", "กโ", "กใ", "กไ", "เ", "เเ", "เ ", " เ",

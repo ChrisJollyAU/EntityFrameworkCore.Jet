@@ -694,7 +694,10 @@ to `n` bytes, as page-01 stores it. LibRed builds the row and every key from one
       other case mix falls to a shorter match: `cS`, `sZ`, `gY`, `cH`, `lL`, `lJ` and `dŽ` are two letters each,
       Hungarian `dzS` is `dz`+`S`, `dZs` is `d`+`zs` and `DZs` is `DZ`+`s` — while `Cs`, `CS`, `Ch`, `Lj`, `Dž`,
       `Dzs` and `DZS` contract, and so does a doubled `cCs`; a doubled `dDZs` is `dz`+`dz`+`s` (verified in every
-      case mix of every contraction). A contraction can carry a secondary of its own: Croatian `dž` is
+      case mix of every contraction). Case is matched by ACE's own case table — the one `UCase` and `LIKE` use —
+      except that a titlecase letter matches its uppercase: a long s `ſ` is a letter of its own, so Hungarian
+      `ſz` is `ſ` (`6C 06`) then `z` (`78`), never `sz` (`6C 08`), and `ſsz` is `ſ`+`sz`; Croatian `ǅ`, `ǈ` and
+      `ǋ` weigh as `Ǆ`, `Ǉ` and `Ǌ` (verified). A contraction can carry a secondary of its own: Croatian `dž` is
       `50 04` with secondary `04`, Danish `aa` is `å`'s primary with secondary `03`.
     - **Expansion** — one character, several primaries. German Phone Book: `ä` = `7F 4A 51 01 00`, primaries
       `a`+`e` (General has `a` + umlaut secondary); likewise `ö`→`o`+`e`, `ü`→`u`+`e`. Same primitive as
@@ -758,8 +761,8 @@ to `n` bytes, as page-01 stores it. LibRed builds the row and every key from one
 
   **LibRed implements the tailorings below** — `JetLocaleTailoring`, a per-locale override from a character
   or a character sequence (digraph, contraction) to primaries, matched longest-first ahead of the General
-  tables and looked up by the *original* character before the uppercased one (which is what lets Turkish disagree with invariant casing, where `I`
-  is the dotless letter). (Verified.)
+  tables and looked up by the *original* character before the uppercased one, uppercased by the rule above
+  (which is what lets Turkish disagree with that casing, where `I` is the dotless letter). (Verified.)
 
   | order | tailoring |
   |---|---|
