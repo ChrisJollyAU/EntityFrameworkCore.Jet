@@ -56,7 +56,6 @@ internal static class CalculatedExpression
         return node;
     }
 
-    /// <summary>Every column the expression reads, which is what decides whether an UPDATE must recompute.</summary>
     /// <summary>Every function ACE accepts in a calculated column. Measured over all 147 candidates rather
     /// than derived: "deterministic, row-local, no I/O" explains the big exclusions but not the edges, where
     /// <c>Trim</c> is in and <c>LTrim</c>/<c>RTrim</c> are out, <c>Asc</c> is in and <c>Chr</c> is out, and

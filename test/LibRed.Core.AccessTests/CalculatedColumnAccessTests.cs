@@ -708,8 +708,8 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
     }
 
     // ACE cuts a calculated Text result to 243 characters -- what the constant 509-byte declared length holds as
-    // UTF-16 past the 23-byte envelope -- and cuts a result that compresses too. LibRed once stored the whole
-    // result, a row ACE's OLE DB reader then refused. ACE writes row 1, LibRed row 2, and ACE reads both.
+    // UTF-16 past the 23-byte envelope -- and cuts a result that compresses too. ACE writes row 1, LibRed row 2,
+    // and ACE reads both.
     [Theory]
     [InlineData(DbText, "a", 243)]
     [InlineData(DbText, "Ж", 243)]
