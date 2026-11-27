@@ -911,6 +911,8 @@ internal sealed partial class ExpressionEvaluator(
         // Neither a parameter nor computed: a column, a written value, an aggregate, an IIf choosing one.
         bool TakenAsWritten(Expression operand) => operand is not ParameterExpression && !IsComputed(operand, Arm, subqueryAsColumn);
         // The operands ACE's expression service takes as written: a literal, or the arm an IIf takes when that is one.
+        // DELIBERATE DUPLICATE (the owner's decision, 2026-11-28): CalculatedEvaluator.Written is this rule over a
+        // CalcNode, part of the CompareAsKinds pair. A change to one is made to the other.
         bool ServiceWritten(Expression operand) => operand switch
         {
             LiteralExpression => true,

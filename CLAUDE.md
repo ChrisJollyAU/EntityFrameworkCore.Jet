@@ -409,8 +409,9 @@ DUPLICATE` at both sites — a review does not flag them, but a change to one is
   `CompareAsKinds` over the SQL AST, `Binary`/`Unary`/`In`/`CompareAsKinds` over `CalcNode`) and calls the shared
   operator and value helpers in `ExpressionFunctions` (`Concat`, `And`, `Or`, `Not`, `Add`, `Arithmetic`,
   `CompareValues`, `ComparedBooleans`, the Currency steps …). The order of those calls, and the text-column-beside-a-
-  computed-number rule, are written in both; the helpers are not. Where the two differ, ACE does, and the measured
-  differences are listed at `CalculatedEvaluator.Unary`.
+  computed-number rule, are written in both; the helpers are not. So is the predicate each hands `CompareInService`
+  for which operands count as written (`ServiceWritten` in the engine's `CompareAsKinds`, `CalculatedEvaluator.Written`;
+  2026-11-28). Where the two differ, ACE does, and the measured differences are listed at `CalculatedEvaluator.Unary`.
 - **Number literal typing and the signed-number rule.** `CalculatedExpression.ParseInteger`/`ParseNumber` copy
   `AstBuilder`'s in LibRed.Sql, and `CalculatedExpression.ParsePower`/`IsSignedNumber`/`ParseOperand` copy its
   `SignedNumber`/`PowerChain`/`BuildPower` (a minus written against a digit is part of the number; `^` is

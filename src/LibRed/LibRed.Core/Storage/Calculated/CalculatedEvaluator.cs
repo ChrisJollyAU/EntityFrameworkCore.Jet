@@ -169,6 +169,8 @@ internal static class CalculatedEvaluator
     /// that arm is written (measured vs ACE: an IIf takes the kind of the arm it chooses, row by row). Anything else — a
     /// column among them, unlike a query's (ExpressionEvaluator.IsComputed) — the expression computes; and unlike a
     /// query's, a written False is written (measured vs ACE: [A] &lt;&gt; False over text is a type mismatch here).</summary>
+    // DELIBERATE DUPLICATE (the owner's decision, 2026-11-28): ExpressionEvaluator's ServiceWritten, in CompareAsKinds,
+    // is this rule over the SQL AST. A change to one is made to the other.
     private static bool Written(CalcNode operand, Func<string, object?> value, Collation? databaseCollation,
         Func<string, ColumnDef?> definition) => operand switch
         {
