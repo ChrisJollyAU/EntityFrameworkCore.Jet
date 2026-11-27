@@ -398,7 +398,7 @@ over the SQL AST, and `LibRed.Core/Storage/Calculated/CalculatedEvaluator.cs` ov
 The engine's behaviour is the authority, Null propagation included. Neither evaluator implements a function:
 `ExpressionEvaluator` only resolves aggregates, checks FILTER and arity, and supplies `Evaluate`, `Text`,
 `IsCurrency`, `EvaluatePower` and `RandSeed`; `CalculatedEvaluator` only applies the calculated column's gates —
-ACE's whitelist, the `$` refusal, its measured argument counts and the Null arguments whose cached error LibRed
+ACE's whitelist, the nine `$` forms it accepts, its measured argument counts and the Null arguments whose cached error LibRed
 refuses to write — and then calls the shared function. A function change is made in `ExpressionFunctions` and
 nowhere else; adding function logic to either evaluator, or a second copy anywhere, is a hard failure. A
 `PostToolUse` hook reminds on every edit to either evaluator.

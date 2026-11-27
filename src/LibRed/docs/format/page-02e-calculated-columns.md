@@ -13,7 +13,7 @@ Everything here is **measured** against ACE's own behaviour.
 > modify one afterwards; the **SQL/OLE DB** layer cannot declare one but will happily `ALTER` around it, and
 > is the only layer that refuses to write one directly; the **storage engine** enforces the function
 > whitelist, and errors on every read of a column whose expression it dislikes; and Access's **Expression
-> Builder** offers `$` name variants the other three cannot sustain. Several behaviours below are therefore a
+> Builder** offers `$` name variants, of which the storage engine accepts nine. Several behaviours below are therefore a
 > *choice* of which layer to follow — each is flagged where it arises.
 
 ## What LibRed does
@@ -189,8 +189,8 @@ refusal.
 > [functions.md](../functions.md): with no compare argument it searches under the **database's** locale ID
 > (page 0's, sort ID included), and for a compare argument that is Null ACE caches an error its own reader refuses,
 > whatever the strings are. The other three-argument shape, `InStr([A],"a",1)`, is accepted at design
-> time and then caches a value ACE cannot read, because `start` receives a non-numeric — the same trap as the
-> `$` variants and an index on a calculated column.
+> time and then caches a value ACE cannot read, because `start` receives a non-numeric — the same trap as an
+> index on a calculated column.
 
 But the rule is **not universal**, whatever the article says. `Weekday([D1])`, `MonthName(1)`,
 `WeekdayName(1)` and `Round([Price])` are all accepted with their optionals omitted. So it is per-function,
@@ -248,7 +248,7 @@ operator and value helpers live once, in Core's `ExpressionFunctions<TExpression
 from it — the engine's `ExpressionEvaluator` over the SQL AST, Core's `CalculatedEvaluator` over the
 calculated column's own parse tree — so one formula cannot answer differently through SQL than through a
 calculated column. `CalculatedEvaluator` implements no function; it applies what is the calculated column's
-alone — ACE's whitelist, the `$` refusal, the measured argument counts, and the Null arguments whose cached
+alone — ACE's whitelist, the nine `$` forms it accepts, the measured argument counts, and the Null arguments whose cached
 error LibRed refuses to write — and then calls the shared one. Each evaluator walks its own tree, and the
 subset stays semantically its own language — the Access *expression service*, not Access SQL.
 
@@ -260,7 +260,7 @@ write-side guard in `TableDefinition` may demand that a map's owner be Memo/OLE.
 `SchemaEditor.RaiseFormatFor`, raising the file rather than refusing, as for `BIGINT`/`DATETIME2`.
 
 **Validation runs before anything is written** (`CalculatedExpression.ParseValidated`): the whitelist above,
-plus self-reference, an unknown column, and the `$` name variants. It is mandatory rather than a courtesy —
+plus self-reference, an unknown column, and the `$` form of any function but those nine. It is mandatory rather than a courtesy —
 an expression ACE rejects does not produce a merely odd file, it produces a column ACE refuses to read at
 all. Measured end to end: ACE accepts, evaluates and *recomputes* a column LibRed authored, for every result
 type including a spilled Memo.

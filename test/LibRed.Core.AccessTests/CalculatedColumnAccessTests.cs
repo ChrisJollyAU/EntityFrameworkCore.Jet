@@ -592,6 +592,7 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
     [InlineData("TypeName([Qty])", "cannot be used")]
     [InlineData("[Qty]*٣", "Unexpected character")]  // an Arabic-Indic three: ACE's syntax error (see below)
     [InlineData("Abſ([Qty])", "cannot be used")]     // Abs with a long s: no function ACE knows
+    [InlineData("Abs$([Qty])", "cannot be used")]          // a '$' form VBA has no such function for
     [InlineData("Now()+0", "cannot be used")]              // volatile
     [InlineData("[C]*2", "refers to itself")]
     [InlineData("[Missing]*2", "refers to another table")]

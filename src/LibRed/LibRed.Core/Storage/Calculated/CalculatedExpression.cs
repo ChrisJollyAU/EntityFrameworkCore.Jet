@@ -72,6 +72,10 @@ internal static class CalculatedExpression
         "PMT", "FV", "PV", "NPER", "RATE", "IPMT", "PPMT", "SLN", "SYD", "DDB",
     ];
 
+    /// <summary>The accepted functions whose '$' form ACE accepts too, the VBA ones that have one; every other '$' form
+    /// is refused (verified vs ACE: Abs$, IIf$, CDbl$, Year$, InStr$, Len$, Asc$, Round$, Pmt$, IsNull$, Sgn$).</summary>
+    private static readonly HashSet<string> AcceptedDollar = ["LCASE", "LEFT", "MID", "RIGHT", "SPACE", "STR", "STRING", "TRIM", "UCASE"];
+
     /// <summary>Parses <paramref name="expression"/> and checks it is one ACE would accept for a column named
     /// <paramref name="self"/> over <paramref name="columns"/>.
     /// <para>Validation is <b>mandatory</b> before writing, not a courtesy: an expression ACE rejects does not
@@ -95,10 +99,9 @@ internal static class CalculatedExpression
                     throw new CalculatedExpressionException(
                         $"The expression cannot be saved because it refers to another table: '{c.Name}' is not "
                         + "a column of this one.");
-                // A '$' form is accepted exactly where its plain name is (verified vs ACE: the nine below, and no
-                // other function's '$' form).
                 // The name upper-cased by ACE's own table, as a query's is: Abſ is no Abs (verified vs ACE).
-                case CalcCall f when !Accepted.Contains(Types.TextFold.Fold(f.Name.TrimEnd('$'), Types.TextFold.Letters.None, out _)):
+                case CalcCall f when Types.TextFold.Fold(f.Name.TrimEnd('$'), Types.TextFold.Letters.None, out _) is var name
+                    && (!Accepted.Contains(name) || f.Name.EndsWith('$') && !AcceptedDollar.Contains(name)):
                     throw new CalculatedExpressionException(
                         $"The expression {f.Name} cannot be used in a calculated column.");
             }
