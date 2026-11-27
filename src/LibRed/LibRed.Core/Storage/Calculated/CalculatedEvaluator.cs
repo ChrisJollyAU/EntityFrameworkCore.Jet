@@ -73,7 +73,7 @@ internal static class CalculatedEvaluator
     // chooses; and a written number beside written text, which a query compares as numbers, is here an error ACE
     // caches (see CompareAsKinds). A change to one is made to the other. A CHECK that reads no table, and a DEFAULT,
     // compare as this side does, its = True, False, IN and text-beside-a-number rules (measured;
-    // ExpressionEvaluator.Stored.RowOnly), but match LIKE as a query does.
+    // ExpressionEvaluator.Stored.RowOnly); a CHECK matches LIKE as a query does (a DEFAULT's LIKE is not measured).
     private static object? Unary(CalcUnary node, Func<string, object?> value, Collation? databaseCollation,
         Func<string, ColumnDef?> definition)
     {

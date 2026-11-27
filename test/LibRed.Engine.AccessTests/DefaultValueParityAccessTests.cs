@@ -131,11 +131,39 @@ public class DefaultValueParityAccessTests
         {
             JetDatabase.Create(path);
             using (var db = JetDatabase.Open(path, readOnly: false))
-                new QueryEngine(db).ExecuteNonQuery($"CREATE TABLE T (K LONG, V LONG DEFAULT {text})");
+            {
+                new QueryEngine(db).ExecuteNonQuery("CREATE TABLE T (K LONG, V LONG)");
+                db.SetColumnDefault("T", "V", text);
+            }
 
             Assert.Throws<OleDbException>(() => Ace(path, "INSERT INTO T (K) VALUES (1)"));
             using var libred = JetDatabase.Open(path, readOnly: false);
             Assert.Throws<InvalidCastException>(() => new QueryEngine(libred).ExecuteNonQuery("INSERT INTO T (K) VALUES (2)"));
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // And ACE's DDL refuses such a default when it is declared, in CREATE TABLE, ADD COLUMN and ALTER COLUMN alike.
+    [Theory]
+    [InlineData("IIf('abc' <> False, 1, 0)")]
+    [InlineData("IIf('0' <> False, 1, 0)")]
+    [InlineData("IIf('5' = 5, 1, 0)")]
+    public void A_default_comparing_written_text_with_a_written_number_is_refused_when_declared(string text)
+    {
+        string[] statements = [$"CREATE TABLE T (K LONG, V LONG DEFAULT {text})", $"ALTER TABLE U ADD COLUMN W LONG DEFAULT {text}",
+            $"ALTER TABLE U ALTER COLUMN V LONG DEFAULT {text}"];
+        string path = TemporaryDatabase.CreatePath("default-declared-");
+        try
+        {
+            JetDatabase.Create(path);
+            using (var db = JetDatabase.Open(path, readOnly: false))
+                new QueryEngine(db).ExecuteNonQuery("CREATE TABLE U (K LONG, V LONG)");
+            foreach (string statement in statements)
+                Assert.Contains("Type mismatch", Assert.Throws<OleDbException>(() => Ace(path, statement)).Message, StringComparison.Ordinal);
+            using var libred = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(libred);
+            foreach (string statement in statements)
+                Assert.Throws<InvalidCastException>(() => engine.ExecuteNonQuery(statement));
         }
         finally { TemporaryDatabase.Delete(path); }
     }

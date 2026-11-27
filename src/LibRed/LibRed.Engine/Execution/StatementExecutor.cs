@@ -235,8 +235,10 @@ internal sealed class StatementExecutor(JetDatabase database, IReadOnlyDictionar
             expression = ParseDefaultExpression(defaultSql);
             value = DefaultEvaluator().Evaluate(expression);
         }
-#pragma warning disable CA1031 // a default that cannot be evaluated when declared is evaluated, and refused, when a row takes it
-        catch (Exception) { return; }
+        // A type mismatch fails the statement, as ACE's DDL refuses it (verified vs ACE: IIf('abc' <> False, 1, 0) and
+        // IIf('5' = 5, 1, 0) in CREATE TABLE, ADD COLUMN and ALTER COLUMN alike).
+#pragma warning disable CA1031 // any other default that cannot be evaluated when declared is evaluated, and refused, when a row takes it
+        catch (Exception e) when (e is not InvalidCastException) { return; }
 #pragma warning restore CA1031
         JetDataType checkAs = type == JetDataType.Boolean ? JetDataType.Int16 : type;
         // Whether it is a Currency is decided as the insert that applies it decides it (InsertNewRow).

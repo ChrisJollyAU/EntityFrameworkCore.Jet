@@ -506,8 +506,8 @@ internal sealed partial class ExpressionEvaluator(
     // EvaluateBinary, EvaluateInList and CompareAsKinds dispatch the operators over the SQL AST as CalculatedEvaluator's
     // Unary, Binary, In and CompareAsKinds do over a CalcNode, calling the same ExpressionFunctions helpers; where they
     // differ, and why, is listed at CalculatedEvaluator.Unary. A change to one is made to the other. A CHECK that reads
-    // no table, and a DEFAULT (Stored.RowOnly), take the calculated column's side of the comparison differences there,
-    // LIKE aside.
+    // no table, and a DEFAULT (Stored.RowOnly), take the calculated column's side of the comparison differences there;
+    // a CHECK's LIKE is a query's (a DEFAULT's is not measured).
     private object? EvaluateUnary(UnaryExpression u)
     {
         // NOT EXISTS is not the lookup EXISTS is: ACE compares its correlation as written (ExecuteExists).
