@@ -106,6 +106,14 @@ character at both ends, 536,870,911 accepted and 536,870,912 refused.
 | 65 … 3816 bytes | one LVAL page | `0x40` |
 | ≥ 3817 bytes | chained across LVAL pages | `0x00` |
 
+> **A row with no room for its inline values moves them to pages** (measured, INSERT). ACE builds the record with
+> every value of 64 bytes or less inline and, while it is past the 4060-byte record cap, moves the next one still
+> inline, in column order, to a single LVAL page (`0x40`) — the first memo even when a later one is larger, and
+> only as many as the record needs. Memo and OLE values move alike; an empty value is never moved and stays inline
+> (`0x80`, length 0), the next one moving in its place. With none left to move it refuses: "Record is
+> too large." An UPDATE that grows the record past the cap moves nothing and is refused the same way, even where
+> moving a value would let the row fit.
+
 > **3816 is not the same number as the 4076-byte chunk row**: a writer that uses 4076 as its single-page
 > threshold keeps 3817–4076 byte values on one page where ACE chains them. A plain `LONGCHAR` and a
 > `WITH COMP` one behave identically, 1908 characters (3816 bytes) staying single-page and 1909 (3818)

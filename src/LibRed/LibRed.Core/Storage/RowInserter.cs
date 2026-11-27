@@ -74,8 +74,17 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
         // Encode first, to know how much room the record needs.
         var encoder = new RowCodec(_table.Columns, format,
             _table.VariableColumnCount, SpillCalculated, _table.ColumnIdHighWater, databaseCollation: _databaseCollation);
-        byte[] record = encoder.Encode(storage, null, calculated ? values : null,
+        // A calculated result too long to inline goes to a page as it is encoded, so the encodes that only measure
+        // the record — the first, and one after each long value moved for room — stand a descriptor in for it.
+        RowCodec measure = calculated
+            ? new RowCodec(_table.Columns, format, _table.VariableColumnCount,
+                (_, _) => new byte[format.LongValueDescriptorSize], _table.ColumnIdHighWater, databaseCollation: _databaseCollation)
+            : encoder;
+        byte[] Encode(RowCodec codec) => codec.Encode(storage, null, calculated ? values : null,
             slackOf: defaults is null || order is null ? null : InsertSlack(format, defaults, order), written: order);
+        byte[] record = Encode(measure);
+        while (record.Length > format.MaxRecordSize && SpillLongValue(storage)) record = Encode(measure);
+        if (calculated) record = Encode(encoder);
 
         EnsureRecordFits(format, record);
 
@@ -1047,16 +1056,18 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
         };
     }
 
-    /// <summary>The storage form of one Memo/OLE value: a value over 64 bytes is written to an LVAL page and
-    /// becomes its <see cref="LongValueStore.DescriptorValue"/>; anything else — a short value, null, a descriptor already
-    /// built — comes back as it was, for the row codec to inline. For a caller re-laying a single column.</summary>
-    internal object? MaterializeLongValue(ColumnDef column, object? value)
+    /// <summary>The storage form of one Memo/OLE value: a value over 64 bytes, or a shorter one with
+    /// <paramref name="spill"/> (SpillLongValue), is written to an LVAL page and becomes its
+    /// <see cref="LongValueStore.DescriptorValue"/>; anything else — a short value, null, a descriptor already built —
+    /// comes back as it was, for the row codec to inline. For a caller re-laying a single column.</summary>
+    internal object? MaterializeLongValue(ColumnDef column, object? value, bool spill = false)
     {
         LongValueStore? writer = null;
-        return MaterializeLongValue(column, value, ref writer);
+        return MaterializeLongValue(column, value, ref writer, spill);
     }
 
-    private object? MaterializeLongValue(ColumnDef column, object? value, ref LongValueStore? writer)
+    // spill: put a value short enough to inline on a page all the same, one the row has no room for (SpillLongValue).
+    private object? MaterializeLongValue(ColumnDef column, object? value, ref LongValueStore? writer, bool spill = false)
     {
         byte[]? payload = value switch
         {
@@ -1065,7 +1076,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
             _ => null,                                 // null, or an already-built LongValueStore.DescriptorValue
         };
         JetFormatBase format = _channel.Format;
-        if (payload is null || payload.Length <= format.LongValueMaxInline) return value;
+        if (payload is null || payload.Length <= format.LongValueMaxInline && !spill) return value;
 
         // Compress before storing, but AFTER the inline test above and using the uncompressed length for
         // the single-page test below: ACE decides the storage form on the uncompressed size and applies
@@ -1082,6 +1093,21 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table, Co
         definition.LongValueOwnedMaps.TryGetValue(column.ColumnId, out (int Row, int Page) owned);
         definition.LongValueFreeMaps.TryGetValue(column.ColumnId, out (int Row, int Page) free);
         return new LongValueStore.DescriptorValue(StoreLongValue(writer, payload, owned, free, uncompressed));
+    }
+
+    /// <summary>Moves the first memo/OLE value the record still carries inline, in column order, onto a page, for a
+    /// record too large to store: ACE does the same, one value at a time, until the record fits or none is left to
+    /// move, and never moves an empty one (measured, long-values.md). An UPDATE moves none: ACE refuses the grown row
+    /// instead. False when none is left.</summary>
+    private bool SpillLongValue(object?[] storage)
+    {
+        foreach (ColumnDef column in _table.Columns)
+            if (column.Type is JetDataType.Memo or JetDataType.Ole && storage[column.Index] is string { Length: > 0 } or byte[] { Length: > 0 })
+            {
+                storage[column.Index] = MaterializeLongValue(column, storage[column.Index], spill: true);
+                return true;
+            }
+        return false;
     }
 
     // A page is dropped from the free-pages map once it cannot hold a 256-byte value and its row-directory entry

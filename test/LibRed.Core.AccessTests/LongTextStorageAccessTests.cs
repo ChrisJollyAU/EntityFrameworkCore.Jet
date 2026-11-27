@@ -188,6 +188,95 @@ public class LongTextStorageAccessTests(ITestOutputHelper output) : TempDatabase
         Assert.Equal(flag, descriptors[1][3] & 0xC0);
     }
 
+    // A memo short enough to inline goes on a page when the row has no room for it: ACE builds the record with every
+    // such value inline and, while it is past 4060 bytes, moves the next one in column order — the first memo even
+    // when the second is the larger — refusing the row once none is left to move. Eight TEXT(255) columns, seven of
+    // them full and the last of `last` characters, then memos of `m1` and `m2` characters (0 for Null, -1 for an
+    // empty memo, which never moves); the flags are the descriptors' storage bits (0x80 inline, 0x40 page), "too
+    // large" ACE's refusal. Measured across 135 rows.
+    // An UPDATE that grows a row past the cap is refused, nothing moved (measured), as LibRed refuses it too.
+    [Theory]
+    [InlineData(205, 30, 0, "0x80 null")]
+    [InlineData(210, 30, 0, "0x40 null")]
+    [InlineData(225, 30, 0, "too large")]
+    [InlineData(185, 30, 30, "0x80 0x80")]
+    [InlineData(190, 30, 30, "0x40 0x80")]
+    [InlineData(205, 30, 30, "0x40 0x40")]
+    [InlineData(220, 30, 30, "too large")]
+    [InlineData(200, 5, 30, "0x40 0x80")]
+    [InlineData(205, 5, 30, "0x40 0x40")]
+    [InlineData(210, 30, 5, "0x40 0x80")]
+    [InlineData(215, 30, 5, "0x40 0x40")]
+    [InlineData(210, 5, 5, "0x80 0x80")]
+    [InlineData(215, 5, 5, "0x40 0x40")]
+    [InlineData(210, -1, 30, "0x80 0x40")]
+    public void A_short_memo_moves_to_a_page_when_the_row_has_no_room(int last, int m1, int m2, string expected)
+    {
+        string ace = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "memo-spill-ace-");
+        string lib = TemporaryDatabase.CopyPath(TestDatabases.NorthwindAccdb, "memo-spill-lib-");
+        object? Text(int n) => n switch { 0 => null, < 0 => "", _ => new string('a', n) };
+        object?[] row = [1, .. Enumerable.Repeat<object?>(new string('x', 255), 7), new string('y', last), Text(m1), Text(m2)];
+        string? aceResult;
+        try
+        {
+            using (OleDbConnection connection = AceTestDatabase.Open(ace))
+            {
+                using (OleDbCommand ddl = connection.CreateCommand())
+                {
+                    ddl.CommandText = "CREATE TABLE W (Id LONG, " + string.Join(", ", Enumerable.Range(1, 8).Select(i => $"T{i} TEXT(255)"))
+                        + ", M1 MEMO, M2 MEMO)";
+                    ddl.ExecuteNonQuery();
+                }
+                using OleDbCommand insert = connection.CreateCommand();
+                insert.CommandText = "INSERT INTO W VALUES (" + string.Join(", ", Enumerable.Repeat("?", 11)) + ")";
+                for (int i = 0; i < row.Length; i++)
+                    insert.Parameters.Add($"p{i}", i == 0 ? OleDbType.Integer : i > 8 ? OleDbType.LongVarWChar : OleDbType.VarWChar, 255)
+                        .Value = row[i] ?? DBNull.Value;
+                aceResult = Refused(() => insert.ExecuteNonQuery());
+            }
+            OleDbConnection.ReleaseObjectPool();
+
+            string? libResult;
+            using (var db = JetDatabase.Open(lib, readOnly: false))
+            {
+                db.CreateTable("W", [
+                    new ColumnSpec("Id", JetDataType.Int32, 4, IsFixedLength: true),
+                    .. Enumerable.Range(1, 8).Select(i => new ColumnSpec($"T{i}", JetDataType.Text, 510, IsFixedLength: false)),
+                    new ColumnSpec("M1", JetDataType.Memo, 0, IsFixedLength: false),
+                    new ColumnSpec("M2", JetDataType.Memo, 0, IsFixedLength: false)]);
+                libResult = Refused(() => db.OpenTable("W").Insert(row));
+            }
+            Assert.Equal(expected, aceResult ?? Stored(ace));
+            Assert.Equal(expected, libResult ?? Stored(lib));
+        }
+        finally
+        {
+            OleDbConnection.ReleaseObjectPool();
+            TemporaryDatabase.Delete(ace);
+            TemporaryDatabase.Delete(lib);
+        }
+
+        static string? Refused(Action insert)
+        {
+            try { insert(); return null; }
+            catch (Exception e) when (e.Message.StartsWith("Record is too large", StringComparison.Ordinal)) { return "too large"; }
+        }
+
+        // The two memos' storage bits in the row written.
+        static string Stored(string file)
+        {
+            using var database = JetDatabase.Open(file);
+            using var channel = PageChannel.Open(file, readOnly: true);
+            Catalog.TableDefinition definition = database.Catalog.FindTable("W")!;
+            string Flag(string column)
+            {
+                List<byte[]> d = RawDescriptors(channel, definition, definition.Columns.Single(c => c.Name == column).ColumnId);
+                return d.Count == 0 ? "null" : $"0x{d[0][3] & 0xC0:X2}";
+            }
+            return $"{Flag("M1")} {Flag("M2")}";
+        }
+    }
+
     /// <summary>The raw long-value descriptor ACE wrote into the row for one column.</summary>
     private static byte[] RawDescriptor(PageChannel channel, Catalog.TableDefinition definition, int columnId) =>
         RawDescriptors(channel, definition, columnId).FirstOrDefault()
