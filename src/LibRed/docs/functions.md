@@ -145,6 +145,9 @@ decides that is not known, and LibRed writes what Microsoft 365 writes.
 `StrReverse` `StrComp` `StrConv` `Str` `Val` `Chr` `Asc` `Hex` `Oct`
 
 - `Trim`/`LTrim`/`RTrim` strip the space and the ideographic space U+3000 — nothing else.
+- **Only ASCII digits are digits** (verified vs ACE): to `Val` another digit — Arabic-Indic, full-width — ends the
+  number (`Val('1٣')` is 1, `Val('2５7')` 2), text holding one is no date (`IsDate` is False), and a calculated
+  column's expression holding one is refused as a syntax error.
 - **`UCase`, `LCase`, `StrConv` 1–3 and `Format`'s `<` and `>` case by ACE's own table**, the one `LIKE` folds by
   (verified vs ACE over every BMP character but the surrogates): 973 pairs, and every other character left as it
   is — Cherokee, `ı`, `İ`, `ß`, `µ`, `ǅ` and `ς` among them, which a runtime's casing changes.

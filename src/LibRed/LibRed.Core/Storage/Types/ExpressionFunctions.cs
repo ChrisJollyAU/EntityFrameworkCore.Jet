@@ -596,7 +596,9 @@ internal abstract partial class ExpressionFunctions<TExpression>
             return bits <= 0xFFFF ? (short)bits : (int)bits;
         }
 
-        Match number = Regex.Match(t, @"^[+-]?(\d+\.?\d*|\.\d+)([eEdD][+-]?\d+)?");
+        // ASCII digits only: to ACE any other digit is a character that ends the number (verified vs ACE: Val of '1'
+        // and an Arabic-Indic three is 1, of '2', a full-width five and '7' is 2).
+        Match number = Regex.Match(t, @"^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eEdD][+-]?[0-9]+)?");
         if (!number.Success)
             return 0;
         double value = double.Parse(number.Value.Replace('d', 'e').Replace('D', 'e'), NumberStyles.Float, CultureInfo.InvariantCulture);

@@ -120,10 +120,12 @@ public static class VbaDateText
                     tokens.Add(new Token(Kind.DateSeparator, Spacing));
                 i = end;
             }
-            else if (char.IsDigit(c))
+            // ASCII digits only: text with any other digit is no date (verified vs ACE: IsDate of full-width 1/2/2024,
+            // and of 1/2/ with an Arabic-Indic two in the year, is False).
+            else if (char.IsAsciiDigit(c))
             {
                 int start = i;
-                while (i < text.Length && char.IsDigit(text[i])) i++;
+                while (i < text.Length && char.IsAsciiDigit(text[i])) i++;
                 if (i - start > 9)
                     return null;
                 tokens.Add(new Token(Kind.Number, int.Parse(text.AsSpan(start, i - start), CultureInfo.InvariantCulture), i - start));

@@ -45,6 +45,10 @@ public class VbaValueQueryAccessTests(ITestOutputHelper output) : AceQueryParity
         "StrConv(IsNull([A]),1)", "AscW(IsNull([A]))", "AscB(IsNull([A]))", "LenB(IsNull([A]))", "LeftB(IsNull([A]),2)",
         "MidB(IsNull([A]),3,2)", "InStrB(1,IsNull([A]),'e')", "FormatNumber(IsNull([A]))", "FormatCurrency(IsNull([A]))",
         "FormatPercent(IsNull([A]))", "Partition(IsNull([A]),-5,5,2)", "Chr(IsNull([A])+66)",
+        // Digits other than ASCII's — Arabic-Indic three (U+0663), full-width five (U+FF15) — as a number and a date.
+        "Val(ChrW(1635))", "Val('1' & ChrW(1635))", "Val(ChrW(65301))", "Val('2' & ChrW(65301) & '7')", "CDbl(ChrW(1635))",
+        "IsNumeric(ChrW(65301))", "IsDate(ChrW(65297) & '/' & ChrW(65298) & '/2024')", "CDate(ChrW(65297) & '/2/2024')",
+        "IsDate('1/2/' & ChrW(1634) & '024')",
         // Case by ACE's own table, as UCase and LCase case (CalculatedExpressionQueryAccessTests.CaseSample).
         .. ((string[])["StrConv({0}, 1)", "StrConv({0}, 2)", "StrConv({0}, 3)", "Format({0}, '<')", "Format({0}, '>')"])
             .SelectMany(f => (string[])[string.Format(System.Globalization.CultureInfo.InvariantCulture, f, "[A]"),

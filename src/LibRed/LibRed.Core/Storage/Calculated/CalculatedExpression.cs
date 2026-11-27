@@ -564,15 +564,17 @@ internal static class CalculatedExpression
                 tokens.Add(new Token(TokenKind.Date, text[(i + 1)..end]));
                 i = end + 1;
             }
-            else if (char.IsDigit(c) || (c == '.' && i + 1 < text.Length && char.IsDigit(text[i + 1])))
+            // ASCII digits only: another digit is no number, and the expression is refused (verified vs ACE: DAO
+            // refuses [Qty]* and an Arabic-Indic three as a syntax error).
+            else if (char.IsAsciiDigit(c) || (c == '.' && i + 1 < text.Length && char.IsAsciiDigit(text[i + 1])))
             {
                 int start = i;
-                while (i < text.Length && (char.IsDigit(text[i]) || text[i] == '.')) i++;
+                while (i < text.Length && (char.IsAsciiDigit(text[i]) || text[i] == '.')) i++;
                 if (i < text.Length && (text[i] is 'e' or 'E'))
                 {
                     i++;
                     if (i < text.Length && (text[i] is '+' or '-')) i++;
-                    while (i < text.Length && char.IsDigit(text[i])) i++;
+                    while (i < text.Length && char.IsAsciiDigit(text[i])) i++;
                 }
                 tokens.Add(new Token(TokenKind.Number, text[start..i]));
             }

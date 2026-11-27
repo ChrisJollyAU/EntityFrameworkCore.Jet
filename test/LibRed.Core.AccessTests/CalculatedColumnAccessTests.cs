@@ -590,6 +590,7 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
     [InlineData("CInt([Qty])", "cannot be used")]          // policy whitelist -- only CDbl converts
     [InlineData("StrConv([A], 1)", "cannot be used")]      // refused by policy in full form too (page-02e)
     [InlineData("TypeName([Qty])", "cannot be used")]
+    [InlineData("[Qty]*٣", "Unexpected character")]  // an Arabic-Indic three: ACE's syntax error (see below)
     [InlineData("Now()+0", "cannot be used")]              // volatile
     [InlineData("[C]*2", "refers to itself")]
     [InlineData("[Missing]*2", "refers to another table")]
@@ -1256,6 +1257,8 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
         ("LkCls", DbText,   40, "([A] Like \"[gh]*\") & \"\""),
         ("LkNeg", DbText,   40, "([A] Like \"[!h]*\") & \"\""),
         ("LkRng", DbText,   40, "([A] Like \"[a-h]*\") & \"\""),
+        // '#' against an Arabic-Indic three ('hello') and an ASCII five ('zz').
+        ("LkDig", DbText,   40, "(IIf([A] Like \"h*\",\"٣\",\"5\") Like \"#\") & \"\""),
     ];
 
     /// <summary>The envelope's leading status for the second (bad-input) row of a probe table.</summary>
@@ -1875,6 +1878,8 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
                 // parser, so it may only know [brackets] -- and that decides whether LibRed can store a
                 // backtick expression verbatim or must rewrite it.
                 ("backtick", "`Qty`*2"),
+                // A digit other than ASCII's, an Arabic-Indic three, where a number literal would be.
+                ("digit",   "[Qty]*٣"),
             ])
             {
                 string outcome;
@@ -1897,6 +1902,7 @@ public class CalculatedColumnAccessTests(ITestOutputHelper output)
             Assert.Contains("Syntax error", outcomes["toofew"], StringComparison.Ordinal);
             Assert.Contains("Syntax error", outcomes["i2"], StringComparison.Ordinal);   // InStr with two
             Assert.Contains("Syntax error", outcomes["cdec"], StringComparison.Ordinal);
+            Assert.Contains("Syntax error", outcomes["digit"], StringComparison.Ordinal); // no digit but ASCII's
             Assert.Equal("ACCEPTED", outcomes["i3"]);                                     // ...but three is fine
             Assert.Equal("ACCEPTED", outcomes["i4"]);
 
