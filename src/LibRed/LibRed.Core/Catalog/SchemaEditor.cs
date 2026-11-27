@@ -592,9 +592,9 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// another user has the table in use. A Jet user that has added or removed a row of a system table then rewrites
     /// MSysObjects' definition page (<see cref="PageChannel.RewriteCatalog"/>), as ACE's session does for every design
     /// change but most of <c>ADD COLUMN</c>s (measured): that passes <paramref name="rewritesCatalog"/> false and rewrites
-    /// it only when it stores a property, which ACE's <c>ADD COLUMN … DEFAULT</c> matches and its <c>BIT</c> does not
-    /// (locking.md §4). The page is locked as the statement ends, after the pages the change writes, where ACE's
-    /// <c>CREATE INDEX</c> locks it (measured).</remarks>
+    /// it only when it stores a property or the table already has a Memo column (locking.md §4). Otherwise the page is
+    /// locked as the statement ends, after the pages the change writes, where ACE's <c>CREATE INDEX</c> locks it
+    /// (measured).</remarks>
     private TableDefinition DesignTable(string name, bool rewritesCatalog = true)
     {
         TableDefinition table = _catalog.FindTable(name) ?? throw new InvalidOperationException("Cannot find table or constraint.");
@@ -2028,14 +2028,14 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         props.AddRange(CalculatedProperties(spec));
 
         RaiseFormatFor([spec]);
+        // ACE's session rewrites MSysObjects' definition page for an ADD COLUMN that stores a property and for any
+        // ADD COLUMN to a table that already has a Memo column (measured: whatever column is added, an OLE column
+        // alone does not), locking it before the table's definition page is written (DesignTable).
+        if (props.Count > 0 || table.Columns.Any(c => c.Type == JetDataType.Memo)) _channel.RewriteCatalog();
         WriteTdef(table.DefinitionPage, parts);
 
         if (lvMaps is { } placed) WriteLongValueMaps(placed);
-        if (props.Count > 0)
-        {
-            SetColumnProperties(table.DefinitionPage, spec.Name, props);
-            _channel.RewriteCatalog();   // ACE's ADD COLUMN storing a property rewrites it (DesignTable)
-        }
+        if (props.Count > 0) SetColumnProperties(table.DefinitionPage, spec.Name, props);
 
         _catalog.Invalidate();
         if (spec.IsAutoNumber) NumberExistingRows(tableName, spec);

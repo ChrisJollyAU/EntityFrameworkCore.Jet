@@ -489,6 +489,46 @@ public class PageLockStatementTests
         AssertNothingLocked(other, copy.Path);
     }
 
+    // Once switched on, an ADD COLUMN rewrites MSysObjects' definition page exactly when the table already has a Memo
+    // column, whatever column it adds (measured, ACE 16: BIT, LONG and a second MEMO on a Memo table all did; BIT and LONG on
+    // an OLE table and on a table with no long-value column did not, nor did adding the first MEMO, and the next ADD COLUMN
+    // after it did).
+    [Fact]
+    public void Once_switched_on_an_ADD_COLUMN_rewrites_the_catalog_definition_page_only_to_a_table_with_a_Memo_column()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        engine.ExecuteNonQuery("CREATE TABLE S (Id LONG)");
+        engine.ExecuteNonQuery("CREATE TABLE M (Id LONG, N MEMO)");
+        engine.ExecuteNonQuery("CREATE TABLE O (Id LONG, B LONGBINARY)");
+        engine.ExecuteNonQuery("CREATE TABLE P (Id LONG)");
+        int objects = CatalogDefinition(database, "MSysObjects");
+
+        byte marked = MarkLastByte(copy.Path, objects);
+        foreach (string table in (string[])["O", "P"])
+        {
+            engine.ExecuteNonQuery($"ALTER TABLE {table} ADD COLUMN Flag BIT");
+            engine.ExecuteNonQuery($"ALTER TABLE {table} ADD COLUMN Count LONG");
+        }
+        engine.ExecuteNonQuery("ALTER TABLE P ADD COLUMN Note MEMO");
+        Assert.Equal(marked, LastByte(copy.Path, objects));
+
+        engine.ExecuteNonQuery("ALTER TABLE M ADD COLUMN Flag BIT");
+        Assert.NotEqual(marked, LastByte(copy.Path, objects));
+        marked = MarkLastByte(copy.Path, objects);
+        engine.ExecuteNonQuery("ALTER TABLE M ADD COLUMN Count LONG");
+        Assert.NotEqual(marked, LastByte(copy.Path, objects));
+
+        // P gained its first Memo column above; from now on it is a Memo table.
+        marked = MarkLastByte(copy.Path, objects);
+        engine.ExecuteNonQuery("ALTER TABLE P ADD COLUMN Count2 LONG");
+        Assert.NotEqual(marked, LastByte(copy.Path, objects));
+        using JetLockFile other = OtherUserOf(copy.Path);
+        AssertNothingLocked(other, copy.Path);
+    }
+
     // Once switched on, an UPDATE that only reads another table — in a subquery, or a foreign key's parent it checks — does
     // not rewrite MSysObjects' definition page; one through a join does, writing one of the tables or both (measured, ACE
     // 16: UPDATE … WHERE Id IN (SELECT Id FROM U15) and UPDATE C15 SET P = 2 left page 2 alone; UPDATE … INNER JOIN U15
