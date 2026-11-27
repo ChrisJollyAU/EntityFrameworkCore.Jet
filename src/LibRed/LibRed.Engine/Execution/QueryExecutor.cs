@@ -461,9 +461,11 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
     private bool TryHoist<T>(SqlStatement query, EvalScope outerScope, Func<EvalScope?, T> run, out T result)
     {
         result = default!;
-        if (Correlated.Contains(query)
-            || SubqueryHoisting.MayReferenceOuter(query, outerScope.VisibleAliases().ToHashSet(_database.Catalog.Names)))
+        if (Correlated.Contains(query)) return false;
+        // Remembered as the failed trial run below is: the subquery and the aliases around it are the same every row.
+        if (SubqueryHoisting.MayReferenceOuter(query, outerScope.VisibleAliases().ToHashSet(_database.Catalog.Names)))
         {
+            Correlated.Add(query);
             return false;
         }
 
