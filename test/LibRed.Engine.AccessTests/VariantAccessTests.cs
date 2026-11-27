@@ -90,11 +90,11 @@ public class VariantAccessTests(ITestOutputHelper output) : AceQueryParityTest(o
     [Theory]
     [MemberData(nameof(Expressions))]
     public void An_expression_is_typed_and_valued_as_ace_does(string expression) =>
-        Matches("variant-", Setup, [$"SELECT {expression} FROM V"]);
+        Matches("variant-", Setup, [$"SELECT {expression} FROM V"], refusalMatches: false);
 
     [Theory]
     [MemberData(nameof(Queries))]
-    public void A_query_is_typed_and_valued_as_ace_does(string query) => Matches("variant-", Setup, [query]);
+    public void A_query_is_typed_and_valued_as_ace_does(string query) => Matches("variant-", Setup, [query], refusalMatches: false);
 
     // A make-table query writes a Variant or a Mixed value out as text, into a Text(255) column; a value over one that
     // counts as a number keeps its number column.

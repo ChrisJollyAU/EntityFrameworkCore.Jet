@@ -7,7 +7,7 @@ namespace LibRed.Engine.Tests;
 /// <summary>
 /// A query asked of ACE over OLE DB and of LibRed's engine, over a copy of Northwind with the test's tables made and
 /// filled through ACE. Each result is written out as its column types and values, and the two must agree; a refusal
-/// matches a refusal.
+/// matches a refusal unless <c>refusalMatches</c> is false, where either engine refusing fails the test.
 /// </summary>
 /// <remarks>ACE writes a date out in the Windows user locale, so LibRed runs under that culture here; the rest of the
 /// suite pins en-US.</remarks>
@@ -15,7 +15,7 @@ public abstract class AceQueryParityTest(ITestOutputHelper output) : TempDatabas
 {
     protected ITestOutputHelper Output => output;
 
-    protected void Matches(string prefix, string[] setup, string[] queries)
+    protected void Matches(string prefix, string[] setup, string[] queries, bool refusalMatches = true)
     {
         string path = Seeded(prefix, setup);
         try
@@ -37,7 +37,7 @@ public abstract class AceQueryParityTest(ITestOutputHelper output) : TempDatabas
                             rows.Add([.. Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? null : reader.GetValue(i))]);
                         ace = Describe(types, rows);
                     }
-                    catch (OleDbException) { ace = "refused"; }
+                    catch (OleDbException) when (refusalMatches) { ace = "refused"; }
                 }
 
                 string libred = UnderUserCulture(() =>
@@ -48,7 +48,7 @@ public abstract class AceQueryParityTest(ITestOutputHelper output) : TempDatabas
                         var result = new QueryEngine(database).ExecuteQuery(query);
                         return Describe(result.ColumnTypes, result.Rows);
                     }
-                    catch (Exception e) when (e is InvalidOperationException or ArgumentException or InvalidCastException or FormatException
+                    catch (Exception e) when (refusalMatches && e is InvalidOperationException or ArgumentException or InvalidCastException or FormatException
                         or OverflowException or DivideByZeroException or NotSupportedException or LibRed.Sql.Binding.SqlBindException
                         or LibRed.Sql.Parsing.SqlParseException) { return "refused"; }
                 });
