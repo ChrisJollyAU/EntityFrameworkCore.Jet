@@ -715,6 +715,99 @@ public class WholeFileParityProbeTest(ITestOutputHelper output)
         }
     }
 
+    /// <summary>Probe: does ACE's write of page 2 change any byte? Mode A runs each of the first <paramref name="count"/>
+    /// statements on a copy of ACE's previous result, through ACE and through LibRed, each in a session that is closed
+    /// before page 2 is read, and reports page 2's changed bytes per engine. Mode B runs the same statements in one
+    /// ACE session, reading page 2 live (shared read) straight after each statement and again after 1.5 s.</summary>
+    [Fact(Explicit = true)]
+    public void Probe_page_two_bytes_per_statement()
+    {
+        const int count = 70, PageSize = 4096;
+        string[] statements = Statements()[..count];
+        string? origin = CreateThroughDao();
+        Assert.SkipWhen(origin is null, "DAO is not registered in this bitness.");
+
+        static byte[] Page2(string path)
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            byte[] page = new byte[PageSize];
+            stream.Seek(2L * PageSize, SeekOrigin.Begin);
+            stream.ReadExactly(page);
+            return page;
+        }
+        static string Diff(byte[] before, byte[] after)
+        {
+            var list = new List<string>();
+            int n = 0;
+            for (int i = 0; i < PageSize; i++)
+                if (before[i] != after[i] && ++n <= 60) list.Add($"{i:X3}:{before[i]:X2}->{after[i]:X2}");
+            return n == 0 ? "unchanged" : $"CHANGED {n} bytes [{string.Join(' ', list)}]";
+        }
+
+        var log = new StringBuilder();
+        string current = origin;
+        string? aceB = null;
+        try
+        {
+            string decoded = TemporaryDatabase.CopyPath(origin, "p2-cat-");
+            try
+            {
+                using var database = JetDatabase.Open(decoded, readOnly: true);
+                log.AppendLine(CultureInfo.InvariantCulture, $"LibRed catalog root page (page 0 0x20, decoded): {database.DefinitionPage.CatalogRootPage}");
+            }
+            finally { TemporaryDatabase.Delete(decoded); }
+            byte[] p2 = Page2(origin);
+            log.AppendLine(CultureInfo.InvariantCulture, $"origin page 2 header: type {p2[0]:X2} {p2[1]:X2}, bytes 4..8 {BitConverter.ToString(p2, 4, 4)}");
+
+            log.AppendLine("=== Mode A: closed session per statement, copy of ACE's previous result");
+            for (int i = 0; i < count; i++)
+            {
+                string ace = TemporaryDatabase.CopyPath(current, $"p2-ace{i}-");
+                string libred = TemporaryDatabase.CopyPath(current, $"p2-lib{i}-");
+                byte[] before = Page2(current);
+                string? aceError = RunThroughAce(ace, [statements[i]])[0];
+                byte[] aceAfter = Page2(ace);
+                string? libError = RunThroughLibRed(libred, [statements[i]])[0];
+                byte[] libAfter = Page2(libred);
+                log.AppendLine(CultureInfo.InvariantCulture,
+                    $"#{i + 1,-3} ACE p2 {Diff(before, aceAfter)} | LibRed p2 {Diff(before, libAfter)} | ACE==LibRed p2: {aceAfter.AsSpan().SequenceEqual(libAfter)} | err ACE:{aceError ?? "-"} LibRed:{libError ?? "-"} | {Abbreviate(statements[i])}");
+                if (current != origin) TemporaryDatabase.Delete(current);
+                current = ace;
+                TemporaryDatabase.Delete(libred);
+            }
+            if (current != origin) TemporaryDatabase.Delete(current);
+
+            log.AppendLine("=== Mode B: one ACE session, live reads");
+            aceB = TemporaryDatabase.CopyPath(origin, "p2-live-");
+            using (OleDbConnection connection = AceTestDatabase.Open(aceB))
+            {
+                byte[] last = Page2(aceB);
+                for (int i = 0; i < count; i++)
+                {
+                    try
+                    {
+                        using OleDbCommand command = connection.CreateCommand();
+                        command.CommandText = statements[i];
+                        command.ExecuteNonQuery();
+                    }
+                    catch (OleDbException e) { log.AppendLine(CultureInfo.InvariantCulture, $"#{i + 1} ACE error {e.Message}"); }
+                    byte[] immediate = Page2(aceB);
+                    Thread.Sleep(1500);
+                    byte[] settled = Page2(aceB);
+                    log.AppendLine(CultureInfo.InvariantCulture,
+                        $"#{i + 1,-3} immediate {Diff(last, immediate)} | settled(1.5s) vs immediate {Diff(immediate, settled)}");
+                    last = settled;
+                }
+            }
+        }
+        finally
+        {
+            output.WriteLine(log.ToString());
+            if (aceB is not null) TemporaryDatabase.Delete(aceB);
+            TemporaryDatabase.Delete(origin);
+        }
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(138)]
@@ -1402,6 +1495,15 @@ public class WholeFileParityProbeTest(ITestOutputHelper output)
         return [.. s];
     }
 
+    /// <summary>Writes the corpus, numbered from 1, one statement per line, so a trace's s0001.. markers can be matched to text.</summary>
+    [Fact(Explicit = true)]
+    public void Print_the_statements()
+    {
+        string[] statements = Statements();
+        for (int i = 0; i < statements.Length; i++)
+            output.WriteLine(FormattableString.Invariant($"S{i + 1:D4}\t{statements[i].Replace('\n', ' ').Replace('\r', ' ')}"));
+    }
+
     /// <summary><paramref name="bytes"/> bytes as hex, a repeating pattern seeded by <paramref name="seed"/>.</summary>
     private static string Hex(int bytes, int seed) =>
         Convert.ToHexString([.. Enumerable.Range(0, bytes).Select(i => (byte)((i * 7 + seed) % 251))]);
@@ -2017,57 +2119,103 @@ public class WholeFileParityProbeTest(ITestOutputHelper output)
     internal static string?[] RunThroughAce(string path, string[] statements, Action? beforeClose = null, bool dao = false)
     {
         var errors = new string?[statements.Length];
+        string full = Path.GetFullPath(path);
+        int sequence = 0;
+        Mark(full, "ace", ref sequence, "begin", "open");
         if (dao)
         {
             // Through DAO, as Access runs SQL: OLE DB sees a complex column only as Jet 4 did, and leaves its values
             // behind when it deletes the row that owns them.
             object database = Invoke(AceTestDatabase.CreateDaoEngine()!, "OpenDatabase", path)!;
+            Mark(full, "ace", ref sequence, "end", "open");
             try
             {
                 for (int i = 0; i < statements.Length; i++)
                 {
+                    Mark(full, "ace", ref sequence, "begin", StatementLabel(i));
                     try { Invoke(database, "Execute", statements[i], 128); }   // dbFailOnError
                     catch (TargetInvocationException e) { errors[i] = e.InnerException?.Message ?? e.Message; }
+                    Mark(full, "ace", ref sequence, "end", StatementLabel(i));
                 }
                 beforeClose?.Invoke();
             }
             finally
             {
+                Mark(full, "ace", ref sequence, "begin", "close");
                 Invoke(database, "Close");
                 AceTestDatabase.ReleaseAbandonedComObjects();
+                Mark(full, "ace", ref sequence, "end", "close");
             }
             return errors;
         }
-        using OleDbConnection connection = AceTestDatabase.Open(path);
-        for (int i = 0; i < statements.Length; i++)
+        OleDbConnection connection = AceTestDatabase.Open(path);
+        Mark(full, "ace", ref sequence, "end", "open");
+        try
         {
-            try
+            for (int i = 0; i < statements.Length; i++)
             {
-                using OleDbCommand command = connection.CreateCommand();
-                command.CommandText = statements[i];
-                command.ExecuteNonQuery();
+                Mark(full, "ace", ref sequence, "begin", StatementLabel(i));
+                try
+                {
+                    using OleDbCommand command = connection.CreateCommand();
+                    command.CommandText = statements[i];
+                    command.ExecuteNonQuery();
+                }
+                catch (OleDbException e) { errors[i] = e.Message; }
+                Mark(full, "ace", ref sequence, "end", StatementLabel(i));
             }
-            catch (OleDbException e) { errors[i] = e.Message; }
+            beforeClose?.Invoke();
         }
-        beforeClose?.Invoke();
+        finally
+        {
+            Mark(full, "ace", ref sequence, "begin", "close");
+            connection.Dispose();
+            Mark(full, "ace", ref sequence, "end", "close");
+        }
         return errors;
     }
 
     private static string?[] RunThroughLibRed(string path, string[] statements, Action? beforeClose = null)
     {
         var errors = new string?[statements.Length];
-        using var database = JetDatabase.Open(path, readOnly: false);
-        var engine = new QueryEngine(database);
-        for (int i = 0; i < statements.Length; i++)
+        string full = Path.GetFullPath(path);
+        int sequence = 0;
+        Mark(full, "libred", ref sequence, "begin", "open");
+        JetDatabase database = JetDatabase.Open(path, readOnly: false);
+        Mark(full, "libred", ref sequence, "end", "open");
+        try
         {
-            try { engine.ExecuteNonQuery(statements[i]); }
+            var engine = new QueryEngine(database);
+            for (int i = 0; i < statements.Length; i++)
+            {
+                Mark(full, "libred", ref sequence, "begin", StatementLabel(i));
+                try { engine.ExecuteNonQuery(statements[i]); }
 #pragma warning disable CA1031 // a probe records every refusal, whatever its type, and carries on
-            catch (Exception e) { errors[i] = $"{e.GetType().Name}: {e.Message}"; }
+                catch (Exception e) { errors[i] = $"{e.GetType().Name}: {e.Message}"; }
 #pragma warning restore CA1031
+                Mark(full, "libred", ref sequence, "end", StatementLabel(i));
+            }
+            beforeClose?.Invoke();
         }
-        beforeClose?.Invoke();
+        finally
+        {
+            Mark(full, "libred", ref sequence, "begin", "close");
+            database.Dispose();
+            Mark(full, "libred", ref sequence, "end", "close");
+        }
         return errors;
     }
+
+    /// <summary>The short label a statement's trace markers carry: its 1-based index, as <c>s0123</c>.</summary>
+    private static string StatementLabel(int index) => $"s{index + 1:D4}";
+
+    /// <summary>
+    /// Marks a step in a ProcMon capture by probing a file that does not exist, in the format
+    /// <c>tools/JetLockScenario</c> writes and <c>tools/JetLockTrace</c> reads:
+    /// <c>&lt;database&gt;.mark.&lt;name&gt;.&lt;seq&gt;.&lt;begin|end&gt;.&lt;command&gt;</c>. Nothing is created.
+    /// </summary>
+    private static void Mark(string database, string name, ref int sequence, string phase, string command) =>
+        _ = File.Exists($"{database}.mark.{name}.{++sequence:D4}.{phase}.{command}");
 
     /// <summary>Compares the two results of the same statements applied to <paramref name="originPath"/>: page
     /// counts, then every differing page — page 0 on its own, the rest grouped by page type and owner — with its

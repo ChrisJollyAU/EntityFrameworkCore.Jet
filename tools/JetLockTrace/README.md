@@ -15,6 +15,7 @@ dotnet run --project tools/JetLockTrace -- trace.csv
 | `--process <name-or-pid>` | Only rows from that process: a case-insensitive name match, or an exact PID. |
 | `--locks-only` | Only lock/unlock rows; drop reads and writes, so two traces diff without cache-driven I/O noise. |
 | `--held` | Replay the locks in order instead of listing rows (it replaces the row output; `--file`, `--process` and `--locks-only` still filter what is replayed). At each scenario `end` marker it prints the locks held at that moment, per process, under the marker heading. At the end it prints, per process (PID) and file, the locks still held, decoded as usual, then any unlock that matched no held lock. Locks and unlocks are paired on file, offset and length. Rows whose result is not `SUCCESS` are ignored: a failed lock was never taken and a failed unlock released nothing. |
+| `--compare <a> <b>` | A different mode: see [Comparing two engines statement by statement](#comparing-two-engines-statement-by-statement). Replaces `--file` and `--held`; takes `--process` and `--out` (default name `<trace>.compare.txt`). |
 | *(markers)* | Not an option: see [Scenario markers](#scenario-markers). |
 | `--out [path]` | Write to a file rather than stdout. With no path, writes next to the CSV as `<trace>.locks.txt`, or `<trace>.canonical.txt` under `--canonical`. |
 
@@ -148,6 +149,48 @@ shows what it still holds when the scenario ends, which catches locks that were 
 
 For traces to be comparable across experiments, always start from an *identical copy* of one fixture file —
 page numbers must mean the same thing in every run.
+
+## Comparing two engines statement by statement
+
+Whole-run counts say two files were locked differently, not by which statements. `--compare` aligns two files of
+one capture by scenario marker and reports per statement:
+
+```
+jetlocktrace wholelocks.CSV --compare wholefile-ace wholefile-libred --out wholelocks.compare.txt
+```
+
+`<a>` and `<b>` are path substrings, as `--file` takes (a row goes to each side it matches, so one substring twice
+compares a file with itself). The statements are the markers' command labels (`s0123`, `open`, `close`); the same
+label seen twice on a side is `label#2`. `test/LibRed.Engine.AccessTests`' `WholeFileParityProbeTest` writes
+`<database>.mark.ace.…` and `<database>.mark.libred.…` markers around each statement of both engines' runs, labelled
+by the statement's 1-based index and bracketing the open and the close of each session. Capture it in ProcMon
+filtered to `wholefile`.
+
+Only lock calls count, as multisets: unlocks and order are ignored. A lock is (kind, where, mode): the region (or
+`user-lock/<what>` — presence probes, session bytes, connection control — as kinds of their own), the page (or the
+group and bytes), and shared / exclusive / upgrade (`… REFUSED` when the lock was not granted). Each statement is one
+block, every line starting with its label so a grep keeps its context:
+
+```
+=== s0001 kinds  A: 3 locks (after end 1)  B: 1 locks (after end 0)
+s0001  only A     1x  user-lock/group-1-presence-probe       group 1 bytes 2..255     -
+s0001  only A     1x  write/read                             page 1                   exclusive
+s0001  only A     1x  write/read                             page 3                   exclusive  [after end: 1 of this side's 1]
+s0001  only B     1x  write/read                             page 2                   exclusive
+s0001  by kind (page numbers ignored):
+s0001  only A     1x  user-lock/group-1-presence-probe         -
+s0001  only A     1x  write/read                               exclusive
+=== s0002 same  A: 1 locks (after end 0)  B: 1 locks (after end 0)
+```
+
+The status is `same` (identical multisets), `pages` (the same kinds and modes in the same numbers, on other pages:
+the two files' page numbers drift apart during a run) or `kinds` (the kind counts differ; the second view, which
+ignores `where`, is printed only then). Locks between a statement's `end` marker and the next `begin` — ACE writes and
+locks about half a second after a command returns — are counted with the statement before and flagged
+`[after end: n …]`, and the header gives each side's number of them. Locks before the first `begin` are the statement
+`(unmarked)`; a statement with no marker on one side shows `(no marker)` there. The block list ends in a summary:
+statements identical / differing only in page numbers / differing in kind counts, and lock calls per kind and mode for
+each side. Statements come in side A's order, then any only side B has.
 
 ## What it decodes
 

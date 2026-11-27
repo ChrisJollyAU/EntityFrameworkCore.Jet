@@ -8,6 +8,7 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
         them on a live lock file.
 
           jetlocktrace <trace.csv> [options]
+          jetlocktrace <trace.csv> --compare <fileA> <fileB> [--process <p>] [--out [path]]
           jetlocktrace probe <database>
           jetlocktrace hold <database> --region <1-6> (--page <n> | --user-slot <n>)
                                        [--shared] [--as-user <n>]
@@ -26,6 +27,13 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
                             it also prints the locks held at that moment, per process.
           --out [path]      Write to a file instead of stdout. With no path, writes alongside the CSV as
                             <trace>.locks.txt (or <trace>.canonical.txt with --canonical).
+
+          --compare <a> <b> Instead of rows, compare statement by statement the lock calls on the files whose
+                            path contains <a> and on those containing <b> (two engines, one capture), aligned by
+                            scenario marker command label. Per statement: the locks only A took and only B took,
+                            as multisets of (kind, page, mode), then by kind alone; locks after a statement's
+                            'end' marker count with it. Ends with a summary. Replaces --file and --held; takes
+                            --process and --out (default <trace>.compare.txt).
 
         Scenario markers (from tools/JetLockScenario): rows whose path contains '.mark.' are printed as
         '--- <name> <seq> <begin|end> <command> ---' separators, kept under --canonical and --locks-only, and
@@ -107,6 +115,8 @@ string? processFilter = null;
 int? processPid = null;
 var locksOnly = false;
 var replayHeld = false;
+string? compareA = null;
+string? compareB = null;
 var toFile = false;
 string? outPath = null;
 
@@ -137,6 +147,10 @@ for (var i = 0; i < args.Length; i++)
             break;
         case "--held":
             replayHeld = true;
+            break;
+        case "--compare" when i + 2 < args.Length:
+            compareA = args[++i];
+            compareB = args[++i];
             break;
         case "--out":
             toFile = true;
@@ -175,13 +189,20 @@ if (!File.Exists(csvPath))
     return 1;
 }
 
+if (compareA is not null && (fileFilter is not null || replayHeld))
+{
+    Console.Error.WriteLine("--compare takes its two files itself: it cannot be combined with --file or --held.");
+    return 1;
+}
+
 // Auto-name alongside the trace, keeping the suffix distinct per mode so a canonical run never silently
 // overwrites a full one.
 if (toFile)
 {
     outPath ??= Path.Combine(
         Path.GetDirectoryName(Path.GetFullPath(csvPath)) ?? ".",
-        Path.GetFileNameWithoutExtension(csvPath) + (canonical ? ".canonical.txt" : ".locks.txt"));
+        Path.GetFileNameWithoutExtension(csvPath)
+        + (compareA is not null ? ".compare.txt" : canonical ? ".canonical.txt" : ".locks.txt"));
 }
 
 // The confirmation goes to stderr so it never lands in a redirected stdout.
@@ -193,6 +214,18 @@ if (outPath is not null)
 try
 {
     using TextWriter output = outPath is null ? Console.Out : new StreamWriter(outPath, append: false);
+
+    if (compareA is not null && compareB is not null)
+    {
+        int statements = StatementComparison.Run(csvPath, compareA, compareB, processFilter, processPid, output);
+        if (outPath is not null)
+        {
+            Console.Error.WriteLine($"{statements} statements compared.");
+        }
+
+        return 0;
+    }
+
     var decodedCount = 0;
     HeldLocks? held = replayHeld ? new HeldLocks() : null;
 
@@ -202,24 +235,12 @@ try
         // offset; it still has to pass --file and --process, and it survives --locks-only.
         bool isMarker = e.IsMarker;
 
-        if (!isMarker && !LockDecoder.IsDatabaseOrLockFile(e.Path))
-        {
-            continue;
-        }
-
-        if (fileFilter is not null && !e.Path.Contains(fileFilter, StringComparison.OrdinalIgnoreCase))
+        if (!TraceFilter.Accepts(e, fileFilter, processFilter, processPid))
         {
             continue;
         }
 
         if (!isMarker && e.Offset is null)
-        {
-            continue;
-        }
-
-        if (processFilter is not null
-            && !(e.ProcessName?.Equals(processFilter, StringComparison.OrdinalIgnoreCase) == true
-                 || (processPid is { } wanted && e.Pid == wanted)))
         {
             continue;
         }

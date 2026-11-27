@@ -45,11 +45,48 @@ public static class LockDecoder
     /// </param>
     public static string DescribeLock(long offset, long? length, bool? exclusive = null)
     {
-        JetLockAddress a = JetLockLayout.Decode(offset, length);
+        LockShape shape = Classify(offset, length);
+        JetLockAddress a = shape.Address;
         string kind = RegionName(a.Region);
         string size = $"({length?.ToString() ?? "?"})";
         string where = $"[0x{a.WithinRegion:X}]";
         string mark = exclusive == false ? "  !! OS-SHARED lock: ACE takes none" : "";
+
+        if (shape.UserText is { } text)
+        {
+            return $"{kind,-11} {text} {size}  {where}{mark}";
+        }
+
+        return shape.Mode switch
+        {
+            "shared" => $"{kind,-11} page {a.Window,-6} shared, user {a.User,-3} {size}  {where}{mark}",
+            "exclusive" => $"{kind,-11} page {a.Window,-6} exclusive, user {a.User,-3} {size}  {where}{mark}",
+            "upgrade" => $"{kind,-11} page {a.Window,-6} upgrade, bytes {a.ByteInWindow}..{JetLockLayout.ExclusiveLengthBase}, every other user's byte {size}  {where}{mark}",
+            _ => $"{kind,-11} page {a.Window,-6} +{a.ByteInWindow,-5} {size}  {where}{mark}",
+        };
+    }
+
+    /// <summary>
+    ///     A lock sorted into what it is: the one place that decides which shape an offset and length are, so the
+    ///     per-row description and the statement comparison cannot disagree.
+    /// </summary>
+    /// <param name="Address">The offset split into its fields.</param>
+    /// <param name="Kind">
+    ///     A short stable name: the region for a page lock, <c>user-lock/…</c> for a user-region one. Carries no
+    ///     page and no user number.
+    /// </param>
+    /// <param name="Where">The page, or the group and bytes of a user-region lock.</param>
+    /// <param name="Mode">
+    ///     <c>shared</c>, <c>exclusive</c> or <c>upgrade</c> for a page lock, <c>other</c> for a page range of no
+    ///     known shape, <c>-</c> for a user-region lock.
+    /// </param>
+    /// <param name="UserText">The user-region description <see cref="DescribeLock" /> prints; null for a page lock.</param>
+    internal readonly record struct LockShape(JetLockAddress Address, string Kind, string Where, string Mode, string? UserText);
+
+    /// <summary>Sorts a lock of <paramref name="length" /> bytes at <paramref name="offset" /> into a <see cref="LockShape" />.</summary>
+    internal static LockShape Classify(long offset, long? length)
+    {
+        JetLockAddress a = JetLockLayout.Decode(offset, length);
 
         // Region 1 is not page-based: groups of 256 bytes, one byte per user. A connected user holds its byte in
         // group 0 and its byte in group 1 (one lower) for its whole session. Group 5 is connection control: a user
@@ -61,48 +98,60 @@ public static class LockDecoder
         {
             long group = a.Window;
             long slot = a.ByteInWindow;
-            string text = (group, length, a.User) switch
+            (string kind, string text) = (group, length, a.User) switch
             {
-                (JetLockLayout.UserGroup, _, { } user) => $"group 0  user {user} byte",
-                (JetLockLayout.SessionGroup, _, { } user) => $"group 1  session byte, user {user}",
+                (JetLockLayout.UserGroup, _, { } user) => ("group-0-user-byte", $"group 0  user {user} byte"),
+                (JetLockLayout.SessionGroup, _, { } user) => ("group-1-session-byte", $"group 1  session byte, user {user}"),
                 (JetLockLayout.UserGroup or JetLockLayout.SessionGroup, > 1, _)
-                    => $"group {group}  bytes {slot}..{slot + (length ?? 1) - 1}: presence probe over several users' bytes",
+                    => ($"group-{group}-presence-probe",
+                        $"group {group}  bytes {slot}..{slot + (length ?? 1) - 1}: presence probe over several users' bytes"),
                 (JetLockLayout.ConnectionControlGroup, JetLockLayout.UserGroupSize, _) when slot == 0
-                    => "group 5  connection control, whole group: is anyone barring new connections?",
+                    => ("group-5-whole-group",
+                        "group 5  connection control, whole group: is anyone barring new connections?"),
                 (JetLockLayout.ConnectionControlGroup, _, { } user)
-                    => $"group 5  connection control, user {user} byte (held while user {user} bars new connections)",
+                    => ("group-5-user-byte",
+                        $"group 5  connection control, user {user} byte (held while user {user} bars new connections)"),
                 (JetLockLayout.ConnectionControlGroup, _, _)
-                    => $"group 5  connection control, bytes {slot}..{slot + (length ?? 1) - 1}",
+                    => ("group-5-bytes", $"group 5  connection control, bytes {slot}..{slot + (length ?? 1) - 1}"),
                 (JetLockLayout.ConnectionControlFollowUpGroup, _, { } user)
-                    => $"group 6  user {user} byte (tried after group 5 and group 6 byte 0 refused; meaning unknown)",
+                    => ("group-6-user-byte",
+                        $"group 6  user {user} byte (tried after group 5 and group 6 byte 0 refused; meaning unknown)"),
                 (JetLockLayout.ConnectionControlFollowUpGroup, 1, _) when slot == 0
-                    => "group 6  byte 0 (tried after group 5 refused; meaning unknown)",
-                _ => $"group {group}  byte {slot}",
+                    => ("group-6-byte-0", "group 6  byte 0 (tried after group 5 refused; meaning unknown)"),
+                _ => ($"group-{group}-byte", $"group {group}  byte {slot}"),
             };
 
-            return $"{kind,-11} {text} {size}  {where}{mark}";
+            return new LockShape(
+                a,
+                $"user-lock/{kind}",
+                $"group {group} bytes {slot}..{slot + (length ?? 1) - 1}",
+                "-",
+                text);
         }
 
+        string region = RegionName(a.Region);
+        string page = $"page {a.Window}";
+
         // A one-byte lock on a page is Jet's "shared" lock, at the holder's own user number.
-        if (length == 1 && a.User is { } sharer)
+        if (length == 1 && a.User is not null)
         {
-            return $"{kind,-11} page {a.Window,-6} shared, user {sharer,-3} {size}  {where}{mark}";
+            return new LockShape(a, region, page, "shared", null);
         }
 
         // An exclusive lock starts at byte 1 and covers every user's shared byte, then runs on to the holder's own
         // number, so the USER is identified by where the range ends, not where it starts.
-        if (a.User is { } holder)
+        if (a.User is not null)
         {
-            return $"{kind,-11} page {a.Window,-6} exclusive, user {holder,-3} {size}  {where}{mark}";
+            return new LockShape(a, region, page, "exclusive", null);
         }
 
         // An upgrade: a user already holding its own byte takes the rest of the shared bytes, 2..256.
         if (length is > 1 && a.ByteInWindow >= 2 && a.ByteInWindow + length.Value - 1 == JetLockLayout.ExclusiveLengthBase)
         {
-            return $"{kind,-11} page {a.Window,-6} upgrade, bytes {a.ByteInWindow}..{JetLockLayout.ExclusiveLengthBase}, every other user's byte {size}  {where}{mark}";
+            return new LockShape(a, region, page, "upgrade", null);
         }
 
-        return $"{kind,-11} page {a.Window,-6} +{a.ByteInWindow,-5} {size}  {where}{mark}";
+        return new LockShape(a, region, page, "other", null);
     }
 
     /// <summary>Describes a read or write against the database file.</summary>
