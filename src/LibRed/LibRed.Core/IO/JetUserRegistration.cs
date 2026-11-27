@@ -317,10 +317,12 @@ internal sealed class JetUserRegistration : IDisposable
     /// ACE's outcome for the purpose: an <see cref="InvalidOperationException"/> with 3218 for a page write, 3624 for a
     /// long-value read and for a foreign key's referenced key, 3202 for an <c>UPDATE</c> replacing a chained long
     /// value, for a table 3211 naming <paramref name="table"/> — 3008 when it is its read byte that is refused; for a
-    /// <c>DELETE</c> removing a chained long value, no exception — the caller goes ahead without the lock.</summary>
+    /// <c>DELETE</c> removing a chained long value, no exception — the caller goes ahead without the lock; for a catalog
+    /// definition page written unchanged, one attempt and no exception.</summary>
     /// <returns>True when this call took an operating-system lock; false when the connection already held the lock and
     /// the caller has only joined it — it has then been held throughout, and no other user can have taken it
-    /// meanwhile; null when <see cref="JetLockPurpose.LongValueRemove"/> was refused, and nothing is held.</returns>
+    /// meanwhile; null when <see cref="JetLockPurpose.LongValueRemove"/> or <see cref="JetLockPurpose.CatalogRewrite"/>
+    /// was refused, and nothing is held.</returns>
     /// <remarks>
     /// <para>Pair every call that returns true or false with one <see cref="Unlock"/> of the same lock.</para>
     /// <para>Windows refuses an exclusive range overlapping a byte the same handle holds. So the connection's own
@@ -344,6 +346,7 @@ internal sealed class JetUserRegistration : IDisposable
         {
             JetLockPurpose.LongValueRead => LongValueReadAttempts,
             JetLockPurpose.TableRead => TableReadAttempts,
+            JetLockPurpose.CatalogRewrite => 1,
             _ => LockAttempts,
         };
         for (int attempt = 1; ; attempt++)
@@ -360,7 +363,7 @@ internal sealed class JetUserRegistration : IDisposable
             {
                 return purpose switch
                 {
-                    JetLockPurpose.LongValueRemove => null,
+                    JetLockPurpose.LongValueRemove or JetLockPurpose.CatalogRewrite => null,
                     _ when tableRead => throw new InvalidOperationException(
                         TableOpenedExclusivelyMessage(table ?? throw new ArgumentNullException(nameof(table)))),
                     JetLockPurpose.Table => throw new InvalidOperationException(
@@ -593,4 +596,9 @@ internal enum JetLockPurpose
     /// <summary>The key a foreign key references, found for a child row's check: region 2, the shared byte on the
     /// parent's index page holding it; refused with 3624 after one round of retries.</summary>
     ReferencedKey,
+
+    /// <summary>A catalog definition page a statement or a close writes though no byte of it changes
+    /// (<see cref="PageChannel.RewriteCatalog"/>): region 2, exclusive; tried once, and refused, the page is left out and
+    /// nothing is raised, as ACE's statement goes on without it at once (measured).</summary>
+    CatalogRewrite,
 }

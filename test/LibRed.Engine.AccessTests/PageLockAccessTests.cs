@@ -436,6 +436,83 @@ public class PageLockAccessTests
         finally { TemporaryDatabase.Delete(path); }
     }
 
+    // MSysObjects' definition page (docs/format/locking.md §4). An ACE session that has created a table locks it in every
+    // INSERT, but goes on at once when another user holds it: beside LibRed's open transaction that created a table —
+    // which holds the page to COMMIT — ACE's INSERT neither waits nor fails, while its UPDATE of a page LibRed holds is
+    // refused as ever.
+    [Fact]
+    public void ACEs_switched_on_INSERT_beside_LibRed_holding_the_catalog_definition_page_goes_ahead_at_once()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-pagelock-ace-");
+        try
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(database);
+            CreateRows(engine, 2);
+            int objects = database.Catalog.FindTable("MSysObjects")!.DefinitionPage;
+
+            using OleDbConnection ace = AceTestDatabase.Open(path);
+            Exec(ace, "CREATE TABLE AceMade (Id LONG)");
+            Exec(ace, "INSERT INTO AceMade (Id) VALUES (1)");
+            Thread.Sleep(1000);   // ACE's deferred write of that INSERT has gone out
+
+            engine.ExecuteNonQuery("BEGIN TRANSACTION");
+            engine.ExecuteNonQuery("CREATE TABLE LibRedMade (Id LONG)");
+            using (JetLockFile probe = JetLockFile.Open(JetLockFile.PathFor(path)!, createIfMissing: false))
+                Assert.False(probe.TryLock(JetLockLayout.SharedByte(JetLockRegion.WriteRead, objects, OtherUser), 1));
+
+            var wait = Stopwatch.StartNew();
+            Exec(ace, "INSERT INTO AceMade (Id) VALUES (2)");
+            wait.Stop();
+            Assert.InRange(wait.ElapsedMilliseconds, 0, 1000);
+
+            engine.ExecuteNonQuery("COMMIT");
+            Assert.Equal(2, Convert.ToInt32(Scalar(ace, "SELECT COUNT(*) FROM AceMade"), System.Globalization.CultureInfo.InvariantCulture));
+            Assert.True(Poll(AceSees, () => Convert.ToInt32(engine.ExecuteQuery("SELECT COUNT(*) FROM AceMade").Rows.Single()[0],
+                System.Globalization.CultureInfo.InvariantCulture) == 2), "LibRed did not read ACE's rows.");
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
+    // The other way round: ACE's INSERT in a session that has created a table holds the page about 500 ms after it
+    // returns (measured), and LibRed's INSERT in a session that has created one, made meanwhile, goes on without it at
+    // once, as ACE's does — no retries, no error — and each reads the other's row.
+    [Fact]
+    public void LibReds_switched_on_INSERT_beside_ACE_holding_the_catalog_definition_page_goes_ahead_at_once()
+    {
+        string path = TemporaryDatabase.CopyPath(Northwind, "libred-pagelock-ace-");
+        try
+        {
+            using JetDatabase database = JetDatabase.Open(path, readOnly: false);
+            var engine = new QueryEngine(database);
+            CreateRows(engine, 2);
+            int objects = database.Catalog.FindTable("MSysObjects")!.DefinitionPage;
+
+            using OleDbConnection ace = AceTestDatabase.Open(path);
+            Exec(ace, "CREATE TABLE AceMade (Id LONG)");
+            Thread.Sleep(1000);
+            Exec(ace, "INSERT INTO AceMade (Id) VALUES (1)");
+            bool aceHeldIt;
+            using (JetLockFile probe = JetLockFile.Open(JetLockFile.PathFor(path)!, createIfMissing: false))
+            {
+                long at = JetLockLayout.SharedByte(JetLockRegion.WriteRead, objects, OtherUser);
+                aceHeldIt = !probe.TryLock(at, 1);
+                if (!aceHeldIt) probe.Unlock(at, 1);
+            }
+            var wait = Stopwatch.StartNew();
+            Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (3, 'libred')"));
+            wait.Stop();
+            TestContext.Current.TestOutputHelper?.WriteLine($"ACE held the page: {aceHeldIt}; LibRed's INSERT took {wait.ElapsedMilliseconds} ms.");
+            Assert.True(aceHeldIt, "ACE's INSERT did not hold MSysObjects' definition page after it returned.");
+            Assert.InRange(wait.ElapsedMilliseconds, 0, 1000);
+
+            Assert.True(Poll(AceSees, () => Value(ace, 3) == "libred"), "ACE did not read LibRed's row.");
+            Assert.True(Poll(AceSees, () => Convert.ToInt32(engine.ExecuteQuery("SELECT COUNT(*) FROM AceMade").Rows.Single()[0],
+                System.Globalization.CultureInfo.InvariantCulture) == 1), "LibRed did not read ACE's row.");
+        }
+        finally { TemporaryDatabase.Delete(path); }
+    }
+
     private static void CreateParentsAndChildren(QueryEngine engine)
     {
         engine.ExecuteNonQuery("CREATE TABLE Parents (Id LONG PRIMARY KEY)");

@@ -589,11 +589,16 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// TABLE in each form, CREATE and DROP INDEX, and a FOREIGN KEY's REFERENCES).</summary>
     /// <remarks>Found, it is locked for the design change as ACE locks it, exclusively in the table-read region
     /// (<see cref="PageChannel.LockTable"/>; measured for ALTER TABLE and CREATE INDEX): refused with ACE's 3211 while
-    /// another user has the table in use.</remarks>
-    private TableDefinition DesignTable(string name)
+    /// another user has the table in use. A Jet user that has added or removed a row of a system table then rewrites
+    /// MSysObjects' definition page (<see cref="PageChannel.RewriteCatalog"/>), as ACE's session does for every design
+    /// change but most of <c>ADD COLUMN</c>s (measured): that passes <paramref name="rewritesCatalog"/> false and rewrites
+    /// it only when it stores a property, which ACE's <c>ADD COLUMN … DEFAULT</c> matches and its <c>BIT</c> does not
+    /// (locking.md §4).</remarks>
+    private TableDefinition DesignTable(string name, bool rewritesCatalog = true)
     {
         TableDefinition table = _catalog.FindTable(name) ?? throw new InvalidOperationException("Cannot find table or constraint.");
         _channel.LockTable(table.DefinitionPage, table.Name, TableUse.Design);
+        if (rewritesCatalog) _channel.RewriteCatalog();
         return table;
     }
 
@@ -1916,7 +1921,7 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     public bool AddColumn(string tableName, ColumnSpec spec, string? defaultValue = null)
     {
         JetName.Validate(spec.Name, "column name");
-        TableDefinition table = DesignTable(tableName);
+        TableDefinition table = DesignTable(tableName, rewritesCatalog: false);
         // A taken column name included (verified vs ACE).
         _channel.RefuseIfReadOnly(ReadOnlyWrite.Design, table.Name);
         if (table.Columns.Any(c => string.Equals(c.Name, spec.Name, StringComparison.OrdinalIgnoreCase)))
@@ -2025,7 +2030,11 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
         WriteTdef(table.DefinitionPage, parts);
 
         if (lvMaps is { } placed) WriteLongValueMaps(placed);
-        if (props.Count > 0) SetColumnProperties(table.DefinitionPage, spec.Name, props);
+        if (props.Count > 0)
+        {
+            SetColumnProperties(table.DefinitionPage, spec.Name, props);
+            _channel.RewriteCatalog();   // ACE's ADD COLUMN storing a property rewrites it (DesignTable)
+        }
 
         _catalog.Invalidate();
         if (spec.IsAutoNumber) NumberExistingRows(tableName, spec);

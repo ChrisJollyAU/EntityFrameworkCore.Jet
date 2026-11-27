@@ -95,6 +95,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
         UpdateTdefCounters(format, tdef, values, generatedAutoNumbers, newKeys);
         if (updateIndexes)
             UpdateIndexes(values, new RowId(pageNumber, rowCount));
+        _channel.RowAddedOrRemoved(_table.IsSystem);
     }
 
     /// <summary>
@@ -462,6 +463,7 @@ internal sealed class RowInserter(PageChannel channel, TableDefinition table)
             WriteDefinitionCounters(tdef.AsSpan(0, format.PageSize));
         }
         finally { ArrayPool<byte>.Shared.Return(tdef); }
+        _channel.RowAddedOrRemoved(_table.IsSystem);
     }
 
     /// <summary>

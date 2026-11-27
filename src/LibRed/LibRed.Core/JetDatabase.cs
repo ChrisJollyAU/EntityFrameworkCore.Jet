@@ -817,7 +817,8 @@ public sealed class JetDatabase : IDisposable
 
     /// <summary>Closes the database. A writable handle first returns the pages it released to the global free
     /// map — or, with another user connected, puts them in the released-pages map — as ACE does only at close
-    /// (docs/format/page-05-usage-maps.md §9.1). A transaction still open is discarded, as it would be by the close
+    /// (docs/format/page-05-usage-maps.md §9.1), in one batch with MSysACEs' and MSysObjects' definition pages when it
+    /// has written a system table's rows as a Jet user (<see cref="PageChannel.RewriteCatalogAtClose"/>). A transaction still open is discarded, as it would be by the close
     /// anyway, so the pages it released stay unreleased.</summary>
     public void Dispose()
     {
@@ -835,7 +836,9 @@ public sealed class JetDatabase : IDisposable
             if (!_channel.IsReadOnly)
             {
                 _channel.RollbackTransaction();
-                _channel.Allocator.ReturnReleasedPages();
+                // With the catalog's definition pages a session that has written a system table's rows rewrites at
+                // close, ahead of page 1, as ACE's does (locking.md §4).
+                _channel.RewriteCatalogAtClose(_channel.Allocator.ReturnReleasedPages);
             }
         }
         catch (Exception e) when (e is InvalidDataException or NotSupportedException)

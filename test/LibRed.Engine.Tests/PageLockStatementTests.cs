@@ -409,6 +409,221 @@ public class PageLockStatementTests
         }
     }
 
+    // MSysObjects' definition page as ACE's session treats it (docs/format/locking.md §4, measured against ACE 16): a session
+    // that has added or removed no row of a system table never locks or writes it for a row of an ordinary table. Here the
+    // tables were made by an earlier connection; this one inserts, deletes and closes, and the page is not written — the
+    // byte the other user changed behind the cache is still there.
+    [Fact]
+    public void A_session_that_has_written_no_system_table_row_does_not_rewrite_the_catalog_definition_page()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using (JetDatabase earlier = JetDatabase.Open(copy.Path, readOnly: false))
+            CreateTwoRows(new QueryEngine(earlier), earlier);
+
+        JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        Assert.Equal(RowOne, ValueOf(engine, 1));
+        int objects = CatalogDefinition(database, "MSysObjects");
+        byte marked = MarkLastByte(copy.Path, objects);
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (3, 'three')"));
+        Assert.Equal(1, engine.ExecuteNonQuery("DELETE FROM T WHERE Id = 3"));
+        Assert.Equal(marked, LastByte(copy.Path, objects));
+        int user = database.Channel.UserNumber!.Value;
+        int slot = Slot(copy.Path, user);
+        database.Dispose();
+        Assert.Equal(marked, LastByte(copy.Path, objects));
+        Assert.Equal(slot, Slot(copy.Path, user));
+    }
+
+    // After the session's CREATE TABLE — committed, or rolled back — an INSERT and a DELETE going row by row lock MSysObjects'
+    // definition page and write it with their batch, its bytes as the file had them; an UPDATE in place, a DELETE with
+    // no WHERE of a table with no relationship or CHECK and an ADD COLUMN storing no property do not (measured).
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void After_a_CREATE_TABLE_rows_added_or_removed_rewrite_the_catalog_definition_page(bool rolledBack)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using (JetDatabase earlier = JetDatabase.Open(copy.Path, readOnly: false))
+            CreateTwoRows(new QueryEngine(earlier), earlier);
+
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        if (rolledBack) engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        engine.ExecuteNonQuery("CREATE TABLE S (Id INTEGER)");
+        if (rolledBack) engine.ExecuteNonQuery("ROLLBACK");
+        int objects = CatalogDefinition(database, "MSysObjects");
+        Assert.Equal(RowOne, ValueOf(engine, 1));
+
+        byte marked = MarkLastByte(copy.Path, objects);
+        Assert.Equal(1, engine.ExecuteNonQuery("UPDATE T SET A = 'BBBBBBBBBBBB' WHERE Id = 1"));
+        engine.ExecuteNonQuery("ALTER TABLE T ADD COLUMN B TEXT(10)");
+        Assert.Equal(marked, LastByte(copy.Path, objects));
+
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (3, 'three')"));
+        Assert.NotEqual(marked, LastByte(copy.Path, objects));
+
+        marked = MarkLastByte(copy.Path, objects);
+        Assert.Equal(1, engine.ExecuteNonQuery("DELETE FROM T WHERE Id = 3"));
+        Assert.NotEqual(marked, LastByte(copy.Path, objects));
+
+        // A design change other than that ADD COLUMN, and an UPDATE through a join, rewrite it too (measured).
+        marked = MarkLastByte(copy.Path, objects);
+        engine.ExecuteNonQuery("CREATE INDEX ixA ON T (A)");
+        Assert.NotEqual(marked, LastByte(copy.Path, objects));
+        marked = MarkLastByte(copy.Path, objects);
+        engine.ExecuteNonQuery("ALTER TABLE T ADD COLUMN D LONG DEFAULT 7");
+        Assert.NotEqual(marked, LastByte(copy.Path, objects));
+        engine.ExecuteNonQuery("CREATE TABLE J (Id INTEGER, V INTEGER)");
+        engine.ExecuteNonQuery("INSERT INTO J (Id, V) VALUES (1, 0)");
+        marked = MarkLastByte(copy.Path, objects);
+        Assert.Equal(1, engine.ExecuteNonQuery("UPDATE T INNER JOIN J ON T.Id = J.Id SET T.A = 'joined'"));
+        Assert.NotEqual(marked, LastByte(copy.Path, objects));
+
+        marked = MarkLastByte(copy.Path, objects);
+        Assert.Equal(2, engine.ExecuteNonQuery("DELETE FROM T"));
+        Assert.Equal(marked, LastByte(copy.Path, objects));
+        using JetLockFile other = OtherUserOf(copy.Path);
+        AssertNothingLocked(other, copy.Path);
+    }
+
+    // The lock is held for the statement: a row-by-row DELETE waiting on its second row (a chained memo another user is
+    // reading) holds MSysObjects' definition page meanwhile, taken for its first row; before the session's CREATE TABLE it
+    // holds none.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void A_row_by_row_DELETE_holds_the_catalog_definition_page_for_the_statement_once_switched_on(bool created)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        int first;
+        using (JetDatabase earlier = JetDatabase.Open(copy.Path, readOnly: false))
+            (first, _, _) = CreateMemos(new QueryEngine(earlier), copy.Path);
+
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        if (created) engine.ExecuteNonQuery("CREATE TABLE S (Id INTEGER)");
+        int objects = CatalogDefinition(database, "MSysObjects");
+        using JetLockFile other = OtherUserOf(copy.Path);
+        long reading = JetLockLayout.SharedByte(JetLockRegion.WriteRead, first, OtherUser);
+        Assert.True(other.TryLock(reading, 1));
+
+        int affected = -1;
+        Thread delete = OnOwnThread(() => affected = engine.ExecuteNonQuery("DELETE FROM M WHERE Id > 0"));
+        Thread.Sleep(600);
+        Assert.True(delete.IsAlive);
+        Assert.Equal(!created, ExclusiveIsFree(other, objects));
+        other.Unlock(reading, 1);
+        delete.Join();
+        Assert.Equal(2, affected);
+        AssertNothingLocked(other, copy.Path);
+    }
+
+    // Inside an explicit transaction the INSERT takes no lock on MSysObjects' definition page and writes nothing; its
+    // COMMIT locks it and writes it with the transaction's other pages, as ACE's does (measured).
+    [Fact]
+    public void Inside_a_transaction_the_catalog_definition_page_is_locked_and_written_at_COMMIT()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        CreateTwoRows(engine, database);
+        int objects = CatalogDefinition(database, "MSysObjects");
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        byte marked = MarkLastByte(copy.Path, objects);
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (3, 'three')"));
+        Assert.True(ExclusiveIsFree(other, objects));
+        Assert.Equal(marked, LastByte(copy.Path, objects));
+        engine.ExecuteNonQuery("COMMIT");
+        Assert.NotEqual(marked, LastByte(copy.Path, objects));
+        AssertNothingLocked(other, copy.Path);
+
+        // A transaction rolled back writes it not at all.
+        marked = MarkLastByte(copy.Path, objects);
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (4, 'four')"));
+        engine.ExecuteNonQuery("ROLLBACK");
+        Assert.Equal(marked, LastByte(copy.Path, objects));
+    }
+
+    // Held by another user, the page is left out and the statement goes on at once, with no error — ACE's INSERT, COMMIT
+    // and close do the same beside another user's byte on it (measured: none waited, none failed).
+    [Fact]
+    public void The_catalog_definition_page_another_user_holds_is_left_out_without_a_wait()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        using JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        CreateTwoRows(engine, database);
+        int objects = CatalogDefinition(database, "MSysObjects");
+        using JetLockFile other = OtherUserOf(copy.Path);
+
+        byte marked = MarkLastByte(copy.Path, objects);
+        HoldExclusive(other, objects);
+        var wait = Stopwatch.StartNew();
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (3, 'three')"));
+        engine.ExecuteNonQuery("BEGIN TRANSACTION");
+        Assert.Equal(1, engine.ExecuteNonQuery("INSERT INTO T (Id, A) VALUES (4, 'four')"));
+        engine.ExecuteNonQuery("COMMIT");
+        wait.Stop();
+        Assert.InRange(wait.ElapsedMilliseconds, 0, 1000);
+        Assert.Equal(marked, LastByte(copy.Path, objects));
+        ReleaseExclusive(other, objects);
+        Assert.Equal(4, Convert.ToInt32(engine.ExecuteQuery("SELECT COUNT(*) FROM T").Rows.Single()[0], System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    // At close the session locks MSysACEs' and then MSysObjects' definition pages and writes them, its slot moved, as
+    // ACE's close of such a session does (measured: pages 3, 2 and 1 locked in that order, the slot moved with nothing
+    // else to write).
+    [Fact]
+    public void A_switched_on_sessions_close_rewrites_the_catalog_definition_pages()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), WindowsOnly);
+        using var copy = TemporaryDatabase.CopyOf(Northwind, "libred-stmtlock-");
+        JetDatabase database = JetDatabase.Open(copy.Path, readOnly: false);
+        var engine = new QueryEngine(database);
+        engine.ExecuteNonQuery("CREATE TABLE S (Id INTEGER)");
+        int objects = CatalogDefinition(database, "MSysObjects"), aces = CatalogDefinition(database, "MSysACEs");
+        int user = database.Channel.UserNumber!.Value;
+        int slot = Slot(copy.Path, user);
+        byte objectsMarked = MarkLastByte(copy.Path, objects), acesMarked = MarkLastByte(copy.Path, aces);
+
+        database.Dispose();
+        Assert.NotEqual(objectsMarked, LastByte(copy.Path, objects));
+        Assert.NotEqual(acesMarked, LastByte(copy.Path, aces));
+        Assert.Equal(slot + 1, Slot(copy.Path, user));
+    }
+
+    private static int CatalogDefinition(JetDatabase database, string table) => database.Catalog.FindTable(table)!.DefinitionPage;
+
+    // Changes the last byte of a page in the file behind the page cache, as another user's write that moved no slot
+    // would, and returns it: a write of the page from LibRed's image puts it back.
+    private static byte MarkLastByte(string path, int page)
+    {
+        int at = (page + 1) * PageSize(path) - 1;
+        byte marked;
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+        stream.Seek(at, SeekOrigin.Begin);
+        marked = (byte)(stream.ReadByte() ^ 0x5A);
+        stream.Seek(at, SeekOrigin.Begin);
+        stream.WriteByte(marked);
+        return marked;
+    }
+
+    private static byte LastByte(string path, int page)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        stream.Seek((page + 1) * (long)PageSize(path) - 1, SeekOrigin.Begin);
+        return (byte)stream.ReadByte();
+    }
+
     // A memo stored on a single page and one chained over three; text no compression shortens, so the chain's first page
     // is the one holding its first character.
     private static readonly string OnePage = new('丁', 500);

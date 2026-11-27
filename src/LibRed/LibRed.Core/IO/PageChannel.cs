@@ -83,6 +83,10 @@ public sealed class PageChannel : IDisposable
     private readonly Dictionary<int, byte[]> _publishedEarly = [];
     // Usage-map records the open transaction retired, whose bytes ACE takes back only when it commits.
     private readonly List<(int Page, int Row)> _reclaimAtCommit = [];
+    // The catalog definition pages the open transaction writes whether or not it changes them (RewriteCatalog), and
+    // whether its COMMIT is to lock and write MSysObjects' — a statement inside an explicit transaction asked for it.
+    private readonly HashSet<int> _rewrites = [];
+    private bool _rewriteAtCommit;
 
     // What the open transaction's writes depend on being TRUE of OTHER rows — a foreign key's parent row
     // existing, say. Reading a row writes no page, so such a dependency is invisible to the page-conflict
@@ -133,6 +137,17 @@ public sealed class PageChannel : IDisposable
 
     // The file offset of this channel's commit slot, or null when it writes none (see the constructor).
     private readonly int? _commitSlot;
+
+    // Whether this Jet user has added or removed a row of a system table — created or dropped a table, a stored query,
+    // a make-table's table, a relationship or a CHECK — in a statement or transaction that committed or was rolled back
+    // alike. ACE's session does the same: from then until it closes, a statement adding or removing rows, writing two
+    // tables or changing a table's design locks MSysObjects' definition page and writes it with its batch though no byte
+    // of it changes, and its close locks and writes MSysACEs' and MSysObjects' (measured, locking.md §4). Never set for a
+    // channel that is no Jet user.
+    private bool _catalogWritten;
+
+    // The definition pages of MSysObjects and MSysACEs, from page 0's pointers, once read (CatalogPages).
+    private (int Objects, int Aces)? _catalogPages;
 
     /// <summary>The allocator owning this channel's page allocation and release paths.</summary>
     internal PageAllocator Allocator { get; }
@@ -346,6 +361,84 @@ public sealed class PageChannel : IDisposable
         return true;
     }
 
+    /// <summary>Notes that the open transaction has added or removed a row of a table — of a system table when
+    /// <paramref name="systemTable"/> — one row at a time, as an <c>INSERT</c>, a <c>DELETE</c> going row by row and the
+    /// catalog writes of a design change do. A system table's row makes this Jet user rewrite MSysObjects' definition
+    /// page from then on, as ACE's session does once it has added or removed one; from then on any row's does
+    /// (<see cref="RewriteCatalog"/>). A channel that is no Jet user, or a read-only one, does nothing.</summary>
+    internal void RowAddedOrRemoved(bool systemTable)
+    {
+        if (_user is null || _readOnly) return;
+        _catalogWritten |= systemTable;
+        RewriteCatalog();
+    }
+
+    /// <summary>Once this Jet user has added or removed a row of a system table (<see cref="RowAddedOrRemoved"/>): locks
+    /// MSysObjects' definition page for the open statement and writes it with the statement's batch whether or not the
+    /// statement changes it, as ACE's session does from then on for every statement that adds or removes a row, writes
+    /// two tables or changes a table's design (measured, locking.md §4). Inside an explicit transaction it is locked
+    /// and written at <c>COMMIT</c> instead, with the transaction's other pages, as ACE's is; a rollback writes it not
+    /// at all. Taken once, without the retries of a page write: held by another user, it is left out of the batch and
+    /// the statement goes on, as ACE's does (measured). Nothing before the system table's row, nor outside a
+    /// transaction.</summary>
+    internal void RewriteCatalog()
+    {
+        if (!_catalogWritten || _active is null) return;
+        if (InUserTransaction) _rewriteAtCommit = true;
+        else Rewrite(CatalogPages().Objects);
+    }
+
+    /// <summary>Locks <paramref name="page"/>, a catalog definition page, for the open transaction and has its batch write
+    /// it as the file has it, changed or not — unless another user holds it (<see cref="RewriteCatalog"/>).</summary>
+    private void Rewrite(int page)
+    {
+        if (!LockForUpdate(page, refuseStale: false, JetLockPurpose.CatalogRewrite) || _commitBaselines[page] is not { } committed)
+            return;
+        if (!_overlay.ContainsKey(page)) _overlay[page] = (byte[])committed.Clone();
+        _rewrites.Add(page);
+    }
+
+    /// <summary>Runs <paramref name="close"/> — the close's own writes — in a transaction that first locks MSysACEs' and
+    /// then MSysObjects' definition pages and writes both as the file has them, when this Jet user has added or removed a
+    /// row of a system table: ACE's close of such a session locks pages 3, 2 and 1 in that order and writes them in one
+    /// batch, its slot moved though nothing else changed (measured, locking.md §4). Otherwise it only runs
+    /// <paramref name="close"/>. A page another user holds is left out, as at a statement.</summary>
+    internal void RewriteCatalogAtClose(Action close)
+    {
+        if (!_catalogWritten)
+        {
+            close();
+            return;
+        }
+        WriteExclusive(() =>
+        {
+            BeginTransaction();
+            try
+            {
+                (int objects, int aces) = CatalogPages();
+                Rewrite(aces);
+                Rewrite(objects);
+                close();   // joins this transaction (PageAllocator.ReturnReleasedPages)
+                CommitTransaction(flush: false);
+            }
+            catch
+            {
+                RollbackTransaction();
+                throw;
+            }
+            return true;
+        });
+    }
+
+    /// <summary>MSysObjects' and MSysACEs' definition pages, from page 0's pointers to them (page-00 §2).</summary>
+    private (int Objects, int Aces) CatalogPages()
+    {
+        if (_catalogPages is { } known) return known;
+        var page0 = new DatabaseDefinitionPage();
+        page0.Read(ReadPage(0), Format);
+        return (_catalogPages = (page0.CatalogRootPage, page0.AcesRootPage)).Value;
+    }
+
     /// <summary>Rejects a page number that cannot exist in this file. Page numbers come out of the file
     /// itself, so a bad one is corruption — without this the read seeks past the end and throws
     /// <c>EndOfStreamException</c>, which callers handling a damaged file do not catch. Called only on the
@@ -503,7 +596,7 @@ public sealed class PageChannel : IDisposable
             if (ReadCommittedPageOrNull(pageNumber) is { } committed && SamePage(pageNumber, committed, copy)) return;
             // Taken before the write replaces it: what a failed slot write puts the page back to. The page's lock
             // goes after the batch's closing slot write, as ACE's does (locking.md §6).
-            byte[]? baseline = LockForWrite(pageNumber);
+            byte[]? baseline = LockForWrite(pageNumber, out _);
             try { PublishBatch([pageNumber], _ => copy, _ => baseline, _ => parsed); }
             finally { if (baseline is not null) _user?.Unlock(JetLockRegion.WriteRead, pageNumber, exclusive: true); }
         });
@@ -526,11 +619,18 @@ public sealed class PageChannel : IDisposable
     /// of that (<see cref="Rebased"/>), as ACE's COMMIT writes its counting onto the page as the file has it then
     /// (locking.md §5). The counters the transaction keeps through a rollback move with it: each is still its change
     /// on top of what is committed.</remarks>
-    internal void LockForUpdate(int pageNumber, bool refuseStale = true)
+    /// <param name="purpose">What the page is locked for: <see cref="JetLockPurpose.PageWrite"/>, or
+    /// <see cref="JetLockPurpose.CatalogRewrite"/> for a catalog definition page written as it is
+    /// (<see cref="RewriteCatalog"/>).</param>
+    /// <returns>False when <paramref name="purpose"/> is <see cref="JetLockPurpose.CatalogRewrite"/> and another user
+    /// holds the page: nothing is locked, and the page is not the transaction's. True otherwise.</returns>
+    internal bool LockForUpdate(int pageNumber, bool refuseStale = true, JetLockPurpose purpose = JetLockPurpose.PageWrite)
     {
-        if (_active is null || _readOnly || _commitBaselines.ContainsKey(pageNumber)) return;
-        byte[]? committed = _commitBaselines[pageNumber] = LockForWrite(pageNumber, refuseStale);
-        if (!_publishedEarly.Remove(pageNumber, out byte[]? published) || committed is null) return;
+        if (_active is null || _readOnly || _commitBaselines.ContainsKey(pageNumber)) return true;
+        byte[]? committed = LockForWrite(pageNumber, out bool refused, refuseStale, purpose);
+        if (refused) return false;
+        _commitBaselines[pageNumber] = committed;
+        if (!_publishedEarly.Remove(pageNumber, out byte[]? published) || committed is null) return true;
 
         if (_overlay.TryGetValue(pageNumber, out byte[]? image))
         {
@@ -549,6 +649,7 @@ public sealed class PageChannel : IDisposable
             (int? baseline, int value) = _pendingCounters[(page, offset)];
             _pendingCounters[(page, offset)] = (baseline + moved, unchecked(value + moved));
         }
+        return true;
     }
 
     /// <summary>How far another user has moved the counter at <paramref name="offset"/> from the image this transaction
@@ -590,8 +691,12 @@ public sealed class PageChannel : IDisposable
     /// than the file, so the write cannot go ahead on it. The cache is dropped first; the caller rolls back what it
     /// did and runs the statement again. Not with <paramref name="refuseStale"/> false (see
     /// <see cref="LockForUpdate"/>).</exception>
-    private byte[]? LockForWrite(int pageNumber, bool refuseStale = true)
+    /// <remarks>The lock is taken for <c>purpose</c>; one whose refusal ends in no lock rather than an exception
+    /// (<see cref="JetUserRegistration.Lock"/>) sets <c>refused</c>, holds nothing and returns null.</remarks>
+    private byte[]? LockForWrite(int pageNumber, out bool refused, bool refuseStale = true,
+        JetLockPurpose purpose = JetLockPurpose.PageWrite)
     {
+        refused = false;
         if (_user is not { } user || pageNumber >= (int)(_cache.FileLength / PageSize))
             return ReadCommittedPageOrNull(pageNumber);
 
@@ -601,7 +706,13 @@ public sealed class PageChannel : IDisposable
         // the file holds; a commit that left the page as it was is no reason to stop. Another channel of this process
         // publishes through the shared cache, and not while this statement holds the publish gate, so what the
         // statement read of the page is what that channel left.
-        if (user.Lock(JetLockRegion.WriteRead, pageNumber, exclusive: true, JetLockPurpose.PageWrite) == true
+        bool? took = user.Lock(JetLockRegion.WriteRead, pageNumber, exclusive: true, purpose);
+        if (took is null)
+        {
+            refused = true;
+            return null;
+        }
+        if (took.Value
             && (!_cache.RefreshAtLock(pageNumber, out byte[]? before)
                 || before is not null && !SamePage(pageNumber, before, ReadCommittedPageOrNull(pageNumber)))
             && refuseStale)
@@ -728,6 +839,18 @@ public sealed class PageChannel : IDisposable
         {
             UnlockHeld(owner, from);
             throw new StaleReadException(JetUserRegistration.TableInUseMessage(name));
+        }
+
+        // A statement writing a table with another in use — an UPDATE through a join, or cascading to another table —
+        // rewrites the catalog's definition page as one adding a row does (RewriteCatalog): the tables of the locks its
+        // frame has taken, its reads among them.
+        if (_catalogWritten && use != TableUse.Design && !callers && _active is { } transaction)
+        {
+            var frame = _transactionLocks.Skip(transaction.TableLockCountAt(new Savepoint(transaction.Depth - 1)))
+                .Where(l => l.Region is JetLockRegion.TableRead or JetLockRegion.TableWrite).ToList();
+            if (frame.Exists(l => l.Region == JetLockRegion.TableWrite)
+                && frame.Concat(_statementLocks.Where(l => l.Region == JetLockRegion.TableRead)).Select(l => l.Page).Distinct().Count() >= 2)
+                RewriteCatalog();
         }
 
         // A design change reads the definition page and lays it out afresh, which can move the counters on it (a dropped
@@ -921,8 +1044,9 @@ public sealed class PageChannel : IDisposable
         Func<int, object?> parsedOf)
     {
         // A page left as it was committed is not written: a batch that changes no page is no batch, and leaves the slot
-        // alone — as a failed statement's rollback that undoes everything leaves ACE's (locking.md §6).
-        pages = [.. pages.Where(p => baselineOf(p) is not { } baseline || !SamePage(p, baseline, imageOf(p)))];
+        // alone — as a failed statement's rollback that undoes everything leaves ACE's (locking.md §6). But for a catalog
+        // definition page the transaction rewrites, which is written as it is, as ACE's is (RewriteCatalog).
+        pages = [.. pages.Where(p => baselineOf(p) is not { } baseline || !SamePage(p, baseline, imageOf(p)) || _rewrites.Contains(p))];
         // Appended pages first, each group ascending so the file grows monotonically. A page is appended when it had no
         // committed image to derive from: the file has since been measured again, and another user may have grown it
         // past a page this batch appends.
@@ -1318,6 +1442,9 @@ public sealed class PageChannel : IDisposable
     /// if the check or the publication fails, for the caller to roll back.</summary>
     private void PublishTransaction()
     {
+        // An explicit transaction's statements that would have rewritten the catalog's definition page have it locked and
+        // written now, at COMMIT, as ACE's are (RewriteCatalog).
+        if (_rewriteAtCommit) Rewrite(CatalogPages().Objects);
         int[] pages = _overlay.Keys.ToArray();
         Array.Sort(pages);
         _cache.PublishLocked(() =>
@@ -1499,6 +1626,8 @@ public sealed class PageChannel : IDisposable
     private void ClearTransactionState()
     {
         _reclaimAtCommit.Clear();
+        _rewrites.Clear();
+        _rewriteAtCommit = false;
         _overlay.Clear();
         _overlayParsed.Clear();
         _commitBaselines.Clear();

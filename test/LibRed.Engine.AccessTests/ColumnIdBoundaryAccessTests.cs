@@ -102,7 +102,18 @@ public class ColumnIdBoundaryAccessTests : TempDatabaseTest
             string alter = $"ALTER TABLE ColumnBoundary ALTER COLUMN C0 {type}";
             if (accepted) engine.ExecuteNonQuery(alter);
             else Assert.Throws<NotSupportedException>(() => engine.ExecuteNonQuery(alter));
-            Assert.Equal(before, Snapshot(path));
+            byte[] after = Snapshot(path);
+            // An accepted identity ALTER changes no byte. In this session, which created the table, ACE's still writes
+            // MSysObjects' definition page unchanged, its slot one higher (measured: slot 724 -> 725, no page differing;
+            // in a fresh session neither moves) — docs/format/locking.md §4. LibRed's does the same.
+            if (accepted && database.Channel.UserNumber is { } user)
+            {
+                int slot = 0xE00 + 2 * user;
+                Assert.Equal(before[slot] | before[slot + 1] << 8, (after[slot] | after[slot + 1] << 8) - 1);
+                after[slot] = before[slot];
+                after[slot + 1] = before[slot + 1];
+            }
+            Assert.Equal(before, after);
         }
         using var connection = AceTestDatabase.Open(path);
         using var read = connection.CreateCommand();

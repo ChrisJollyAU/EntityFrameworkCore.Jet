@@ -53,16 +53,24 @@ so the two exclude each other correctly; LibRed's form has a moment between the 
 ACE did not take the two-call form once in this run. With LibRed's 172 first halves taken out, LibRed takes
 437 shared table-read bytes to ACE's 596. LibRed has since been changed to take the single call.
 
-**ACE asks whether it is alone, and LibRed does not.** Fifty-two times after connecting, ACE locks and
+**ACE asks whether it is alone, and LibRed did not.** Fifty-two times after connecting, ACE locks and
 releases bytes 2..255 of group 0 of the user region — every user's byte but its own. Each one sits beside a
 lock of page 1, some as a single probe before the page-1 lock and some in bursts of five or six while page 1
-and newly reserved pages are held. LibRed makes this probe only as part of connecting. What ACE does
-differently when the probe is granted is not known.
+and newly reserved pages are held. LibRed made this probe only as part of connecting. It is ACE asking whether
+any other user is connected before it gives pages back: granted, freed pages go to the global free map, refused,
+they are held and parked in the released-pages map at close ([page-05 §9.1](../format/page-05-usage-maps.md),
+[locking.md §3](../format/locking.md)). LibRed now makes the same probe at the same points — a statement giving
+back a chained long value, a rollback giving back pages, a close with pages to give back.
 
 **ACE takes more page locks, in a different order.** ACE takes about 11% more exclusive page locks over the
-run. Which statements account for them is not known. Within a `CREATE TABLE` the order differs too: ACE locks
-catalog pages 17, 7 and 8 before the table locks on page 18 and pages 41, 10, 2 and 3 after them; LibRed takes
-the table locks first and then pages 2, 17, 7, 8, 3, 41, 10.
+run: 2870 to LibRed's 2542. Almost all of the 328 are of page 2, MSysObjects' definition page — 294 of them.
+The run's first statement is a `CREATE TABLE`, and an ACE session that has added or removed a row of a system
+table locks page 2 in every later statement that adds or removes rows, writes two tables or changes a table's
+design, and writes it unchanged with the statement's batch: 428 of the 479 statements here, where LibRed then
+locked page 2 only in the 145 that changed its bytes ([locking.md §4](../format/locking.md)). LibRed now does
+the same. Within a `CREATE TABLE` the order differs too: ACE locks catalog pages 17, 7 and 8 before the table
+locks on page 18 and pages 41, 10, 2 and 3 after them; LibRed takes the table locks first and then pages 2, 17,
+7, 8, 3, 41, 10.
 
 **The files part company.** In this continuous run the two files do not end the same: ACE's has 2016 pages
 and LibRed's 2009, with 281 pages identical. Page numbers in the two traces therefore drift apart during the
@@ -70,9 +78,10 @@ run, and a page lock cannot be matched to its counterpart by number alone past t
 
 ## What this comparison cannot say
 
-It counts over the whole run. The test puts no marker in the trace between statements, so the two sequences
-cannot be lined up statement by statement, and the three count differences above — page locks, shared table
-reads, the deny-write pair — are not attributed to statements.
+It counts over the whole run. The test put no marker in the trace between statements when this run was made,
+so the table above does not line the two sequences up statement by statement. The test now writes one around each
+statement, and `jetlocktrace --compare` aligns the two engines' locks by them; the page-2 locks above were
+attributed that way. The shared table reads and the deny-write pair are not attributed.
 
 Timing is left out on purpose: LibRed lets a statement's locks go as it returns and ACE about half a second
 later or at its next statement ([locking.md](../format/locking.md)), so the unlocks fall in different places
