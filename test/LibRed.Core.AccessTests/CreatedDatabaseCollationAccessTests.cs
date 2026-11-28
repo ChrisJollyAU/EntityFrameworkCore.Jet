@@ -64,6 +64,12 @@ public class CreatedDatabaseCollationAccessTests(ITestOutputHelper output)
         new(CollatingOrder.Japanese, 0, 0), // JapaneseLegacy
         new(CollatingOrder.Japanese, 1, 4), // JapaneseRadicalStrokeCount
         new(CollatingOrder.Korean, 0, 0), // Korean
+        // The neutral CJK LANGIDs, which DAO creates and ACE indexes in: three alias a CJK table, two are General.
+        new(CollatingOrder.ChineseSimplifiedNeutral, 0, 0),
+        new(CollatingOrder.JapaneseNeutral, 0, 0),
+        new(CollatingOrder.KoreanNeutral, 0, 0),
+        new(CollatingOrder.ChineseNeutral, 0, 0),
+        new(CollatingOrder.ChineseTraditionalNeutral, 0, 0),
     ];
 
     private static readonly string[] SmokeSamples =

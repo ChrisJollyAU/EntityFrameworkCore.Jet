@@ -216,10 +216,14 @@ internal static class JetLocaleTailoring
     /// <summary>The tailoring for a collation, or null when it has none — either because it is General
     /// itself, or because LibRed cannot express it. An <b>empty</b> tailoring is meaningful and not the same
     /// as null: it records that the order was measured to be indistinguishable from General.</summary>
-    public static LocaleTailoring? For(Collation collation) =>
-        Tailorings.GetValueOrDefault(collation)
-        ?? JetCjkSortOrders.For(collation)
-        ?? (collation is { Version: 0, SortId: 0 } && GeneralV0.Contains(collation.Order) ? None : null);
+    public static LocaleTailoring? For(Collation collation)
+    {
+        if (collation is { Version: 0, SortId: 0 } && AliasOf.TryGetValue(collation.Order, out CollatingOrder order))
+            collation = new Collation(order, 0);
+        return Tailorings.GetValueOrDefault(collation)
+            ?? JetCjkSortOrders.For(collation)
+            ?? (collation is { Version: 0, SortId: 0 } && GeneralV0.Contains(collation.Order) ? None : null);
+    }
 
     /// <summary>Shared by every order in <see cref="GeneralV0"/>: no entries, no reversal, nothing to do.
     /// Distinct from a null tailoring, which means "refused".</summary>
@@ -319,7 +323,7 @@ internal static class JetLocaleTailoring
         // -----------------------------------------------------------------------------------------------
         // The neutral and sublanguage LANGIDs, from the widened sweep. Same measurement, same controls;
         // these are the orders Access's dropdown never offers but DAO will write. The 42 that do NOT belong
-        // here are in Tailorings above — every one of them an alias for an order already implemented.
+        // here are in Aliases below — every one of them an alias for an order already implemented.
         // -----------------------------------------------------------------------------------------------
 
         // arabic
@@ -424,24 +428,20 @@ internal static class JetLocaleTailoring
         CollatingOrder.LowerSorbianNeutral, CollatingOrder.LuleSamiNeutral,
         CollatingOrder.UzbekLatinNeutral, CollatingOrder.InuktitutLatinNeutral,
         CollatingOrder.FulaLatinNeutral,
+
+        // cjk
+        CollatingOrder.ChineseNeutral, CollatingOrder.ChineseTraditionalNeutral,
     ];
 
-    private static readonly Dictionary<Collation, LocaleTailoring> Tailorings = BuildTailorings();
+    private static readonly Dictionary<Collation, LocaleTailoring> Tailorings = Measured;
+
+    /// <summary>Each alias's order, which <see cref="For"/> looks up in its place.</summary>
+    private static readonly FrozenDictionary<CollatingOrder, CollatingOrder> AliasOf =
+        Aliases.ToFrozenDictionary(a => a.Alias, a => a.Order);
 
     /// <summary>
-    /// The measured tailorings, plus every LCID that carries one of them under a different number.
-    /// </summary>
-    private static Dictionary<Collation, LocaleTailoring> BuildTailorings()
-    {
-        Dictionary<Collation, LocaleTailoring> tailorings = Measured;
-        foreach ((CollatingOrder alias, CollatingOrder order) in Aliases)
-            tailorings[new Collation(alias, 0)] = tailorings[new Collation(order, 0)];
-        return tailorings;
-    }
-
-    /// <summary>
-    /// One order under several LCIDs — an alias carries the tailoring of the order it names, <b>by
-    /// reference</b>, so the two can never drift apart and no weight is written down twice.
+    /// One order under several LCIDs — an alias is looked up as the order it names, whether that order's weights
+    /// are a tailoring here or a CJK table, so the two can never drift apart and no weight is written down twice.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -463,7 +463,7 @@ internal static class JetLocaleTailoring
     /// </para>
     /// </remarks>
     /// <remarks>A property, not a static field: static initialisers run in declaration order, and
-    /// <see cref="Tailorings"/> is declared first, so a field here would still be null when it builds.
+    /// <see cref="AliasOf"/> is declared first, so a field here would still be null when it builds.
     /// </remarks>
     private static (CollatingOrder Alias, CollatingOrder Order)[] Aliases =>
     [
@@ -523,6 +523,12 @@ internal static class JetLocaleTailoring
         (CollatingOrder.SpanishHonduras, CollatingOrder.SpanishModern),
         (CollatingOrder.SpanishNicaragua, CollatingOrder.SpanishModern),
         (CollatingOrder.SpanishPuertoRico, CollatingOrder.SpanishModern),
+
+        // The neutral CJK LANGIDs whose order is a CJK table. zh-Hans takes Chinese TRADITIONAL's stroke order,
+        // not Simplified's pronunciation order; zh and zh-Hant take no table at all and are in GeneralV0.
+        (CollatingOrder.ChineseSimplifiedNeutral, CollatingOrder.ChineseTraditional),
+        (CollatingOrder.JapaneseNeutral, CollatingOrder.Japanese),
+        (CollatingOrder.KoreanNeutral, CollatingOrder.Korean),
     ];
 
     private static Dictionary<Collation, LocaleTailoring> Measured => new()
@@ -531,8 +537,8 @@ internal static class JetLocaleTailoring
         [new Collation(CollatingOrder.Georgian, 0, SortId: 1)] = Table([]),
         [new Collation(CollatingOrder.Indic, Collation.GeneralVersion)] = Table([]),
 
-        // The orders that are one order under several LCIDs are NOT listed here — see Aliases below, which
-        // points each at the entry built here rather than rebuilding its weights.
+        // The orders that are one order under several LCIDs are NOT listed here — see Aliases above, which
+        // For looks up as the order each names rather than rebuilding its weights.
 
         // --- Thai: the five leading vowels contract with the consonant they precede. Built as a rule. ---
         [new Collation(CollatingOrder.Thai, 0)] = Thai(),

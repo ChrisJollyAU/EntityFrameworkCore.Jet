@@ -110,8 +110,8 @@ public sealed class JetDatabase : IDisposable
     /// in it. Defaults to General-Legacy (LCID 1033, version 0), which is what the engine writes; pass
     /// <see cref="Collation.General"/> for the order Access 2010+ offers as "General".
     /// <para>
-    /// Any order <see cref="Collation.IsIndexKeyEncodable"/> accepts can be created — 417 configurations
-    /// (405 at version 0, and the twelve orders that have a version-1 table), the
+    /// Any order <see cref="Collation.IsIndexKeyEncodable"/> accepts can be created — 422 configurations
+    /// (410 at version 0, and the twelve orders that have a version-1 table), the
     /// two General orders, every locale in <c>JetLocaleTailoring</c> and the CJK orders, each verified by having ACE build an
     /// index in the created file and agree on the keys (<c>CreatedDatabaseCollationAccessTests</c>). It
     /// cannot be otherwise: the system-table indexes are built here, in this order, so creating a database

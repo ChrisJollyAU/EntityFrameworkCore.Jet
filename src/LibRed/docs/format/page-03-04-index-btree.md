@@ -807,8 +807,8 @@ to `n` bytes, as page-01 stores it. LibRed builds the row and every key from one
 
   **One order can wear several LCIDs.** Further orders need no tailoring of their own, because their keys are
   byte-identical, verified against ACE, to one already listed. They live in `JetLocaleTailoring.Aliases`,
-  which points each at the entry already built **by reference**, so the weights exist once and two LCIDs
-  cannot drift apart:
+  and an alias is looked up as the order it names — a tailoring or a CJK table alike — so the weights exist
+  once and two LCIDs cannot drift apart:
 
   | is | LCIDs |
   |---|---|
@@ -818,6 +818,8 @@ to `n` bytes, as page-01 stores it. LibRed builds the row and every key from one
   | Spanish **Traditional** (1034) | 2058 Mexico, neutral `es` (10) |
   | Spanish **Modern** (3082) | seventeen Latin-American locales, 4106 Guatemala through 20490 Puerto Rico |
   | its own language's order | the neutral `cs` `hr` `hu` `is` `pl` `ro` `sk` `sl` `et` `lv` `lt` `vi` `th` `tr` `uk` `mk` |
+  | Chinese Traditional stroke count (1028) | neutral `zh-Hans` (4) — Traditional's order, not Simplified's |
+  | Japanese (1041), Korean (1042) | neutral `ja` (17), neutral `ko` (18) |
 
   > **Mexico is the warning against reasoning from names.** It takes Spanish *Traditional* while seventeen of
   > its siblings take *Modern* and three take neither; Modern is 14 departures away from it, not a near tie.
@@ -854,7 +856,9 @@ to `n` bytes, as page-01 stores it. LibRed builds the row and every key from one
   > **Neutral LANGIDs are real orders.** `0x0001`–`0x0091`, and the script-neutral `0x64xx`–`0x7Cxx` forms,
   > are all accepted and stored verbatim as collating orders `1`–`145` and `25626`–`31847` — numbers no
   > locale picker will ever show. Each resolves to *its language's own order*, not to General: `cs` (5) is
-  > Czech, `hr` (26) is Croatian, `th` (30) is Thai. The opposite of what "neutral" suggests.
+  > Czech, `hr` (26) is Croatian, `th` (30) is Thai. The opposite of what "neutral" suggests. Chinese is the
+  > exception both ways: `zh-Hans` (4) takes Chinese *Traditional*'s stroke order, and `zh` (30724) and `zh-Hant`
+  > (31748) take no ideograph order at all — General v0.
   >
   > **Sublanguages do not inherit.** **Spanish splits three ways**: `es` and es-MX take Traditional, seventeen Latin-American locales take Modern, and
   > es-US, es-419 and es-CU take no tailoring at all. **French splits two ways**: fr-CH, fr-LU and fr-MC take

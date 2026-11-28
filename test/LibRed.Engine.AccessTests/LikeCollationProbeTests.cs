@@ -58,12 +58,12 @@ public class LikeCollationProbeTests(ITestOutputHelper output)
     }
 
     /// <summary>Every candidate pair asked of ACE in every collation LibRed can create, one query per database.
-    /// Opt-in via LIBRED_SCREEN_LIKE=1: it creates 417 databases and takes the better part of an hour.</summary>
+    /// Opt-in via LIBRED_SCREEN_LIKE=1: it creates 422 databases and takes the better part of an hour.</summary>
     [Fact]
     public void Screen_every_collation()
     {
         Assert.SkipUnless(Environment.GetEnvironmentVariable("LIBRED_SCREEN_LIKE") == "1",
-            "set LIBRED_SCREEN_LIKE=1 — this asks ACE 26,000 pairs in each of 417 collations");
+            "set LIBRED_SCREEN_LIKE=1 — this asks ACE 26,000 pairs in each of 422 collations");
 
         var pairs = LikeCandidates.Pairs;
         List<Collation> collations = [.. Enum.GetValues<CollatingOrder>().Distinct()
