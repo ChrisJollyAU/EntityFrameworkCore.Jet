@@ -337,6 +337,47 @@ public class WholeFileParityProbeTest(ITestOutputHelper output)
         finally { TemporaryDatabase.Delete(attachment); }
     }
 
+    /// <summary>A calculated Memo whose result is a long value, recomputed by an UPDATE of its input: the old result's
+    /// pages, a chained one's and a packed page it empties, are freed where ACE frees them — and, beside it, a plain Memo
+    /// written the same values — then a row inserted after them.</summary>
+    [Theory]
+    [InlineData(8, true)]
+    // Open: the insert after the frees. ACE does not take the page the calculated result emptied (64) for the new row's
+    // long values and extends the file instead; LibRed takes it. With a plain Memo the two agree.
+    [InlineData(9, true, Explicit = true)]
+    [InlineData(8, false)]
+    [InlineData(9, false)]
+    public void A_recomputed_calculated_memo_frees_its_old_result_where_ACE_does(int count, bool calculatedColumn) =>
+        AssertSameFile(CreateThroughDao(Ace12, database =>
+        {
+            object calculated = Invoke(database, "CreateTableDef", "Calc")!;
+            object fields = Get(calculated, "Fields");
+            Invoke(fields, "Append", Invoke(calculated, "CreateField", "Id", DaoLong)!);
+            Invoke(fields, "Append", Invoke(calculated, "CreateField", "Txt", DaoMemo)!);
+            object field = Invoke(calculated, "CreateField", "Twice", DaoMemo)!;
+            if (calculatedColumn) Set(field, "Expression", "[Txt] & [Txt]");
+            Invoke(fields, "Append", field);
+            Invoke(Get(database, "TableDefs"), "Append", calculated);
+        }),
+        new (int Id, string Txt, string Twice, bool Insert)[]
+        {
+            (1, "String(3000, 'a')", "String(6000, 'a')", true),
+            (2, "String(400, 'b')", "String(800, 'b')", true),
+            (3, "String(500, 'c')", "String(1000, 'c')", true),
+            (4, "String(2500, 'd')", "String(5000, 'd')", true),
+            (1, "String(2800, 'e')", "String(5600, 'e')", false),
+            (2, "'short'", "'shortshort'", false),
+            (3, "'short'", "'shortshort'", false),
+            (4, "'short'", "'shortshort'", false),
+            (5, "String(2000, 'f')", "String(4000, 'f')", true),
+        }[..count].Select(s => (s.Insert, calculatedColumn) switch
+        {
+            (true, true) => $"INSERT INTO Calc (Id, Txt) VALUES ({s.Id}, {s.Txt})",
+            (true, false) => $"INSERT INTO Calc (Id, Txt, Twice) VALUES ({s.Id}, {s.Txt}, {s.Twice})",
+            (false, true) => $"UPDATE Calc SET Txt = {s.Txt} WHERE Id = {s.Id}",
+            (false, false) => $"UPDATE Calc SET Txt = {s.Txt}, Twice = {s.Twice} WHERE Id = {s.Id}",
+        }).ToArray(), dao: true);
+
     /// <summary>A file grown past the 32,000 pages ACE's inline global free map covers, so the map turns to bitmap
     /// pages and a second bitmap's range is reached, then rows deleted, updated, indexed and added again.</summary>
     [Theory]

@@ -83,9 +83,7 @@ location, and four mdbtools-TODO entries (`0x1C`, v1 collation, the index header
 
 ## 1. Affects what LibRed writes — probe first
 
-| Claim (doc:line) | What is open | How to settle |
-|---|---|---|
-| page-05 (close-time release) | Whether ACE frees a calculated Memo's old result pages when an `UPDATE` recomputes it, a packed page it empties included, at once as LibRed does. | Whole-file byte diff: a calculated Memo column over 3816 bytes, one `UPDATE` of its input through ACE and through LibRed on copies. |
+Nothing open.
 
 ## 2. Engine/catalog surface — ACE answers in one statement each
 

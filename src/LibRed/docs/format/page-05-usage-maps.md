@@ -417,11 +417,14 @@ This is allocation policy, not an on-disk requirement; see `docs/design/page-all
 > nothing. The two kinds ACE frees sooner (above) go through `Free`: a chained long value's pages, at once
 > — an `UPDATE`'s after the new value is written, so, as in ACE, the `UPDATE` that frees those pages does not
 > reuse them (the whole file then matches ACE's) — and a rewritten definition's old continuation pages, when
-> the statement's transaction commits.
+> the statement's transaction commits. So do the pages of a calculated Memo's old result when an `UPDATE`
+> recomputes it, a packed page it empties included: the whole file matches ACE's.
 >
 > **Where LibRed differs from ACE.** Held pages live in the handle, not in the released-pages map — which is
 > ACE's own behaviour (above), the difference being only that each LibRed handle releases its own at its own
-> close, while other handles stay open.
+> close, while other handles stay open. And a page a recomputed calculated Memo's result emptied is not taken
+> by a later `INSERT`'s long values in the same session in ACE, which extends the file instead; LibRed takes
+> it. With a plain Memo written the same values the two agree.
 >
 > **Global-map growth.** The inline growth rule in §9 applies, but ACE leaves **4 bytes free in the
 > holder page** before promoting the global map to reference form. With a 69-byte companion row,
