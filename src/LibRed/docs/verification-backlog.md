@@ -83,7 +83,9 @@ location, and four mdbtools-TODO entries (`0x1C`, v1 collation, the index header
 
 ## 1. Affects what LibRed writes — probe first
 
-Nothing open.
+| Claim (doc:line) | What is open | How to settle |
+|---|---|---|
+| system-catalog (owner matching) | Which pairs of LvProp blocks naming one column make ACE refuse every insert ("Invalid argument."), where others merge. LibRed merges every pair. | Respell owners in an ACE-built file and vary each block's properties one at a time: full width against case, and DefaultValue, Required and AllowZeroLength in either block. |
 
 ## 2. Engine/catalog surface — ACE answers in one statement each
 

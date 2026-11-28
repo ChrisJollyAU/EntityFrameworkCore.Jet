@@ -24,7 +24,8 @@ public class DropColumnLvPropAccessTests
         byte[] blob = mo.Rows().Where(r => r[idIdx] is not null && Convert.ToInt32(r[idIdx]) == tid)
             .Select(r => r[lvIdx] as byte[] ?? []).FirstOrDefault() ?? [];
         var properties = PropertyBlob.Read(blob);
-        return (PropertyBlob.ReadColumnDefaults(properties), PropertyBlob.ReadColumnsWith(properties, PropertyBlob.RequiredProperty, true));
+        return (PropertyBlob.ReadColumnDefaults(properties, db.Catalog.Names),
+            PropertyBlob.ReadColumnsWith(properties, PropertyBlob.RequiredProperty, true, db.Catalog.Names));
     }
 
     [Fact]

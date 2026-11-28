@@ -101,6 +101,11 @@ internal static class TextFold
     /// itself.</summary>
     public static char LowerChar(char c) => Table.Lower[c];
 
+    /// <summary>Whether two names are one once ACE's case table folds both: how ACE matches a function's name, and
+    /// a property block's owner to its column for the calculated <c>Expression</c> lookup and the DDL.</summary>
+    public static bool SameName(string a, string b) =>
+        string.Equals(Fold(a, Letters.None, out _), Fold(b, Letters.None, out _), StringComparison.Ordinal);
+
     /// <summary>Text in lower case as LCase gives it, by ACE's case table; <see cref="Fold"/> with
     /// <see cref="Letters.None"/> is its upper case, as UCase gives it.</summary>
     public static string Lower(string text) => Mapped(text, Table.Lower);

@@ -1,4 +1,5 @@
 using EntityFrameworkCore.Jet.Data;
+using LibRed.Storage;
 using LibRed.Storage.Types;
 using System.Buffers.Binary;
 using System.Text;
@@ -106,10 +107,12 @@ public static class PropertyBlob
         public ushort? Block { get; init; }
 
         /// <summary>Whether this is a property of the column named <paramref name="owner"/>, or of the table for
-        /// <c>""</c> — and not of an index that shares the name. <paramref name="owner"/> is the column's name as its
-        /// table stores it, which is the owner's exactly (every block of every fixture file) — not a name as typed.</summary>
+        /// <c>""</c> — and not of an index that shares the name. The owner is matched to the column's stored name by
+        /// ACE's case table, as ACE finds a calculated column's <c>Expression</c> and as its DDL finds the properties
+        /// it changes (verified: an owner in another case is found, one in long s or full width is not); a row
+        /// write's properties are found by the database's collation instead (<see cref="ReadColumnDefaults"/>).</summary>
         public bool IsOwnedBy(string owner) =>
-            BlockType == (owner.Length == 0 ? TableBlock : ColumnBlock) && string.Equals(Owner, owner, StringComparison.Ordinal);
+            BlockType == (owner.Length == 0 ? TableBlock : ColumnBlock) && TextFold.SameName(Owner, owner);
 
         internal ushort BlockType => Block ?? (Owner.Length == 0 ? TableBlock : ColumnBlock);
 
@@ -298,7 +301,7 @@ public static class PropertyBlob
         foreach (ParsedBlock block in parsed.Blocks)
         {
             // Only the column's own block: an index's can carry the same name.
-            bool drop = block.Type == ColumnBlock && string.Equals(ReadOwner(block.Body), owner, StringComparison.Ordinal);
+            bool drop = block.Type == ColumnBlock && TextFold.SameName(ReadOwner(block.Body), owner);
             if (!drop) result.AddRange(block.Raw);
         }
         return [.. result];
@@ -321,7 +324,7 @@ public static class PropertyBlob
         result.AddRange(blob[..SignatureSize]);
         foreach (ParsedBlock block in parsed.Blocks)
         {
-            if (block.Type != ColumnBlock || !string.Equals(ReadOwner(block.Body), oldOwner, StringComparison.Ordinal))
+            if (block.Type != ColumnBlock || !TextFold.SameName(ReadOwner(block.Body), oldOwner))
             {
                 result.AddRange(block.Raw);
                 continue;
@@ -351,11 +354,13 @@ public static class PropertyBlob
         return Parse(blob).Properties;
     }
 
-    /// <summary>Extracts each column's <c>DefaultValue</c> (column name → value text). An entry without the DDL flag
-    /// is not a default: ACE ignores it (verified).</summary>
-    public static IReadOnlyDictionary<string, string> ReadColumnDefaults(IReadOnlyList<Property> properties)
+    /// <summary>Extracts each column's <c>DefaultValue</c> (column name → value text), its owners matched as
+    /// <see cref="RowWriteOwners"/> matches them, the later of two for one column winning (verified vs ACE for two
+    /// blocks differing in case). An entry without the DDL flag is not a default: ACE ignores it (verified).</summary>
+    public static IReadOnlyDictionary<string, string> ReadColumnDefaults(
+        IReadOnlyList<Property> properties, IEqualityComparer<string> names)
     {
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        var result = new Dictionary<string, string>(new RowWriteOwners(names));
         foreach (Property p in properties)
             if (p.BlockType == ColumnBlock && p.Name == DefaultValueProperty && (p.Flags & DdlFlag) != 0)
                 result[p.Owner] = p.Value;
@@ -366,15 +371,31 @@ public static class PropertyBlob
     /// <c>Required</c> set (NOT NULL — Access omits the property for a nullable column), or <c>AllowZeroLength</c>
     /// cleared (DAO writes it on every text field it creates, 0 unless asked; a column SQL DDL creates carries none and
     /// takes a zero-length string — measured). An entry without the DDL flag is not enforced: ACE ignores it (verified
-    /// for <c>Required</c>).</summary>
-    public static IReadOnlySet<string> ReadColumnsWith(IReadOnlyList<Property> properties, string name, bool value)
+    /// for <c>Required</c>). Owners are matched as <see cref="RowWriteOwners"/> matches them, and a column is in the
+    /// set when any block naming it says so (verified vs ACE: a block's Required applies beside another block's
+    /// DefaultValue).</summary>
+    public static IReadOnlySet<string> ReadColumnsWith(
+        IReadOnlyList<Property> properties, string name, bool value, IEqualityComparer<string> names)
     {
-        var result = new HashSet<string>(StringComparer.Ordinal);
+        var result = new HashSet<string>(new RowWriteOwners(names));
         string text = value ? "1" : "0";
         foreach (Property p in properties)
             if (p.BlockType == ColumnBlock && p.Name == name && p.Value == text && (p.Flags & DdlFlag) != 0)
                 result.Add(p.Owner);
         return result;
+    }
+
+    /// <summary>An owner and a column's name as a row write matches them, finding the column's <c>DefaultValue</c>,
+    /// <c>Required</c> and <c>AllowZeroLength</c>: equal in the database's collation (<paramref name="names"/>), and
+    /// ending in as many spaces, which the collation does not weigh (verified vs ACE: case, width, kana type and
+    /// <c>ß</c> for <c>ss</c> fold; a long s, a soft hyphen and a space more or fewer at the end do not).</summary>
+    private sealed class RowWriteOwners(IEqualityComparer<string> names) : IEqualityComparer<string>
+    {
+        public bool Equals(string? x, string? y) =>
+            x is null || y is null ? x is null && y is null
+                : JetTextComparer.TrailingSpaces(x) == JetTextComparer.TrailingSpaces(y) && names.Equals(x, y);
+
+        public int GetHashCode(string text) => names.GetHashCode(text);
     }
 
     /// <summary>Extracts the <c>ValidationRule</c>/<c>ValidationText</c> designer properties for the given

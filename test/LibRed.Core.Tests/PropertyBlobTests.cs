@@ -32,7 +32,7 @@ public class PropertyBlobTests
     [Fact]
     public void ReadColumnDefaults_parses_the_ace_blob()
     {
-        var defaults = PropertyBlob.ReadColumnDefaults(PropertyBlob.Read(AceBlob));
+        var defaults = PropertyBlob.ReadColumnDefaults(PropertyBlob.Read(AceBlob), StringComparer.Ordinal);
         Assert.Equal("42", defaults["Age"]);
         Assert.Equal("'hi'", defaults["Nm"]);
         Assert.False(defaults.ContainsKey("Id"));
@@ -80,7 +80,7 @@ public class PropertyBlobTests
             new("A", PropertyBlob.DefaultValueProperty, "0"),
             new("B", PropertyBlob.DefaultValueProperty, "-1"),
         ]);
-        var defaults = PropertyBlob.ReadColumnDefaults(PropertyBlob.Read(blob));
+        var defaults = PropertyBlob.ReadColumnDefaults(PropertyBlob.Read(blob), StringComparer.Ordinal);
         Assert.Equal("0", defaults["A"]);
         Assert.Equal("-1", defaults["B"]);
     }
@@ -98,7 +98,7 @@ public class PropertyBlobTests
             PropertyBlob.Bool("B", PropertyBlob.RequiredProperty, true),
         ]);
         IReadOnlyList<PropertyBlob.Property> read = PropertyBlob.Read(blob);
-        Assert.Equal(["B"], PropertyBlob.ReadColumnDefaults(read).Keys);
-        Assert.Equal(["B"], PropertyBlob.ReadColumnsWith(read, PropertyBlob.RequiredProperty, true));
+        Assert.Equal(["B"], PropertyBlob.ReadColumnDefaults(read, StringComparer.Ordinal).Keys);
+        Assert.Equal(["B"], PropertyBlob.ReadColumnsWith(read, PropertyBlob.RequiredProperty, true, StringComparer.Ordinal));
     }
 }

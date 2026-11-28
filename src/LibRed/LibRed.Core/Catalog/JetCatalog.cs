@@ -783,9 +783,9 @@ public sealed class JetCatalog
         if (!reused && propertyBlob is { Length: > 0 })
         {
             IReadOnlyList<PropertyBlob.Property> properties = PropertyBlob.Read(propertyBlob.Span);
-            var defaults = PropertyBlob.ReadColumnDefaults(properties);
-            var required = PropertyBlob.ReadColumnsWith(properties, PropertyBlob.RequiredProperty, true);
-            var noZeroLength = PropertyBlob.ReadColumnsWith(properties, PropertyBlob.AllowZeroLengthProperty, false);
+            var defaults = PropertyBlob.ReadColumnDefaults(properties, Names);
+            var required = PropertyBlob.ReadColumnsWith(properties, PropertyBlob.RequiredProperty, true, Names);
+            var noZeroLength = PropertyBlob.ReadColumnsWith(properties, PropertyBlob.AllowZeroLengthProperty, false, Names);
             foreach (ColumnDef column in definition.Columns)
             {
                 if (defaults.TryGetValue(column.Name, out string? value))

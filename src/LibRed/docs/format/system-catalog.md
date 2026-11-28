@@ -184,7 +184,23 @@
   > table-owned map (empty owner name), and `0x02` for an **index**-owned map, under the index's own name, not its
   > column's (verified). Access usually names an index for its column, which is why the type, not the name, must decide
   > the owner. LibRed keeps each
-  > block's type as read, so a column's properties are only ever those in a `0x01` block of its name. A `DefaultValue` (column property) is the expression's **source
+  > block's type as read, so a column's properties are only ever those in a `0x01` block of its name.
+  >
+  > **An owner need not be spelt as the table stores the column's name, and ACE matches it two ways** (verified,
+  > owners respelt in an ACE-built General v0 file). A row write finds the column's `DefaultValue`, `Required` and
+  > `AllowZeroLength` by the **database's collation, with trailing spaces counted**: an owner differing in case,
+  > width, kana type, or `ß` for `ss` is applied; one differing by a long s for an `s`, a soft hyphen, or a space
+  > more or fewer at the end is not (a column's name can end in spaces). Where two blocks name one column ACE
+  > merges them — one's `Required` applies beside the other's `DefaultValue`, and of two `DefaultValue`s the later
+  > wins — but some pairs it refuses at every insert (*"Invalid argument."*): a second block in full width
+  > holding a `DefaultValue`, and a second block in another case beside a first holding `Required` and
+  > `AllowZeroLength` as well as a `DefaultValue`. Which pairs is not settled; LibRed merges them all. A
+  > calculated column's `Expression`, and `ALTER COLUMN … DEFAULT`, `DROP COLUMN` and a rename, find the block by
+  > **ACE's case table** (the one `UCase` uses): case folds, width and a long s do not. A table whose calculated
+  > column's `Expression` is not found so does not load (*"Property not found."*). The DDL keeps the owner's
+  > spelling — a new `DefaultValue` goes into the block found, a rename writes the new name — and where it finds no
+  > block, writes one of its own under the column's name, beside the one it did not match, which a full-width
+  > owner then makes one of the refused pairs. ACE writes an owner as the column's name is stored. A `DefaultValue` (column property) is the expression's **source
   > text** (e.g. `42`, `'hi'`) — its evaluation semantics (what an expression may contain, the
   > DDL-parser-vs-expression-service split) are in [page-02c-default-values.md](page-02c-default-values.md);
   > table-level `CHECK` constraints are a single **table** property named `CheckConstraints` whose value is a

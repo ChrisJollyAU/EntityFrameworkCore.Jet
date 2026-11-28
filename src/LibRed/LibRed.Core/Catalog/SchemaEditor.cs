@@ -2210,17 +2210,17 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// ALTER TABLE … ALTER COLUMN … DEFAULT. Reads all properties, drops any existing DefaultValue for the
     /// column, adds the new one, and rewrites the blob (preserving every other property).</summary>
     public void SetColumnDefault(string tableName, string columnName, string defaultSql)
-        => MutateLvPropForColumn(tableName, columnName, (props, column) =>
+        => MutateLvPropForColumn(tableName, columnName, (props, column, owner) =>
         {
             props.RemoveAll(p => p.IsOwnedBy(column.Name) && p.Name == PropertyBlob.DefaultValueProperty);
-            props.Add(PropertyBlob.DefaultValue(column.Name, column.Type, defaultSql));
+            props.Add(PropertyBlob.DefaultValue(owner, column.Type, defaultSql));
         });
 
     /// <summary>Removes a column's <c>DefaultValue</c> from the table's <c>MSysObjects.LvProp</c> blob —
     /// ALTER TABLE … ALTER COLUMN … DROP DEFAULT. Drops only that property, so the column's type and its
     /// <c>Required</c> (NOT NULL) property survive — ACE-verified. A no-op if the column had no default.</summary>
     public void DropColumnDefault(string tableName, string columnName)
-        => MutateLvPropForColumn(tableName, columnName, (props, column) =>
+        => MutateLvPropForColumn(tableName, columnName, (props, column, _) =>
             props.RemoveAll(p => p.IsOwnedBy(column.Name) && p.Name == PropertyBlob.DefaultValueProperty));
 
     /// <summary>Sets or clears a column's <c>Required</c> (NOT NULL) property in the table's
@@ -2230,23 +2230,26 @@ internal sealed class SchemaEditor(PageChannel channel, JetCatalog catalog, Coll
     /// <see cref="ColumnDef.IsNullable"/>). ACE-verified: ACE writes the same property for
     /// <c>ALTER COLUMN … NOT NULL</c> and enforces it.</summary>
     public void SetColumnRequired(string tableName, string columnName, bool required)
-        => MutateLvPropForColumn(tableName, columnName, (props, column) =>
+        => MutateLvPropForColumn(tableName, columnName, (props, column, owner) =>
         {
             props.RemoveAll(p => p.IsOwnedBy(column.Name) && p.Name == PropertyBlob.RequiredProperty);
-            if (required) props.Add(PropertyBlob.Bool(column.Name, PropertyBlob.RequiredProperty, true));
+            if (required) props.Add(PropertyBlob.Bool(owner, PropertyBlob.RequiredProperty, true));
         });
 
     /// <summary>Reads the table's <c>MSysObjects.LvProp</c> property blob, applies <paramref name="mutate"/>,
-    /// and rewrites it — the shared read-modify-write behind ALTER COLUMN … SET/DROP DEFAULT.</summary>
+    /// and rewrites it — the shared read-modify-write behind ALTER COLUMN … SET/DROP DEFAULT. The mutation is
+    /// handed the owner the column's block already carries, else the column's name: ACE writes a changed property
+    /// into the block it found, under that block's owner (verified: an owner in another case keeps its case).</summary>
     private void MutateLvPropForColumn(string tableName, string columnName,
-        Action<List<PropertyBlob.Property>, ColumnDef> mutate)
+        Action<List<PropertyBlob.Property>, ColumnDef, string> mutate)
     {
         (TableDefinition table, ColumnDef column) = CheckAlterColumn(tableName, columnName);
         int tdefPage = table.DefinitionPage;
 
         byte[] blob = ReadObjectProperties(tdefPage) ?? [];
         var props = PropertyBlob.Read(blob).ToList();
-        mutate(props, column);
+        string owner = props.Where(p => p.IsOwnedBy(column.Name)).Select(p => p.Owner).FirstOrDefault() ?? column.Name;
+        mutate(props, column, owner);
         WriteObjectProperties(tdefPage, PropertyBlob.Write(props, blob));
     }
 

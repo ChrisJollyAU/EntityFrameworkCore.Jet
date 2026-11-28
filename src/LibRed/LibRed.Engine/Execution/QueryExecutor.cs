@@ -2980,8 +2980,7 @@ public sealed class QueryExecutor : IScalarSubqueryRunner
         {
             (ColumnReference x, ColumnReference y) => EvalScope.Locate(columns, x, _database.Catalog.Names, throwIfAmbiguous: false) is var slot
                 && slot >= 0 && slot == EvalScope.Locate(columns, y, _database.Catalog.Names, throwIfAmbiguous: false),
-            (FunctionCall x, FunctionCall y) => string.Equals(TextFold.Fold(x.Name, TextFold.Letters.None, out _),
-                    TextFold.Fold(y.Name, TextFold.Letters.None, out _), StringComparison.Ordinal)
+            (FunctionCall x, FunctionCall y) => TextFold.SameName(x.Name, y.Name)
                 && x.Distinct == y.Distinct && (x.WithinGroup ?? []).SequenceEqual(y.WithinGroup ?? [])
                 && (x.Filter is null) == (y.Filter is null),
             (BinaryExpression x, BinaryExpression y) => x.Operator == y.Operator,

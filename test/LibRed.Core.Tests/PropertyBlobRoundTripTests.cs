@@ -284,8 +284,8 @@ public class PropertyBlobRoundTripTests
         Assert.Equal(blob, PropertyBlob.Write([.. read], blob.AsSpan(0, 4)));
 
         // The index's Required is not the column's.
-        Assert.Empty(PropertyBlob.ReadColumnsWith(read, PropertyBlob.RequiredProperty, true));
-        Assert.Equal("'X'", PropertyBlob.ReadColumnDefaults(read)["CustomerID"]);
+        Assert.Empty(PropertyBlob.ReadColumnsWith(read, PropertyBlob.RequiredProperty, true, StringComparer.Ordinal));
+        Assert.Equal("'X'", PropertyBlob.ReadColumnDefaults(read, StringComparer.Ordinal)["CustomerID"]);
 
         // Clearing the column's Required, as ALTER COLUMN … NULL does, leaves the index's alone.
         var edited = read.ToList();

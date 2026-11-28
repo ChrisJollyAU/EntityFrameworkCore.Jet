@@ -521,9 +521,7 @@ internal abstract partial class ExpressionFunctions<TExpression>
         if (binary)
             return Math.Sign(string.CompareOrdinal(left, right));
         int order = Text.Compare(left, right);
-        return order != 0 ? order : Math.Sign(TrailingSpaces(left) - TrailingSpaces(right));
-
-        static int TrailingSpaces(string s) => s.Length - s.TrimEnd(' ').Length;
+        return order != 0 ? order : Math.Sign(JetTextComparer.TrailingSpaces(left) - JetTextComparer.TrailingSpaces(right));
     }
 
     /// <summary>Access <c>InStrRev(string1, string2, [start=-1], [compare])</c>: the 1-based position of the last

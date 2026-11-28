@@ -103,6 +103,10 @@ public sealed class JetTextComparer : IEqualityComparer<string>
             || (_keys is null ? Compare(x, y) == 0 : Kept(x).Key.AsSpan().SequenceEqual(Kept(y).Key));
     }
 
+    /// <summary>The spaces <paramref name="text"/> ends in, which its key does not weigh: where ACE tells two texts
+    /// apart by them — StrComp's tie, a property owner — it counts them on top of the comparison.</summary>
+    internal static int TrailingSpaces(string text) => text.Length - text.AsSpan().TrimEnd(' ').Length;
+
     /// <summary>A hash that agrees with <see cref="Equals(string?, string?)"/>: taken over the key.</summary>
     public int GetHashCode(string text)
     {
